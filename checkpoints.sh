@@ -57,8 +57,12 @@ fi
 # Convert silence_latent.pt -> .bin (raw float32, [T, 64])
 SL="$DIR/acestep-v15-turbo/silence_latent"
 if [ -f "$SL.pt" ] && [ ! -f "$SL.bin" ]; then
-    echo "[Convert] silence_latent.pt -> .bin"
     SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ ! -x "$SCRIPT_DIR/pt2bin" ]; then
+        echo "[Build] pt2bin"
+        g++ -O2 -std=c++17 -o "$SCRIPT_DIR/pt2bin" "$SCRIPT_DIR/pt2bin.cpp"
+    fi
+    echo "[Convert] silence_latent.pt -> .bin"
     "$SCRIPT_DIR/pt2bin" "$SL.pt" "$SL.bin"
 fi
 

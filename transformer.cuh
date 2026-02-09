@@ -178,7 +178,7 @@ static void enc_alloc_buffers(EncModel *m) {
     alloc(&m->buf_tmp,      (size_t)S * H * sizeof(bf16));
     alloc(&m->buf_scores_bf16, (size_t)Nh * S * S * sizeof(bf16));
 
-    fprintf(stderr, "[Enc] Buffers allocated for S=%d, H=%d, %d layers\n", S, H, c.n_layers);
+    fprintf(stderr, "[TransformerBlock] Buffers allocated for S=%d, H=%d, %d layers\n", S, H, c.n_layers);
 }
 
 // Load encoder layer weights from safetensors
@@ -306,7 +306,7 @@ static void enc_load_layers(EncModel *m, SafeTensors &st,
         snprintf(prefix, sizeof(prefix), "%s.%d", base_prefix, i);
         enc_load_layer(m->layers[i], st, prefix, i);
     }
-    fprintf(stderr, "[Enc] Loaded %d layers from %s.*\n", m->cfg.n_layers, base_prefix);
+    fprintf(stderr, "[TransformerBlock] Loaded %d layers from %s.*\n", m->cfg.n_layers, base_prefix);
 }
 
 // Embed + project input: [S, in_dim] -> buf_hidden [S, H]
