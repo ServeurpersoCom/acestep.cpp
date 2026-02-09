@@ -1,0 +1,11 @@
+# Binaries
+pipeline
+ace-qwen3
+test_bpe
+pt2bin
+
+# Generated
+*.wav
+
+# Data
+checkpoints/
