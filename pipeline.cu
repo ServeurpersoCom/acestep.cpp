@@ -438,9 +438,12 @@ static std::string json_get_string(const std::string &json, const char *key) {
     if (pos == std::string::npos) return "";
     pos = json.find(':', pos + needle.size());
     if (pos == std::string::npos) return "";
-    pos = json.find('"', pos + 1);
-    if (pos == std::string::npos) return "";
     pos++;
+    // Skip whitespace after colon
+    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
+    // Must start with quote to be a string value
+    if (pos >= json.size() || json[pos] != '"') return "";
+    pos++; // skip opening quote
     std::string result;
     while (pos < json.size() && json[pos] != '"') {
         if (json[pos] == '\\' && pos + 1 < json.size()) {
