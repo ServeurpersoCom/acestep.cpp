@@ -440,6 +440,12 @@ static int sample_top_p(float *logits, int vocab_size, float temperature, float 
 }
 
 // Generate tokens autoregressively
+// Special token IDs (Qwen3 vocab)
+#define TOKEN_IM_START  151644
+#define TOKEN_IM_END    151645
+#define TOKEN_THINK     151667
+#define TOKEN_THINK_END 151668
+
 // Audio code tokens: <|audio_code_0|> = 151669, <|audio_code_65534|> = 217203
 #define AUDIO_CODE_BASE  151669
 #define AUDIO_CODE_COUNT 65535
@@ -457,10 +463,8 @@ static void generate(QwenModel *m, const std::vector<int> &prompt_tokens,
     int total_tokens = 0;
     int audio_code_count = 0;
     bool use_cfg = cfg_scale > 1.0f && uncond_tokens != nullptr;
-    // After </think> (151668), only allow audio codes + EOS
+    // After </think> (TOKEN_THINK_END), only allow audio codes + EOS
     bool codes_phase = cot_injected;
-    const int THINK_END = 151668;
-    const int EOS_TOKEN = 151645;
 
     fprintf(stderr, "[Prefill] Cond: %zu tokens", prompt_tokens.size());
     if (use_cfg)
@@ -524,19 +528,19 @@ static void generate(QwenModel *m, const std::vector<int> &prompt_tokens,
         // Constrained decoding: after </think>, only audio codes + EOS
         if (codes_phase) {
             for (int v = 0; v < AUDIO_CODE_BASE; v++)
-                if (v != EOS_TOKEN) sample_logits[v] = -1e9f;
+                if (v != TOKEN_IM_END) sample_logits[v] = -1e9f;
         }
 
         int next_token = sample_top_p(sample_logits, m->cfg.vocab_size, temperature, top_p);
 
         // EOS: count + break before any display or forward
-        if (next_token == EOS_TOKEN) {
+        if (next_token == TOKEN_IM_END) {
             total_tokens++;
             break;
         }
 
         // Detect </think> -> switch to codes phase
-        if (next_token == THINK_END && !codes_phase) {
+        if (next_token == TOKEN_THINK_END && !codes_phase) {
             codes_phase = true;
         }
 
@@ -592,33 +596,12 @@ struct AcePrompt {
     std::string caption;
     std::string lyrics;
     float duration;
-    int seed;
     // CoT metadata (optional, from prompt.json)
     int bpm;                    // 0 = not set
     std::string keyscale;       // e.g. "F# minor"
     std::string timesignature;  // e.g. "4"
     std::string vocal_language; // e.g. "fr"
 };
-
-// Read a JSON value (quoted string or unquoted number/bool) as string
-static std::string json_value(const char *json, const char *key) {
-    char needle[256];
-    snprintf(needle, sizeof(needle), "\"%s\"", key);
-    const char *p = strstr(json, needle);
-    if (!p) return "";
-    p += strlen(needle);
-    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
-    if (*p == '"') {
-        // Quoted string, delegate to json_string
-        return "";  // caller should use json_string instead
-    }
-    // Unquoted value (number, bool, null)
-    std::string result;
-    while (*p && *p != ',' && *p != '}' && *p != ' ' && *p != '\n' && *p != '\r') {
-        result += *p++;
-    }
-    return result;
-}
 
 static std::string json_string(const char *json, const char *key) {
     char needle[256];
@@ -646,6 +629,25 @@ static std::string json_string(const char *json, const char *key) {
     return result;
 }
 
+// Read a JSON value: try quoted string first, then unquoted number/bool
+static std::string json_get(const char *json, const char *key) {
+    std::string s = json_string(json, key);
+    if (!s.empty()) return s;
+    // Try unquoted value (number, bool, null)
+    char needle[256];
+    snprintf(needle, sizeof(needle), "\"%s\"", key);
+    const char *p = strstr(json, needle);
+    if (!p) return "";
+    p += strlen(needle);
+    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
+    if (*p == '"') return "";  // quoted but empty, already handled above
+    std::string result;
+    while (*p && *p != ',' && *p != '}' && *p != ' ' && *p != '\n' && *p != '\r') {
+        result += *p++;
+    }
+    return result;
+}
+
 static bool load_ace_prompt(const char *path, AcePrompt *p) {
     FILE *f = fopen(path, "r");
     if (!f) { fprintf(stderr, "ERROR: cannot open %s\n", path); return false; }
@@ -658,12 +660,11 @@ static bool load_ace_prompt(const char *path, AcePrompt *p) {
     const char *j = buf.c_str();
     p->caption = json_string(j, "caption");
     p->lyrics = json_string(j, "lyrics");
-    p->duration = (float)atof(json_string(j, "duration").c_str());
+    std::string dur_str = json_get(j, "duration");
+    p->duration = dur_str.empty() ? 120.0f : (float)atof(dur_str.c_str());
     if (p->duration <= 0) p->duration = 120.0f;
-    std::string seed_str = json_string(j, "seed");
-    p->seed = seed_str.empty() ? 42 : atoi(seed_str.c_str());
     // CoT metadata (optional)
-    std::string bpm_str = json_value(j, "bpm");
+    std::string bpm_str = json_get(j, "bpm");
     p->bpm = bpm_str.empty() ? 0 : atoi(bpm_str.c_str());
     p->keyscale = json_string(j, "keyscale");
     p->timesignature = json_string(j, "timesignature");
@@ -681,17 +682,17 @@ static std::vector<int> build_lm_prompt(BPETokenizer &bpe, const AcePrompt &prom
         ids.insert(ids.end(), t.begin(), t.end());
     };
     // System turn
-    ids.push_back(151644);  // <|im_start|>
+    ids.push_back(TOKEN_IM_START);
     append_bpe("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
-    ids.push_back(151645);  // <|im_end|>
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
     // User turn
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("user\n# Caption\n" + prompt.caption + "\n\n# Lyric\n" + prompt.lyrics + "\n");
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
     // Assistant turn (generation starts here)
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("assistant\n");
     return ids;
 }
@@ -705,12 +706,12 @@ static std::vector<int> build_lm_prompt_uncond(BPETokenizer &bpe, const AcePromp
         ids.insert(ids.end(), t.begin(), t.end());
     };
     // System turn (identical)
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
     // User turn: caption replaced or removed
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     bool has_neg = negative_prompt && strlen(negative_prompt) > 0
                    && strcmp(negative_prompt, "NO USER INPUT") != 0;
     if (has_neg) {
@@ -720,72 +721,66 @@ static std::vector<int> build_lm_prompt_uncond(BPETokenizer &bpe, const AcePromp
         // Default: remove caption, keep lyrics only (matches Python CoT-phase behavior)
         append_bpe("user\n# Lyric\n" + prompt.lyrics + "\n");
     }
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
     // Assistant turn
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("assistant\n");
     return ids;
 }
 
-// Check if field is in comma-separated list or "all"
-static bool cot_has(const char *fields, const char *name) {
-    if (!strcmp(fields, "all")) return true;
-    const char *p = strstr(fields, name);
-    if (!p) return false;
-    int len = strlen(name);
-    // Check boundaries: must be at start/after comma, and end at end/before comma
-    if (p != fields && *(p - 1) != ',') return false;
-    char after = *(p + len);
-    return after == '\0' || after == ',';
+// Build CoT YAML content from user metadata (matching Python yaml.dump(sort_keys=True))
+// Returns ONLY the YAML lines. The <think>/</think> special tokens are handled by the caller.
+// Only emits the 4 metadata fields the LLM was trained on: bpm, duration, keyscale, timesignature
+// caption and language are NEVER in the CoT. They reach the LLM via user turn and DiT via text prompts.
+static std::string build_cot_yaml(const AcePrompt &prompt) {
+    std::string yaml;
+    if (prompt.bpm > 0)
+        yaml += "bpm: " + std::to_string(prompt.bpm) + "\n";
+    if (prompt.duration > 0)
+        yaml += "duration: " + std::to_string((int)prompt.duration) + "\n";
+    if (!prompt.keyscale.empty())
+        yaml += "keyscale: " + prompt.keyscale + "\n";
+    if (!prompt.timesignature.empty())
+        yaml += "timesignature: " + prompt.timesignature + "\n";
+    return yaml;
 }
 
-// Build CoT YAML text from metadata (sorted alphabetically, matching Python yaml.dump)
-// fields: comma-separated list of fields to include, or "all"
-static std::string build_cot_text(const AcePrompt &prompt, const char *fields) {
-    std::string cot = "<think>\n";
-    if (cot_has(fields, "bpm") && prompt.bpm > 0)
-        cot += "bpm: " + std::to_string(prompt.bpm) + "\n";
-    if (cot_has(fields, "caption") && !prompt.caption.empty())
-        cot += "caption: " + prompt.caption + "\n";
-    if (cot_has(fields, "duration") && prompt.duration > 0)
-        cot += "duration: " + std::to_string((int)prompt.duration) + "\n";
-    if (cot_has(fields, "keyscale") && !prompt.keyscale.empty())
-        cot += "keyscale: " + prompt.keyscale + "\n";
-    if (cot_has(fields, "language") && !prompt.vocal_language.empty())
-        cot += "language: " + prompt.vocal_language + "\n";
-    if (cot_has(fields, "timesignature") && !prompt.timesignature.empty())
-        cot += "timesignature: " + prompt.timesignature + "\n";
-    cot += "</think>\n";
-    return cot;
-}
-
+// Special token IDs (Qwen3 vocab)
 // Build prompt with pre-built CoT injected in assistant turn (Phase 2 mode)
-// The LM will continue generating audio codes after </think>
+// Token sequence matches Python apply_chat_template exactly:
+//   <|im_start|> "assistant\n" <think> "\n" {yaml} </think> "\n\n" <|im_end|> "\n"
 static std::vector<int> build_lm_prompt_with_cot(BPETokenizer &bpe, const AcePrompt &prompt,
-                                                  const std::string &cot_text) {
+                                                  const std::string &cot_yaml) {
     std::vector<int> ids;
     auto append_bpe = [&](const std::string &text) {
         auto t = bpe_encode(&bpe, text, false);
         ids.insert(ids.end(), t.begin(), t.end());
     };
     // System turn
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
     // User turn
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("user\n# Caption\n" + prompt.caption + "\n\n# Lyric\n" + prompt.lyrics + "\n");
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
-    // Assistant turn with injected CoT
-    ids.push_back(151644);
-    append_bpe("assistant\n" + cot_text);
+    // Assistant turn with injected CoT (special tokens, not BPE text)
+    ids.push_back(TOKEN_IM_START);
+    append_bpe("assistant\n");
+    ids.push_back(TOKEN_THINK);
+    append_bpe("\n" + cot_yaml);  // yaml already ends with \n
+    ids.push_back(TOKEN_THINK_END);
+    append_bpe("\n\n");
+    ids.push_back(TOKEN_IM_END);
+    append_bpe("\n");
     return ids;
 }
 
 // Build unconditional prompt with empty CoT for CFG (Phase 2 mode)
+// Token sequence: <|im_start|> "assistant\n" <think> "\n\n" </think> "\n\n" <|im_end|> "\n"
 static std::vector<int> build_lm_prompt_uncond_with_cot(BPETokenizer &bpe, const AcePrompt &prompt,
                                                          const char *negative_prompt) {
     std::vector<int> ids;
@@ -794,12 +789,12 @@ static std::vector<int> build_lm_prompt_uncond_with_cot(BPETokenizer &bpe, const
         ids.insert(ids.end(), t.begin(), t.end());
     };
     // System turn
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     append_bpe("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
     // User turn: caption replaced/removed
-    ids.push_back(151644);
+    ids.push_back(TOKEN_IM_START);
     bool has_neg = negative_prompt && strlen(negative_prompt) > 0
                    && strcmp(negative_prompt, "NO USER INPUT") != 0;
     if (has_neg) {
@@ -807,11 +802,17 @@ static std::vector<int> build_lm_prompt_uncond_with_cot(BPETokenizer &bpe, const
     } else {
         append_bpe("user\n# Lyric\n" + prompt.lyrics + "\n");
     }
-    ids.push_back(151645);
+    ids.push_back(TOKEN_IM_END);
     append_bpe("\n");
-    // Assistant turn with empty CoT
-    ids.push_back(151644);
-    append_bpe("assistant\n<think>\n</think>\n");
+    // Assistant turn with empty CoT (special tokens)
+    ids.push_back(TOKEN_IM_START);
+    append_bpe("assistant\n");
+    ids.push_back(TOKEN_THINK);
+    append_bpe("\n\n");  // empty CoT: just \n\n between think tags
+    ids.push_back(TOKEN_THINK_END);
+    append_bpe("\n\n");
+    ids.push_back(TOKEN_IM_END);
+    append_bpe("\n");
     return ids;
 }
 
@@ -844,7 +845,7 @@ int main(int argc, char **argv) {
     float temperature = 0.8f;
     float top_p = 0.9f;
     int max_seq = 8192;
-    int seed = 42;
+    int seed = -1;
     float cfg_scale = 1.0f;
     const char *negative_prompt = "NO USER INPUT";
     const char *prompt_json = nullptr;
@@ -885,7 +886,6 @@ int main(int argc, char **argv) {
 
     AcePrompt ace = {};
     ace.duration = 120.0f;
-    ace.seed = 42;
 
     if (prompt_json) {
         if (!load_ace_prompt(prompt_json, &ace)) return 1;
@@ -894,20 +894,27 @@ int main(int argc, char **argv) {
     prompt = build_lm_prompt(bpe, ace);
     if (cfg_scale > 1.0f)
         uncond_prompt = build_lm_prompt_uncond(bpe, ace, negative_prompt);
-    if (seed == 42) seed = ace.seed;
     if (max_tokens == 256) max_tokens = (int)(ace.duration * 5) + 800;
 
-    // Auto-detect CoT: if metadata present in prompt.json, inject it
-    bool has_meta = ace.bpm > 0 || !ace.keyscale.empty()
-                    || !ace.timesignature.empty() || !ace.vocal_language.empty();
-    if (has_meta) {
-        std::string cot = build_cot_text(ace, "all");
+    // Auto-detect CoT: inject pre-built CoT if ALL 4 metadata fields are present
+    // (matching Python has_all_metas: bpm + keyscale + timesignature + duration)
+    // vocal_language is NOT a CoT field. It goes to the user turn / lyric prompt only.
+    bool has_all_metas = ace.bpm > 0 && !ace.keyscale.empty()
+                         && !ace.timesignature.empty() && ace.duration > 0;
+    if (has_all_metas) {
+        std::string cot = build_cot_yaml(ace);
         prompt = build_lm_prompt_with_cot(bpe, ace, cot);
         if (cfg_scale > 1.0f)
             uncond_prompt = build_lm_prompt_uncond_with_cot(bpe, ace, negative_prompt);
         if (max_tokens == (int)(ace.duration * 5) + 800)
             max_tokens = (int)(ace.duration * 5) + 100;
         cot_injected = true;
+    }
+
+    // Generate random seed if not specified
+    if (seed < 0) {
+        std::random_device rd;
+        seed = (int)(rd() & 0x7FFFFFFF);
     }
 
     fprintf(stderr, "[Prompt] %zu tokens, max_new: %d, seed: %d\n",

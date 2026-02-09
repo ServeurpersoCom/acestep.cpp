@@ -429,7 +429,6 @@ struct Prompt {
     std::string bpm;
     float duration = 30.0f;
     bool instrumental = false;
-    int seed = 42;
 };
 
 static std::string json_get_string(const std::string &json, const char *key) {
@@ -507,11 +506,6 @@ static bool load_prompt(const char *path, Prompt *p) {
     if (dpos != std::string::npos) {
         dpos = json.find(':', dpos);
         if (dpos != std::string::npos) p->duration = atof(json.c_str() + dpos + 1);
-    }
-    size_t spos = json.find("\"seed\"");
-    if (spos != std::string::npos) {
-        spos = json.find(':', spos);
-        if (spos != std::string::npos) p->seed = atoi(json.c_str() + spos + 1);
     }
     size_t ipos = json.find("\"instrumental\"");
     if (ipos != std::string::npos) {
@@ -641,7 +635,10 @@ int main(int argc, char **argv) {
     Prompt prompt;
     if (!load_prompt(prompt_file, &prompt)) return 1;
     if (duration < 0) duration = prompt.duration;
-    if (seed < 0) seed = prompt.seed;
+    if (seed < 0) {
+        std::random_device rd;
+        seed = (int)(rd() & 0x7FFFFFFF);
+    }
 
     // Load audio codes (before prompt building to detect cover mode)
     std::vector<int> audio_codes;
