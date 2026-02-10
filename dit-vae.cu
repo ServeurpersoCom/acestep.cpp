@@ -1,4 +1,4 @@
-// ace-cuda pipeline: prompt.json -> WAV audio
+// ace-cuda dit-vae: prompt JSON + codes -> WAV audio
 // Single binary, no PyTorch, no Python runtime.
 
 #include <cstdio>
@@ -21,7 +21,7 @@ using bf16 = __nv_bfloat16;
 #include "kernels.cuh"
 #include "dit.cuh"
 #include "transformer.cuh"
-#include "text_encoder.cuh"
+#include "text-encoder.cuh"
 #include "condition.cuh"
 #include "tokenizer.cuh"
 #include "vae.cuh"
@@ -92,7 +92,7 @@ static float *load_silence_latent(const char *path, int *out_T) {
     return data;
 }
 
-// CUDA kernels (pipeline-specific)
+// CUDA kernels (dit-vae specific)
 __global__ void fill_ones_bf16_kernel(bf16 *data, int n) {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     if (i >= n) return;
@@ -419,7 +419,7 @@ static void generate_audio(
     cudaFree(audio_f32_gpu);
 }
 
-// Prompt JSON parser
+// Prompt data (populated from CLI args)
 struct Prompt {
     std::string caption;
     std::string lyrics;
@@ -427,94 +427,9 @@ struct Prompt {
     std::string timesignature = "4";
     std::string keyscale;
     std::string bpm;
-    float duration = 30.0f;
+    float duration = 120.0f;
     bool instrumental = false;
 };
-
-static std::string json_get_string(const std::string &json, const char *key) {
-    std::string needle = std::string("\"") + key + "\"";
-    size_t pos = json.find(needle);
-    if (pos == std::string::npos) return "";
-    pos = json.find(':', pos + needle.size());
-    if (pos == std::string::npos) return "";
-    pos++;
-    // Skip whitespace after colon
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
-    // Must start with quote to be a string value
-    if (pos >= json.size() || json[pos] != '"') return "";
-    pos++; // skip opening quote
-    std::string result;
-    while (pos < json.size() && json[pos] != '"') {
-        if (json[pos] == '\\' && pos + 1 < json.size()) {
-            pos++;
-            switch (json[pos]) {
-                case 'n': result += '\n'; break;
-                case 't': result += '\t'; break;
-                case '"': result += '"'; break;
-                case '\\': result += '\\'; break;
-                default: result += json[pos]; break;
-            }
-        } else {
-            result += json[pos];
-        }
-        pos++;
-    }
-    return result;
-}
-
-// Get JSON value as string (handles both "key": "str" and "key": 123)
-static std::string json_get_value(const std::string &json, const char *key) {
-    std::string s = json_get_string(json, key);
-    if (!s.empty()) return s;
-    // Try numeric: find "key": <number>
-    std::string needle = std::string("\"") + key + "\"";
-    size_t pos = json.find(needle);
-    if (pos == std::string::npos) return "";
-    pos = json.find(':', pos + needle.size());
-    if (pos == std::string::npos) return "";
-    pos++;
-    while (pos < json.size() && (json[pos] == ' ' || json[pos] == '\t')) pos++;
-    if (pos >= json.size() || (!isdigit(json[pos]) && json[pos] != '-')) return "";
-    size_t start = pos;
-    while (pos < json.size() && (isdigit(json[pos]) || json[pos] == '.' || json[pos] == '-')) pos++;
-    return json.substr(start, pos - start);
-}
-
-static bool load_prompt(const char *path, Prompt *p) {
-    FILE *f = fopen(path, "rb");
-    if (!f) { fprintf(stderr, "ERROR: cannot open %s\n", path); return false; }
-    fseek(f, 0, SEEK_END);
-    size_t sz = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    std::string json(sz, '\0');
-    fread(&json[0], 1, sz, f);
-    fclose(f);
-
-    p->caption = json_get_string(json, "caption");
-    p->lyrics = json_get_string(json, "lyrics");
-    std::string tmp;
-    tmp = json_get_string(json, "vocal_language");
-    if (!tmp.empty()) p->vocal_language = tmp;
-    tmp = json_get_value(json, "timesignature");
-    if (!tmp.empty()) p->timesignature = tmp;
-    tmp = json_get_string(json, "keyscale");
-    if (!tmp.empty()) p->keyscale = tmp;
-    tmp = json_get_value(json, "bpm");
-    if (!tmp.empty()) p->bpm = tmp;
-
-    size_t dpos = json.find("\"duration\"");
-    if (dpos != std::string::npos) {
-        dpos = json.find(':', dpos);
-        if (dpos != std::string::npos) p->duration = atof(json.c_str() + dpos + 1);
-    }
-    size_t ipos = json.find("\"instrumental\"");
-    if (ipos != std::string::npos) {
-        p->instrumental = (json.find("true", ipos) != std::string::npos &&
-                           json.find("true", ipos) < json.find('\n', ipos));
-    }
-    if (p->caption.empty()) { fprintf(stderr, "ERROR: no caption in %s\n", path); return false; }
-    return true;
-}
 
 // ACE-Step prompt templates
 static const char *INSTRUCTION_TEXT2MUSIC = "Fill the audio semantic mask based on the given conditions:";
@@ -560,25 +475,34 @@ static std::vector<int> load_audio_codes(const char *path) {
 
 // Main
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [options]\n", prog);
-    fprintf(stderr, "  --prompt <json>         Prompt JSON file (required)\n");
+    fprintf(stderr, "Usage: %s [options]\n\n", prog);
+    fprintf(stderr, "Prompt (required):\n");
+    fprintf(stderr, "  --caption <text>        Music caption/description\n");
+    fprintf(stderr, "  --lyrics <text>         Lyrics text\n");
+    fprintf(stderr, "  --bpm <n>               BPM\n");
+    fprintf(stderr, "  --duration <sec>        Duration in seconds (default: 120)\n");
+    fprintf(stderr, "  --keyscale <text>       Key scale (e.g. \"F# minor\")\n");
+    fprintf(stderr, "  --timesignature <text>  Time signature (e.g. \"4\")\n");
+    fprintf(stderr, "  --language <text>       Vocal language code (e.g. \"en\")\n\n");
+    fprintf(stderr, "Models (required):\n");
     fprintf(stderr, "  --text-encoder <dir>    Qwen3-Embedding-0.6B directory\n");
     fprintf(stderr, "  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)\n");
-    fprintf(stderr, "  --vae <dir>             VAE directory\n");
+    fprintf(stderr, "  --vae <dir>             VAE directory\n\n");
+    fprintf(stderr, "Audio:\n");
     fprintf(stderr, "  --input-codes <file>    LM audio codes (from ace-qwen3 --output-codes)\n");
-    fprintf(stderr, "  --duration <sec>        Override duration (default: from prompt)\n");
-    fprintf(stderr, "  --seed <n>              Override seed (default: from prompt)\n");
+    fprintf(stderr, "  --seed <n>              Random seed (default: random)\n");
     fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
     fprintf(stderr, "  --steps <n>             Euler steps (default: 8)\n");
     fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n");
-    fprintf(stderr, "\nExample:\n");
-    fprintf(stderr, "  %s --prompt prompt.json --text-encoder checkpoints/Qwen3-Embedding-0.6B \\\n", prog);
-    fprintf(stderr, "     --dit checkpoints/acestep-v15-turbo --vae checkpoints/vae \\\n");
-    fprintf(stderr, "     --input-codes codes.txt --output song.wav\n");
 }
 
 int main(int argc, char **argv) {
-    const char *prompt_file = nullptr;
+    const char *cli_caption = nullptr;
+    const char *cli_lyrics = nullptr;
+    const char *cli_bpm = nullptr;
+    const char *cli_keyscale = nullptr;
+    const char *cli_timesig = nullptr;
+    const char *cli_language = nullptr;
     const char *text_enc_dir = nullptr;
     const char *dit_dir = nullptr;
     const char *vae_dir = nullptr;
@@ -591,8 +515,20 @@ int main(int argc, char **argv) {
     int steps = 8;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--prompt") && i + 1 < argc)
-            prompt_file = argv[++i];
+        if (!strcmp(argv[i], "--caption") && i + 1 < argc)
+            cli_caption = argv[++i];
+        else if (!strcmp(argv[i], "--lyrics") && i + 1 < argc)
+            cli_lyrics = argv[++i];
+        else if (!strcmp(argv[i], "--bpm") && i + 1 < argc)
+            cli_bpm = argv[++i];
+        else if (!strcmp(argv[i], "--duration") && i + 1 < argc)
+            duration = atof(argv[++i]);
+        else if (!strcmp(argv[i], "--keyscale") && i + 1 < argc)
+            cli_keyscale = argv[++i];
+        else if (!strcmp(argv[i], "--timesignature") && i + 1 < argc)
+            cli_timesig = argv[++i];
+        else if (!strcmp(argv[i], "--language") && i + 1 < argc)
+            cli_language = argv[++i];
         else if (!strcmp(argv[i], "--text-encoder") && i + 1 < argc)
             text_enc_dir = argv[++i];
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc)
@@ -603,8 +539,6 @@ int main(int argc, char **argv) {
             audio_codes_file = argv[++i];
         else if (!strcmp(argv[i], "--noise") && i + 1 < argc)
             noise_file = argv[++i];
-        else if (!strcmp(argv[i], "--duration") && i + 1 < argc)
-            duration = atof(argv[++i]);
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
             seed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--shift") && i + 1 < argc)
@@ -613,15 +547,18 @@ int main(int argc, char **argv) {
             steps = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--output") && i + 1 < argc)
             output = argv[++i];
-        else {
+        else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            usage(argv[0]);
+            return 0;
+        } else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             usage(argv[0]);
             return 1;
         }
     }
 
-    if (!prompt_file) {
-        fprintf(stderr, "ERROR: --prompt required\n");
+    if (!cli_caption) {
+        fprintf(stderr, "ERROR: --caption required\n");
         usage(argv[0]);
         return 1;
     }
@@ -631,10 +568,17 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Load prompt
+    // Build prompt from CLI args
     Prompt prompt;
-    if (!load_prompt(prompt_file, &prompt)) return 1;
-    if (duration < 0) duration = prompt.duration;
+    prompt.caption = cli_caption;
+    prompt.lyrics = cli_lyrics ? cli_lyrics : "";
+    prompt.instrumental = (prompt.lyrics == "[Instrumental]");
+    if (cli_bpm) prompt.bpm = cli_bpm;
+    if (cli_keyscale) prompt.keyscale = cli_keyscale;
+    if (cli_timesig) prompt.timesignature = cli_timesig;
+    if (cli_language) prompt.vocal_language = cli_language;
+    if (duration < 0) duration = 120.0f;
+    prompt.duration = duration;
     if (seed < 0) {
         std::random_device rd;
         seed = (int)(rd() & 0x7FFFFFFF);
@@ -664,6 +608,21 @@ int main(int argc, char **argv) {
     std::vector<int> text_ids = bpe_encode(&bpe, text_str, true);
     std::vector<int> lyric_ids = bpe_encode(&bpe, lyric_str, true);
     fprintf(stderr, "[Pipeline] Text: %zu tokens, Lyrics: %zu tokens\n", text_ids.size(), lyric_ids.size());
+
+    // Snap shift to nearest valid value (DiT only supports 1.0, 2.0, 3.0)
+    {
+        const float valid[] = {1.0f, 2.0f, 3.0f};
+        float best = valid[0];
+        float best_d = fabsf(shift - valid[0]);
+        for (int i = 1; i < 3; i++) {
+            float d = fabsf(shift - valid[i]);
+            if (d < best_d) { best = valid[i]; best_d = d; }
+        }
+        if (shift != best) {
+            fprintf(stderr, "[Pipeline] WARNING: shift=%.2f not supported, snapped to %.1f\n", shift, best);
+            shift = best;
+        }
+    }
 
     fprintf(stderr, "[Pipeline] %.1fs, Seed: %d, Shift: %.1f, Steps: %d, Output: %s\n",
             duration, seed, shift, steps, output);

@@ -34,13 +34,13 @@ dl_repo() {
     $HF "$repo" --local-dir "$target"
 }
 
-# === Core (required) ===
+# Core (required)
 dl_main "Qwen3-Embedding-0.6B"
 dl_repo "acestep-5Hz-lm-4B" "ACE-Step/acestep-5Hz-lm-4B"
 dl_main "acestep-v15-turbo"
 dl_main "vae"
 
-# === --all: every model from ACE-Step registry ===
+# Every model from ACE-Step registry
 if [ "${1:-}" = "--all" ]; then
     # LM variants (from main repo)
     dl_main "acestep-5Hz-lm-1.7B"

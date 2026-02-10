@@ -14,28 +14,28 @@ else
 endif
 
 # Targets
-all: pipeline ace-qwen3 test_bpe pt2bin
+all: dit-vae ace-qwen3 test-bpe pt2bin
 
-# Text+lyrics -> WAV music generation pipeline
-pipeline: pipeline.cu kernels.cuh dit.cuh transformer.cuh text_encoder.cuh condition.cuh tokenizer.cuh vae.cuh safetensors.h bpe.h
-	$(NVCC) $(CFLAGS) $(ARCHFLAG) -o $@ pipeline.cu $(LDFLAGS)
+# Text+lyrics -> WAV music generation (DiT + VAE)
+dit-vae: dit-vae.cu kernels.cuh dit.cuh transformer.cuh text-encoder.cuh condition.cuh tokenizer.cuh vae.cuh safetensors.h bpe.h
+	$(NVCC) $(CFLAGS) $(ARCHFLAG) -o $@ dit-vae.cu $(LDFLAGS)
 
 # Standalone Qwen3 autoregressive LM
-ace-qwen3: main.cu kernels.cuh safetensors.h bpe.h
-	$(NVCC) $(CFLAGS) $(ARCHFLAG) -o $@ main.cu $(LDFLAGS)
+ace-qwen3: ace-qwen3.cu kernels.cuh safetensors.h bpe.h
+	$(NVCC) $(CFLAGS) $(ARCHFLAG) -o $@ ace-qwen3.cu $(LDFLAGS)
 
 # BPE tokenizer regression test (CPU only)
-test_bpe: test_bpe.cpp bpe.h
-	g++ -O2 -std=c++17 -o $@ test_bpe.cpp
+test-bpe: test-bpe.cpp bpe.h
+	g++ -O2 -std=c++17 -o $@ test-bpe.cpp
 
 # silence_latent.pt -> .bin converter (CPU only, replaces Python)
 pt2bin: pt2bin.cpp
 	g++ -O2 -std=c++17 -o $@ pt2bin.cpp
 
-test: test_bpe
-	./test_bpe
+test: test-bpe
+	./test-bpe
 
 clean:
-	rm -f pipeline ace-qwen3 test_bpe pt2bin
+	rm -f dit-vae ace-qwen3 test-bpe pt2bin
 
 .PHONY: all clean test

@@ -1,7 +1,7 @@
 # Binaries
-pipeline
+dit-vae
 ace-qwen3
-test_bpe
+test-bpe
 pt2bin
 
 # Generated
@@ -9,3 +9,4 @@ pt2bin
 
 # Data
 checkpoints/
+*.bf16

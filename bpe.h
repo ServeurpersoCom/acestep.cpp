@@ -177,16 +177,32 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string &text) {
             continue;
         }
 
-        // Rule 6: \s+  (whitespace, possibly followed by non-whitespace)
+        // Rule 6: whitespace handling
+        // Regex order: \s+(?!\S) first (trailing whitespace), then \s+ as fallback
+        // \s+(?!\S) backtracks: consumes whitespace NOT followed by non-whitespace
+        // This peels off leading spaces, leaving the last space to combine with the next word
         if (is_whitespace(cp)) {
             int start = i;
-            i += adv;
-            // Check if next char is a letter/digit/punct -> include space as prefix
+            // Find end of whitespace run
+            int ws_end = i + adv;
+            while (ws_end < len && is_whitespace((unsigned char)s[ws_end]) && !is_newline((unsigned char)s[ws_end]))
+                ws_end++;
+            // Check what follows the whitespace run
+            bool followed_by_non_ws = (ws_end < len && !is_whitespace((unsigned char)s[ws_end]) && !is_newline((unsigned char)s[ws_end]));
+            if (followed_by_non_ws && ws_end - start > 1) {
+                // \s+(?!\S) matches all but the last space
+                // Leave one space for the next iteration to combine with word
+                int trailing = ws_end - 1;
+                chunks.push_back(std::string(s + start, trailing - start));
+                i = trailing;
+                continue;
+            }
+            // Single space followed by word: combine space + word as one chunk
+            i = start + adv;
             if (i < len) {
                 int a2;
                 int cp2 = utf8_codepoint(s + i, &a2);
                 if (is_letter(cp2)) {
-                    // Space + letters = one chunk
                     i += a2;
                     while (i < len) {
                         int a3;
@@ -198,12 +214,10 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string &text) {
                     continue;
                 }
                 if (is_digit(cp2)) {
-                    // Space then digit, emit space, let digit be handled next iteration
                     chunks.push_back(std::string(s + start, i - start));
                     continue;
                 }
                 if (!is_whitespace(cp2) && !is_newline(cp2)) {
-                    // Space + punctuation/symbols
                     int pstart = start;
                     while (i < len) {
                         int a3;
@@ -211,13 +225,13 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string &text) {
                         if (is_whitespace(cp3) || is_letter(cp3) || is_digit(cp3)) break;
                         i += a3;
                     }
-                    // Consume trailing newlines
                     while (i < len && is_newline((unsigned char)s[i])) i++;
                     chunks.push_back(std::string(s + pstart, i - pstart));
                     continue;
                 }
             }
-            // Trailing whitespace, consume all
+            // Trailing whitespace (end of string or before newline), consume all
+            i = ws_end;
             while (i < len) {
                 int a2;
                 int cp2 = utf8_codepoint(s + i, &a2);

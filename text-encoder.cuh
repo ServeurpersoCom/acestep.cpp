@@ -1,5 +1,5 @@
 #pragma once
-// ACE-Step Text Encoder (text_encoder.cuh)
+// ACE-Step Text Encoder (text-encoder.cuh)
 // Qwen3-Embedding-0.6B: 28L causal transformer
 // Config: hidden=1024, inter=3072, heads=16/8, head_dim=128
 // Also provides lyric embedding (just embed_tokens, no forward)

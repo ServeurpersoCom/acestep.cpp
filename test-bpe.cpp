@@ -1,4 +1,4 @@
-// test_bpe.cpp - Test BPE tokenizer against Python reference
+// test-bpe.cpp - Test BPE tokenizer against Python reference
 #include <cstdio>
 #include <cstdlib>
 #include <string>
