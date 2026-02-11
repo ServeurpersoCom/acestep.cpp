@@ -3,7 +3,7 @@
 # Output: /tmp/ace/ (7 text files) -> feed to dit-vae via cat
 
 set -eu
-SEED="${SEED:-42}"
+SEED="${SEED:-1}"
 
 CAPTION="Indie rock, jangly guitars, upbeat energy with nostalgic vocals"
 LYRICS='[Verse 1]

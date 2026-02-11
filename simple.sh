@@ -2,11 +2,11 @@
 # Inspiration: query -> LLM metadata+lyrics+codes -> DiT -> WAV
 
 set -eu
-SEED="${SEED:-42}"
+SEED="${SEED:-1}"
 
 ./ace-qwen3 checkpoints/acestep-5Hz-lm-4B \
     --system "Expand the user's input into a more detailed and specific musical description:" \
-    --user "$(printf 'funky French house track about neural networks\n\ninstrumental: false')" \
+    --user "$(printf 'Une chanson française sur le thème des animaux\n\ninstrumental: false')" \
     --fsm --cfg-scale 2.2 \
     --output-codes /tmp/codes.txt --output-dir /tmp/ace \
     --temperature 0.80 --top-p 0.9 --seed "$SEED"

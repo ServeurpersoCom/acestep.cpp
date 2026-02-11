@@ -2,7 +2,7 @@
 # DiT-only: all metas -> no LLM codes -> DiT generates from noise
 
 set -eu
-SEED="${SEED:-42}"
+SEED="${SEED:-1}"
 
 CAPTION="Ambient electronic soundscape with warm analog pads"
 LYRICS='[Instrumental]'

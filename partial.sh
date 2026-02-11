@@ -2,9 +2,9 @@
 # Partial-metas: caption+lyrics only -> LLM fills bpm/key/etc via CoT -> codes -> DiT -> WAV
 
 set -eu
-SEED="${SEED:-42}"
+SEED="${SEED:-1}"
 
-CAPTION="Dark minimal techno with industrial textures and hypnotic bassline"
+CAPTION="TODO"
 LYRICS='[Instrumental]'
 
 ./ace-qwen3 checkpoints/acestep-5Hz-lm-4B \
