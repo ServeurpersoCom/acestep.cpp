@@ -2,7 +2,7 @@
 # Partial-metas: caption+lyrics only -> LLM fills bpm/key/etc via CoT -> codes -> DiT -> WAV
 
 set -eu
-SEED="${SEED:-1}"
+SEED="${SEED:--1}"
 
 CAPTION="TODO"
 LYRICS='[Instrumental]'

@@ -2,7 +2,7 @@
 # Inspiration: query -> LLM metadata+lyrics+codes -> DiT -> WAV
 
 set -eu
-SEED="${SEED:-1}"
+SEED="${SEED:--1}"
 
 ./ace-qwen3 checkpoints/acestep-5Hz-lm-4B \
     --system "Expand the user's input into a more detailed and specific musical description:" \
