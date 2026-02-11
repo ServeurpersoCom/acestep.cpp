@@ -362,13 +362,12 @@ __global__ void softmax_attn_kernel(float *scores, int S_q, int S_kv, int window
     float local_max = -1e30f;
     for (int j = threadIdx.x; j < S_kv; j += blockDim.x) {
         float v = row[j] * scale;
-        // Sliding window mask: |s_q - j| > window/2 -> mask out
+        // Sliding window mask (bidirectional): |s_q - j| > window -> mask out
+        // Python: torch.abs(diff) <= sliding_window
         if (window > 0) {
-            int half_w = window / 2;
-            if (j < s_q - half_w || j > s_q + half_w)
-                v = -1e30f;
-        }
-        row[j] = v;
+            int d = (s_q > j) ? (s_q - j) : (j - s_q);
+            if (d > window) v = -1e30f;
+        }        row[j] = v;
         local_max = fmaxf(local_max, v);
     }
     smem[threadIdx.x] = local_max;
@@ -1264,9 +1263,6 @@ static void dit_generate(DiTModel *m,
     bf16 *vt = m->buf_vt;  // [T, out_channels]
 
     dit_invalidate_cross_kv(m);
-
-    // Debug: temp host buffer for step-by-step stats
-    std::vector<float> dbg(std::min(n, 8));
 
     for (int step = 0; step < num_steps; step++) {
         float t_curr = t_schedule[step];
