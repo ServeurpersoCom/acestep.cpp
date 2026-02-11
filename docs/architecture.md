@@ -472,6 +472,7 @@ Reference: constants.py:1-50 (VALID_LANGUAGES, KEYSCALE_*, BPM_MIN/MAX, DURATION
 
 Generic inference binary. Two mutually exclusive modes:
 
+```
 Custom mode (--system + --user):
   --system <text>          System instruction (INSPIRED/REWRITE/custom)
   --user <text>            User content (query, caption+lyrics, etc.)
@@ -507,10 +508,11 @@ Flow logic:
   --system present:   Custom prompt (generate_text) + optional codes via run_phase2
   --caption present:  all-metas = single pass codes, partial-metas = two-phase
   --no-codes:         Skip codes generation (output metadata only)
-
+```
 
 ## CLI Reference (dit-vae)
 
+```
 Prompt (required):
   --caption <text>         Music caption/description
   --lyrics <text>          Lyrics text
@@ -531,7 +533,7 @@ Audio:
   --shift <f>              Timestep shift (default: 3.0)
   --steps <n>              Euler steps (default: 8)
   --output <path>          Output WAV (default: output.wav)
-
+```
 
 ## Bash Scripts
 
