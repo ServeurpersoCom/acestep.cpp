@@ -11,27 +11,27 @@ Two standalone CUDA binaries, connected by bash scripts via plain text files.
 ```
                         ace-qwen3                                    dit-vae
                    (LLM inference)                          (DiT + VAE inference)
-                                                           
- CLI args ──────►┌──────────────────┐                     ┌──────────────────────┐
- --caption       │ Qwen3-4B LM      │   /tmp/ace/         │ Qwen3-Embedding 0.6B │
- --lyrics        │                  │   (7 text files)    │ (text encoder)       │
- --bpm ...       │ Phase 1: CoT     │──────────────────►  │                      │
-   OR            │  YAML metadata   │   caption,lyrics,   │ ConditionEncoder     │
- --system        │                  │   bpm,duration,     │  LyricEncoder (8L)   │
- --user          │ Phase 2: audio   │   keyscale,timesig, │  TimbreEncoder (4L)  │
-                 │  code tokens     │   language          │                      │
-                 │  0-63999         │                     │ AudioDetokenizer (2L)│
-                 └───────┬──────────┘                     │                      │
-                         │                                │ DiT (24 layers)      │
-                         │ --output-codes                 │  flow matching       │
-                         │ /tmp/codes.txt                 │  8 steps (turbo)     │
-                         │ (CSV integers)                 │                      │
-                         └──────────────────────────────► │ VAE decode           │
-                                                          │  48kHz stereo        │
-                                                          └──────────┬───────────┘
-                                                                     │
-                                                                     ▼
-                                                                  song.wav
+
+ CLI args ------->+------------------+                     +----------------------+
+ --caption        | Qwen3 LM         |   /tmp/ace/         | Qwen3-Embedding 0.6B |
+ --lyrics         | (0.6B/1.7B/4B)   |   (7 text files)    | (text encoder)       |
+ --bpm ...        |                  |                     |                      |
+   OR             | Phase 1: CoT     |-------------------> | ConditionEncoder     |
+ --system         |  YAML metadata   |   caption,lyrics,   |  LyricEncoder (8L)   |
+ --user           |                  |   bpm,duration,     |  TimbreEncoder (4L)  |
+                  | Phase 2: audio   |   keyscale,timesig, |                      |
+                  |  code tokens     |   language          | AudioDetokenizer (2L)|
+                  |  0-63999         |                     |                      |
+                  +--------+---------+                     | DiT (24 layers)      |
+                           |                               |  flow matching       |
+                           | --output-codes                |  8 steps (turbo)     |
+                           | /tmp/codes.txt                |                      |
+                           | (CSV integers)                | VAE decode           |
+                           +-----------------------------> |  48kHz stereo        |
+                                                           +----------+-----------+
+                                                                      |
+                                                                      v
+                                                                   song.wav
 ```
 
 
@@ -39,94 +39,91 @@ Two standalone CUDA binaries, connected by bash scripts via plain text files.
 
 ```
 User Input (caption, lyrics, metadata)
-    │
-    ▼
-┌────────────────────────────────────────┐
-│ LM 4B (Qwen3-based)   ace-qwen3 binary |
-│ ChatML template                        │
-│ Phase 1: CoT ─► YAML metadata          │
-│ Phase 2: audio codes as text tokens    │
-│   <|audio_code_XXXXX|> (0-63999)       │
-│   FSQ codebook = 64000                 │
-│     levels = [8,8,8,5,5,5]             │
-│     8*8*8*5*5*5 = 64000                │
-│   Token rate: 5 Hz (1 code per 200ms)  │
-└──────────┬──────────────────────────────┘
-           │  integers 0-63999 (CSV file)
-           │  + text files (caption, lyrics, bpm, duration, keyscale, timesig, language)
-           ▼
-┌─────────────────────────────────────────────────────┐
-│                                      dit-vae binary |
-│                                                     │
-│ ┌─ Qwen3-Embedding 0.6B (text encoder) ───────────┐ │
-│ │ 28 layers, hidden=1024, 16 heads, 8 kv_heads    │ │
-│ │ caption ─► text_hidden_states [T_text, 1024]    │ │
-│ └─────────────────────────────────────────────────┘ │
-│                                                     │
-│ ┌─ AceStepConditionGenerationModel (4.79 GB bf16) ─┐│
-│ │                                                  ││
-│ │ ┌─ ConditionEncoder ────────────────────────────┐││
-│ │ │ text_projector: Linear(1024 ─► 2048)          │││
-│ │ │ LyricEncoder: 8 layers (GQA + RoPE)           │││
-│ │ │ TimbreEncoder: 4 layers                       │││
-│ │ └───────────────────────────────────────────────┘││
-│ │                                                  ││
-│ │ ┌─ AudioTokenizer ─────────────────────────────┐ ││
-│ │ │ ResidualFSQ(levels=[8,8,8,5,5,5])            │ ││
-│ │ │ codebook = 64000, vocab_size = 64003 (+pad)  │ ││
-│ │ │ AttentionPooler (2L, pool_window=5: 25─►5Hz) │ ││
-│ │ └──────────────────────────────────────────────┘ ││
-│ │                                                  ││
-│ │ ┌─ AudioDetokenizer ────────────────────────────┐││
-│ │ │ 2 layers (num_attention_pooler_hidden_layers) │││
-│ │ │ Expands 5Hz ─► 25Hz via special_tokens        │││
-│ │ │ proj_out: Linear(2048 ─► 64)                  │││
-│ │ └───────────────────────────────────────────────┘││
-│ │                                                  ││
-│ │ ┌─ DiT (24 layers) ─────────────────────────────┐││
-│ │ │ hidden_size=2048, heads=16, kv_heads=8 (GQA)  │││
-│ │ │ head_dim=128, intermediate=6144 (SwiGLU)      │││
-│ │ │ RoPE theta=1M, sliding_window=128             │││
-│ │ │ layer_types: alternating sliding/full attn    │││
-│ │ │ + cross-attention to encoder outputs          │││
-│ │ │ AdaLN (scale-shift from timestep embedding)   │││
-│ │ │ Input: cat(noise[64], src[64], mask[64]) = 192│││
-│ │ │ proj_in: Conv1d(192─►2048, patch=2, stride=2) │││
-│ │ │ proj_out: ConvT1d(2048─►64, patch=2, stride=2)│││
-│ │ └───────────────────────────────────────────────┘││
-│ │                                                  ││
-│ │ ┌─ Diffusion Scheduler ────────────────────────┐ ││
-│ │ │ Flow matching, 8 steps (turbo), shift=3.0    │ ││
-│ │ │ Predefined timestep schedules (not learned)  │ ││
-│ │ └──────────────────────────────────────────────┘ ││
-│ └──────────────────────────────────────────────────┘│
-│                                                     │
-│ ┌─ AutoencoderOobleck (VAE, diffusers) ────────────┐│
-│ │ 48kHz stereo, decoder_input=64 channels          ││
-│ │ downsampling: [2,4,4,6,10] = 1920x total         ││
-│ │ 48000 / 1920 = 25 Hz latent rate                 ││
-│ │ latents [B, T_25Hz, 64] ─► audio [B, 2, T_48k]   ││
-│ └──────────────────────────────────────────────────┘│
-│                                                     │
-└──────────────────────────┬──────────────────────────┘
-                           │
-                           ▼
-                        song.wav (48kHz stereo)
+  |
+  v
+ace-qwen3  --  LM (Qwen3-based, 0.6B / 1.7B / 4B)
+  ChatML template
+  Phase 1: CoT -> YAML metadata (bpm, caption, duration, keyscale, language, timesignature)
+  Phase 2: audio codes as text tokens
+    <|audio_code_XXXXX|> (0-63999)
+    FSQ codebook = 64000
+      levels = [8,8,8,5,5,5]  ->  8*8*8*5*5*5 = 64000
+    Token rate: 5 Hz (1 code per 200ms)
+  |
+  |  outputs:
+  |    /tmp/codes.txt  (CSV integers 0-63999)
+  |    /tmp/ace/       (7 text files: caption, lyrics, bpm, duration, keyscale, timesignature, language)
+  |
+  v
+dit-vae  --  DiT + VAE pipeline
+  |
+  +-- Qwen3-Embedding 0.6B (text encoder)
+  |     28 layers, hidden=1024, 16 heads, 8 kv_heads
+  |     caption -> text_hidden_states [T_text, 1024]
+  |
+  +-- AceStepConditionGenerationModel (4.79 GB bf16)
+  |   |
+  |   +-- ConditionEncoder
+  |   |     text_projector: Linear(1024 -> 2048)
+  |   |     LyricEncoder: 8 layers (GQA + RoPE)
+  |   |     TimbreEncoder: 4 layers
+  |   |
+  |   +-- AudioTokenizer
+  |   |     ResidualFSQ(levels=[8,8,8,5,5,5])
+  |   |     codebook = 64000, vocab_size = 64003 (+pad)
+  |   |     AttentionPooler (2L, pool_window=5: 25->5Hz)
+  |   |
+  |   +-- AudioDetokenizer
+  |   |     2 layers (num_attention_pooler_hidden_layers)
+  |   |     Expands 5Hz -> 25Hz via special_tokens
+  |   |     proj_out: Linear(2048 -> 64)
+  |   |
+  |   +-- DiT (24 layers)
+  |   |     hidden_size=2048, heads=16, kv_heads=8 (GQA)
+  |   |     head_dim=128, intermediate=6144 (SwiGLU)
+  |   |     RoPE theta=1M, sliding_window=128
+  |   |     layer_types: alternating sliding/full attn
+  |   |     + cross-attention to encoder outputs
+  |   |     AdaLN (scale-shift from timestep embedding)
+  |   |     Input: cat(noise[64], src[64], mask[64]) = 192
+  |   |     proj_in: Conv1d(192->2048, patch=2, stride=2)
+  |   |     proj_out: ConvT1d(2048->64, patch=2, stride=2)
+  |   |
+  |   +-- Diffusion Scheduler
+  |         Flow matching, 8 steps (turbo), shift=3.0
+  |         Predefined timestep schedules (not learned)
+  |
+  +-- AutoencoderOobleck (VAE, diffusers)
+        48kHz stereo, decoder_input=64 channels
+        downsampling: [2,4,4,6,10] = 1920x total
+        48000 / 1920 = 25 Hz latent rate
+        latents [B, T_25Hz, 64] -> audio [B, 2, T_48k]
+  |
+  v
+song.wav (48kHz stereo)
 ```
 
 
 ## Model Specifications
 
-### LLM: acestep-5Hz-lm-4B (Qwen3-based)
+### LLM: acestep-5Hz-lm (Qwen3-based, 3 variants)
+
+All variants share: vocab=217204, head_dim=128, kv_heads=8, rope_theta=1M, tie_embeddings=true.
+Training data is identical across sizes -- only knowledge capacity differs.
+
 ```
-vocab_size:     217204 (151669 base Qwen3 + 65535 audio code slots, 64000 valid)
-hidden_size:    2560
-num_layers:     36
-num_heads:      32
-num_kv_heads:   8
-intermediate:   9728
-max_seq:        40960
-rope_theta:     1000000
+                    0.6B                1.7B                4B
+                    ----                ----                --
+hidden_size         1024                2048                2560
+num_layers          28                  28                  36
+num_heads           16                  16                  32
+num_kv_heads        8                   8                   8
+intermediate        3072                6144                9728
+max_seq             40960               40960               40960
+VRAM (bf16)         ~1.3 GB             ~3.4 GB             ~8.0 GB
+HF repo             ACE-Step/           ACE-Step/           ACE-Step/
+                    acestep-5Hz-lm-0.6B Ace-Step1.5         acestep-5Hz-lm-4B
+checkpoints.sh      --all               --all               default
 ```
 
 ### Text Encoder: Qwen3-Embedding-0.6B
