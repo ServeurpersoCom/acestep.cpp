@@ -420,3 +420,126 @@ static int vae_decode(VAEDecoder *vae, bf16 *latents, int T_latent, bf16 *output
 
     return T_final;
 }
+
+// Tiled VAE decode
+// Matches Python handler.py tiled_decode / _tiled_decode_offload_cpu:
+//   stride = chunk_size - 2*overlap
+//   For each tile: extract latent window with overlap, decode, trim to core, scatter.
+// Python defaults: chunk_size=512, overlap=64 (VAE_DECODE_MAX_CHUNK_SIZE).
+//
+// latents: [64, T_latent]  (channel-first, GPU)
+// output:  [2, >=T_latent*1920]  (channel-first, GPU, pre-allocated)
+// Returns actual number of audio samples per channel.
+static int vae_decode_tiled(VAEDecoder *vae, bf16 *latents, int T_latent, bf16 *output,
+                            int chunk_size = 512, int overlap = 64) {
+    // Ensure positive stride (matches Python effective_overlap reduction)
+    while (chunk_size - 2 * overlap <= 0 && overlap > 0)
+        overlap /= 2;
+
+    // Short track: decode directly, no tiling needed
+    if (T_latent <= chunk_size)
+        return vae_decode(vae, latents, T_latent, output);
+
+    int stride = chunk_size - 2 * overlap;
+    int num_steps = (T_latent + stride - 1) / stride;  // ceil(T / stride)
+
+    // Allocate temp buffers for chunk latent slice and chunk audio output
+    int max_win = chunk_size + 2 * overlap;
+    if (max_win > T_latent) max_win = T_latent;
+    bf16 *chunk_lat;  // [64, max_win]
+    cudaMalloc(&chunk_lat, (size_t)64 * max_win * sizeof(bf16));
+    int max_chunk_audio = max_win * 1920 + 1920;  // generous margin for conv padding
+    bf16 *chunk_aud;  // [2, max_chunk_audio]
+    cudaMalloc(&chunk_aud, (size_t)2 * max_chunk_audio * sizeof(bf16));
+
+    float upsample_factor = 0.0f;
+    int audio_write_pos = 0;
+
+    // Append buffers per channel (avoids needing to know total_audio upfront)
+    // Generous alloc: T_latent * 1920 is the theoretical max (exact upsample)
+    int max_audio = T_latent * 1920 + 4096;  // small margin for conv padding
+    bf16 *tmp_ch0, *tmp_ch1;
+    cudaMalloc(&tmp_ch0, (size_t)max_audio * sizeof(bf16));
+    cudaMalloc(&tmp_ch1, (size_t)max_audio * sizeof(bf16));
+
+    fprintf(stderr, "[VAE] Tiled decode: %d chunks (chunk=%d, overlap=%d, stride=%d)\n",
+            num_steps, chunk_size, overlap, stride);
+
+    for (int i = 0; i < num_steps; i++) {
+        // Core range in latent frames
+        int core_start = i * stride;
+        int core_end   = core_start + stride;
+        if (core_end > T_latent) core_end = T_latent;
+
+        // Window range with overlap (matches Python max(0,...) min(T,...))
+        int win_start = core_start - overlap;
+        if (win_start < 0) win_start = 0;
+        int win_end = core_end + overlap;
+        if (win_end > T_latent) win_end = T_latent;
+        int win_len = win_end - win_start;
+
+        // Extract latent window [64, win_len] from [64, T_latent] via strided copy
+        cudaMemcpy2D(
+            chunk_lat,                                          // dst
+            (size_t)win_len * sizeof(bf16),                     // dst pitch
+            latents + win_start,                                // src (offset in time)
+            (size_t)T_latent * sizeof(bf16),                    // src pitch
+            (size_t)win_len * sizeof(bf16),                     // width (bytes)
+            64,                                                 // height (channels)
+            cudaMemcpyDeviceToDevice
+        );
+
+        // Decode chunk
+        int chunk_T_audio = vae_decode(vae, chunk_lat, win_len, chunk_aud);
+
+        // First chunk: determine upsample_factor (matches Python)
+        if (i == 0) {
+            upsample_factor = (float)chunk_T_audio / (float)win_len;
+            fprintf(stderr, "[VAE] Upsample factor: %.2f (expected ~1920)\n", upsample_factor);
+        }
+
+        // Compute trim in audio samples (matches Python int(round(...)))
+        int added_start = core_start - win_start;
+        int trim_start  = (int)roundf(added_start * upsample_factor);
+        int added_end   = win_end - core_end;
+        int trim_end    = (int)roundf(added_end * upsample_factor);
+
+        int end_idx  = (trim_end > 0) ? (chunk_T_audio - trim_end) : chunk_T_audio;
+        int core_len = end_idx - trim_start;
+        if (core_len <= 0) continue;
+
+        // Append core audio into per-channel temp buffers (no pitch assumption)
+        // chunk_aud layout: [ch=0: 0..chunk_T_audio-1] [ch=1: chunk_T_audio..2*chunk_T_audio-1]
+        cudaMemcpyAsync(
+            tmp_ch0 + audio_write_pos,
+            chunk_aud + trim_start,
+            (size_t)core_len * sizeof(bf16),
+            cudaMemcpyDeviceToDevice
+        );
+        cudaMemcpyAsync(
+            tmp_ch1 + audio_write_pos,
+            chunk_aud + chunk_T_audio + trim_start,
+            (size_t)core_len * sizeof(bf16),
+            cudaMemcpyDeviceToDevice
+        );
+        audio_write_pos += core_len;
+    }
+
+    // audio_write_pos is now the exact total, copy into output [2, audio_write_pos]
+    cudaMemcpyAsync(output,
+                    tmp_ch0,
+                    (size_t)audio_write_pos * sizeof(bf16),
+                    cudaMemcpyDeviceToDevice);
+    cudaMemcpyAsync(output + audio_write_pos,
+                    tmp_ch1,
+                    (size_t)audio_write_pos * sizeof(bf16),
+                    cudaMemcpyDeviceToDevice);
+
+    cudaDeviceSynchronize();
+    cudaFree(chunk_lat);
+    cudaFree(chunk_aud);
+    cudaFree(tmp_ch0);
+    cudaFree(tmp_ch1);
+
+    return audio_write_pos;
+}

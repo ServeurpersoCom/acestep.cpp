@@ -179,6 +179,43 @@ downsampling_ratios:    [2, 4, 4, 6, 10] = 1920x total
 latent_rate:            48000 / 1920 = 25 Hz
 ```
 
+#### Tiled VAE Decode
+
+For long tracks the VAE is decoded in overlapping chunks to bound VRAM.
+C++ `vae_decode_tiled()` matches Python `handler._tiled_decode_inner()`:
+
+```
+stride     = chunk_size - 2 * overlap
+num_steps  = ceil(T_latent / stride)
+tmp_ch0, tmp_ch1 = alloc per-channel append buffers
+
+for each chunk i:
+    core_start = i * stride          (latent frames)
+    core_end   = min(core_start + stride, T_latent)
+    win_start  = max(0, core_start - overlap)
+    win_end    = min(T_latent, core_end + overlap)
+
+    audio_chunk = vae_decode(latents[:, :, win_start:win_end])
+
+    upsample_factor = audio_chunk.length / (win_end - win_start)   (first chunk only)
+    trim_start = round((core_start - win_start) * upsample_factor)
+    trim_end   = round((win_end - core_end)     * upsample_factor)
+
+    tmp_ch0.append(audio_chunk[ch0, trim_start : len - trim_end])
+    tmp_ch1.append(audio_chunk[ch1, trim_start : len - trim_end])
+
+output = [tmp_ch0, tmp_ch1]    (repack once total length is known)
+```
+
+Uses two temporary per-channel buffers to append core audio sequentially,
+then repacks into output [2, total] at the end. This avoids guessing
+total audio length upfront (no dry-run needed, no pitch mismatch risk).
+
+Python defaults: `chunk_size` auto-tuned per GPU, `overlap=64`.
+C++ defaults: `chunk_size=512`, `overlap=64`.
+If `T_latent <= chunk_size`, falls through to single-shot `vae_decode()`.
+Overlap is halved iteratively if `chunk_size - 2*overlap <= 0`.
+
 
 ## Sampling Parameters
 
@@ -571,7 +608,8 @@ Example pipeline (simple.sh):
 
 ## Known Differences (C++ vs Python)
 
-1. VAE decode: C++ full-frame, Python tiled_vae_decode -> edge differences
+1. VAE decode: C++ tiled decode uses per-channel append buffers (no pitch guess).
+   Python also has an offload-to-CPU path and auto-tuned chunk_size; C++ uses fixed defaults.
 2. Float precision: bf16 op order, fused multiply-add -> accumulation errors
 3. Constrained decoding: Implemented. C++ MetadataFSM validates metadata fields
    during CoT generation (BPM range, valid keyscales, etc.) matching Python FSM.
