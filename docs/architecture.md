@@ -119,7 +119,7 @@ User Input (caption, lyrics, metadata)
 
 ### LLM: acestep-5Hz-lm-4B (Qwen3-based)
 ```
-vocab_size:     217204 (151669 base Qwen3 + 64000 audio codes + special tokens)
+vocab_size:     217204 (151669 base Qwen3 + 65535 audio code slots, 64000 valid)
 hidden_size:    2560
 num_layers:     36
 num_heads:      32
@@ -339,7 +339,7 @@ language: fr
 timesignature: 4
 ```
 
-Fields are in alphabetical order (Python uses yaml.dump default_flow_style=False).
+Fields are in alphabetical order (Python uses yaml.dump sort_keys=True).
 After `</think>`, the LLM emits lyrics (custom instruction modes) or audio codes
 (all-metas/partial-metas Phase 2).
 
@@ -377,8 +377,12 @@ instrumental: false
 CFG in the LLM uses dual forward passes:
   Conditional: full prompt (system + user with caption/lyrics)
   Unconditional: same structure but user content replaced:
-    With negative_prompt: "# Caption\n{negative_prompt}\n\n# Lyric\n{lyrics}\n"
-    Without negative_prompt: "# Lyric\n{lyrics}\n"
+    CoT phase (partial-metas Phase 1):
+      With negative_prompt: "# Caption\n{negative_prompt}\n\n# Lyric\n{lyrics}\n"
+      Without negative_prompt: "# Lyric\n{lyrics}\n"
+    Codes phase (Phase 2, with injected CoT):
+      With negative_prompt: caption replaced by negative_prompt, lyrics kept
+      Without negative_prompt: caption AND lyrics kept as-is (only CoT emptied)
 
 The final logits: logits = uncond + cfg_scale * (cond - uncond)
 
@@ -392,33 +396,40 @@ The LLM and DiT text encoder receive DIFFERENT prompts built from the same metad
 
 | Aspect         | LLM prompt (ace-qwen3.cu)             | DiT prompt (dit-vae.cu)           |
 |----------------|----------------------------------|------------------------------------|
-| Template       | Qwen3 chat template              | handler.py _dict_to_meta_string    |
+| Template       | Qwen3 chat template              | SFT_GEN_PROMPT + _dict_to_meta_string |
 | Metas order    | Alphabetical (yaml.dump)         | bpm, timesig, keyscale, duration   |
 | Missing metas  | Field omitted entirely           | "N/A" placeholder                  |
-| Caption        | In user turn                     | In # Caption section               |
-| Lyrics         | In user turn                     | Separate lyric prompt              |
+| Caption        | In user turn                     | In SFT_GEN_PROMPT (# Instruction + # Caption + # Metas) |
+| Lyrics         | In user turn                     | Separate lyric prompt (# Languages + # Lyric) |
 | EOS token      | 151645 <|im_end|>               | 151643 <|endoftext|>              |
 
-### DiT text encoder prompt format (handler.py _dict_to_meta_string):
+### DiT text encoder prompt format (SFT_GEN_PROMPT + _dict_to_meta_string):
 ```
-# Music Meta Information
-bpm: {bpm}
-time_signature: {timesig}
-key: {keyscale}
-duration: {duration}
+# Instruction
+Fill the audio semantic mask based on the given conditions:
 
 # Caption
 {caption}
+
+# Metas
+- bpm: {bpm}
+- timesignature: {timesig}
+- keyscale: {keyscale}
+- duration: {duration} seconds
+<|endoftext|>
 ```
 
-### DiT lyric prompt format:
+### DiT lyric prompt format (_format_lyrics):
 ```
+# Languages
+{language}
+
 # Lyric
-{lyrics}
+{lyrics}<|endoftext|>
 ```
 
 Missing metadata fields use "N/A" as placeholder.
-Note: DiT uses "time_signature" and "key" as field names (not our CLI names).
+DiT field names match CLI names: "timesignature", "keyscale", "bpm", "duration".
 
 
 ## CoT Injection
@@ -441,7 +452,8 @@ Both paths produce identical token sequences for the codes generation phase.
 C++ MetadataFSM (ace-qwen3.cu) matches Python constrained_logits_processor.py.
 PrefixTree based FSM enforces valid values during CoT generation in Phase 1:
 
-  Alphabetical field order (bpm -> caption -> duration -> keyscale -> language -> timesig)
+  Alphabetical field order (bpm -> caption -> duration -> [genres] -> keyscale -> language -> timesig)
+  genres is optional (skip_genres=True by default)
   BPM: integer 30-300
   Duration: integer 10-600
   Keyscale: valid note + optional accidental + mode from closed list
@@ -532,7 +544,7 @@ Bash is the glue: `cat` reads ace-qwen3 output files to feed dit-vae CLI args.
 | full.sh      | generate_music (all-metas)           | All CLI metas -> codes -> WAV        |
 | partial.sh   | generate_music (partial-metas)       | Caption+lyrics -> CoT fills metas    |
 | format.sh    | format_sample (inference.py)         | Caption+lyrics rewrite (no codes)    |
-| dit-only.sh  | generate_music with thinking=false   | Metadata only, DiT from noise        |
+| dit-only.sh  | generate_music (no LM codes)         | LLM enriches caption, DiT from noise |
 
 Example pipeline (simple.sh):
 ```bash
