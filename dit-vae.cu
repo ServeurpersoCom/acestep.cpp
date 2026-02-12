@@ -424,7 +424,7 @@ struct Prompt {
     std::string caption;
     std::string lyrics;
     std::string vocal_language = "unknown";
-    std::string timesignature = "4";
+    std::string timesignature = "";
     std::string keyscale;
     std::string bpm;
     float duration = 120.0f;
@@ -605,8 +605,8 @@ int main(int argc, char **argv) {
 
     std::string text_str = build_text_prompt(prompt, is_cover);
     std::string lyric_str = build_lyric_prompt(prompt);
-    std::vector<int> text_ids = bpe_encode(&bpe, text_str, false);
-    std::vector<int> lyric_ids = bpe_encode(&bpe, lyric_str, false);
+    std::vector<int> text_ids = bpe_encode(&bpe, text_str, true);
+    std::vector<int> lyric_ids = bpe_encode(&bpe, lyric_str, true);
     fprintf(stderr, "[Pipeline] Text: %zu tokens, Lyrics: %zu tokens\n", text_ids.size(), lyric_ids.size());
 
     // Snap shift to nearest valid value (DiT only supports 1.0, 2.0, 3.0)
