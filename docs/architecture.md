@@ -1,6 +1,6 @@
-# Architecture Reference (acestep.cpp)
+# Architecture Reference
 
-Authority: Python upstream ACE-Step-1.5 (github.com/ace-step/ACE-Step-1.5).
+Authority: Python upstream ACE-Step-1.5 (https://github.com/ace-step/ACE-Step-1.5).
 C++ must produce identical token sequences and equivalent audio.
 
 
