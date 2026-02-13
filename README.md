@@ -161,16 +161,19 @@ accumulation in VAE and a minor BPE tokenization difference on lyrics.
 ```
 
 Downloads from HuggingFace:
-  Qwen3-Embedding-0.6B (text encoder, 1.1GB),
-  acestep-v15-turbo (DiT 24L + CondEncoder, 3GB),
-  vae (AutoencoderOobleck, 322MB),
-  acestep-5Hz-lm-0.6B / 1.7B / 4B (autoregressive LLM).
+
+- Qwen3-Embedding-0.6B (text encoder, 1.1GB),
+- acestep-v15-turbo (DiT 24L + CondEncoder, 3GB),
+- vae (AutoencoderOobleck, 322MB),
+- acestep-5Hz-lm-0.6B / 1.7B / 4B (autoregressive LLM).
 
 ## Known issues
 
 Uses a patched GGML fork (submodule). Two fixes for long-sequence audio:
-  im2col.cu gridDim.y overflow when T > 65535 patches,
-  conv_transpose_1d.cu O(T_in) brute-force loop too slow for VAE upsampling.
+
+- im2col.cu gridDim.y overflow when T > 65535 patches,
+- conv_transpose_1d.cu O(T_in) brute-force loop too slow for VAE upsampling.
+
 TODO: verify if these are still needed on latest GGML and submit upstream PRs.
 
 ## Acknowledgements
