@@ -23,10 +23,12 @@ Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 ## Full pipeline (LLM + DiT + VAE)
 
 The LLM generates a chain-of-thought (BPM, key, time signature) then audio
-codes. These codes feed into the DiT as source latents for guided generation.
+tokens (integers 0-63999 from a 64000-level FSQ codebook, at 5Hz). These
+audio tokens are written as `codes` in the exchange directory and decoded
+into source latents for the DiT.
 
 ```bash
-# Step 1: LLM generates audio codes
+# Step 1: LLM generates metadata + audio tokens
 ./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-0.6B \
     --caption "Hip hop, jazzy piano, vinyl crackle" \
     --lyrics "[Instrumental]" \
@@ -34,7 +36,7 @@ codes. These codes feed into the DiT as source latents for guided generation.
     --cfg-scale 2.2 --fsm --seed 42 \
     --output-dir /tmp/ace
 
-# Step 2: DiT + VAE renders audio from codes
+# Step 2: DiT + VAE renders audio from tokens
 ./build/dit-vae --input-dir /tmp/ace \
     --text-encoder checkpoints/Qwen3-Embedding-0.6B \
     --dit checkpoints/acestep-v15-turbo \
@@ -46,21 +48,41 @@ Or use `full.sh` which chains both steps with a default prompt.
 
 Three LLM sizes are available: 0.6B (fast), 1.7B, 4B (best quality).
 When all metadata is provided (bpm, duration, keyscale, timesignature),
-the LLM skips chain-of-thought and generates audio codes directly.
+the LLM skips chain-of-thought and generates audio tokens directly.
 When metadata is partial or missing, the LLM runs two phases: first
-generating the missing metadata via CoT, then generating codes.
+generating the missing metadata via CoT, then generating audio tokens.
 
-## DiT + VAE only (text2music, no LLM codes)
+## Exchange directory
 
-Run ace-qwen3 with `--no-codes` to generate metadata only, then dit-vae
-reads the directory (no `codes` file = generates from noise):
+The two binaries communicate through a directory of plain text files.
+One file per field, no extensions. The directory must exist before running.
 
 ```
-./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-0.6B \
-    --caption "Hip hop, jazzy piano, vinyl crackle" \
-    --lyrics "[Instrumental]" \
-    --bpm 90 --duration 60 --keyscale "Bb minor" --timesignature 4 \
-    --no-codes --output-dir /tmp/ace
+<dir>/
+  caption       Music description (required, may be multiline)
+  lyrics        Lyrics with [Section] markers (default: empty)
+  codes         LLM audio tokens, CSV integers 0-63999 (absent = generate from noise)
+  bpm           Integer, e.g. "124" (default: N/A)
+  duration      Integer seconds, e.g. "220" (default: 120)
+  keyscale      Key and scale, e.g. "F# minor" (default: N/A)
+  timesig       Time signature numerator, e.g. "4" (default: N/A)
+  language      Vocal language code, e.g. "fr" (default: en)
+```
+
+Missing file = default value (N/A for bpm/keyscale/timesig, matching
+the original ACE-Step training data).
+
+dit-vae only reads files, it does not care how they got there.
+You can write them yourself to run dit-vae standalone:
+
+```bash
+mkdir -p /tmp/ace
+echo -n "Hip hop, jazzy piano, vinyl crackle" > /tmp/ace/caption
+echo -n "[Instrumental]" > /tmp/ace/lyrics
+echo -n "90"             > /tmp/ace/bpm
+echo -n "60"             > /tmp/ace/duration
+echo -n "Bb minor"       > /tmp/ace/keyscale
+echo -n "4"              > /tmp/ace/timesig
 
 ./build/dit-vae --input-dir /tmp/ace \
     --text-encoder checkpoints/Qwen3-Embedding-0.6B \
@@ -69,28 +91,9 @@ reads the directory (no `codes` file = generates from noise):
     --output output.wav
 ```
 
-## Exchange directory
-
-ace-qwen3 writes to `--output-dir`, dit-vae reads from `--input-dir`.
-Same directory, any path. One plain text file per field, no extensions.
-Missing file = default value. The directory must exist before running.
-
-```
-<dir>/
-  caption       Music description (required, may be multiline)
-  lyrics        Lyrics with [Section] markers (default: empty)
-  codes         Audio codes CSV, integers 0-63999 (absent = generate from noise)
-  bpm           Integer, e.g. "124" (default: N/A)
-  duration      Integer seconds, e.g. "220" (default: 120)
-  keyscale      Key and scale, e.g. "F# minor" (default: N/A)
-  timesig       Time signature numerator, e.g. "4" (default: N/A)
-  language      Vocal language code, e.g. "fr" (default: en)
-```
-
-ace-qwen3 only writes fields that have values (bpm, keyscale, timesig,
-language are omitted when the LLM did not produce them). dit-vae treats
-absent files as defaults matching the original ACE-Step training data
-("N/A" for bpm/keyscale/timesig).
+Without `codes`, dit-vae generates from noise only.
+With `codes` (audio tokens from ace-qwen3), dit-vae decodes them into
+source latents for the DiT (higher quality, LLM-guided generation).
 
 ## Pipeline
 

@@ -1129,8 +1129,8 @@ int main(int argc, char ** argv) {
         std::vector<int> prompt;
 
         if (no_codes && has_all_metas) {
-            // All metas + no codes = just print prompt, nothing to generate
-            fprintf(stderr, "[All-metas] No codes requested, prompt written\n");
+            if (output_dir) write_output_dir(output_dir, ace);
+            fprintf(stderr, "[All-metas] No codes requested, metadata written\n");
             fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
 
         } else if (has_all_metas) {
