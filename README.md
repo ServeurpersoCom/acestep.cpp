@@ -131,7 +131,8 @@ GGML<>PyTorch cosine similarity: 0.999980
 Top-5 argmax: identical
 ```
 
-DiT+VAE pipeline (3-way comparison, seed 42, Philox noise):
+DiT+VAE pipeline (3-way comparison, seed 42, Philox noise).
+Values are cosine similarity between intermediate tensors (1.0 = identical):
 
 ```
 stage                               CUDA<>GGML    CUDA<>Python   GGML<>Python
