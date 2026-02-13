@@ -17,7 +17,6 @@
 #include <vector>
 
 // Structs
-
 struct VAEResUnit {
     struct ggml_tensor * s1a, * s1b;   // snake1 exp(alpha), exp(beta) [1, C]
     struct ggml_tensor * c1w, * c1b;   // conv1 fused [7, C, C], bias [C]
@@ -46,7 +45,6 @@ struct VAEGGML {
 };
 
 // Load helpers
-
 // Fuse weight_norm: w = g*v/||v||, write f32 into pre-allocated ggml_tensor
 // Works for both Conv1d [OC,IC,K] and ConvTranspose1d [IC,OC,K]:
 // weight_norm normalizes over dim=0 (shape[0]), regardless of semantics.
@@ -98,7 +96,6 @@ static void vae_load_bias(struct ggml_tensor * dst, const SafeTensors & st, cons
 }
 
 // Load model
-
 static void vae_ggml_load(VAEGGML * m, const char * path) {
     SafeTensors st;
     if (!safe_load(st, path)) {
@@ -194,7 +191,6 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
 }
 
 // Graph building
-
 // Snake activation: x + sin^2(exp_a * x) / exp_b
 // x: [T, C], exp_a: [1, C], exp_b: [1, C]
 static struct ggml_tensor * vae_snake(
@@ -299,7 +295,6 @@ static struct ggml_tensor * vae_ggml_build_graph(
 }
 
 // Decode API
-
 // Decode latent [out_ch, T_latent] -> audio [2, T_audio]
 // Input layout matches DiT output: [Oc, T] with ne[0]=Oc contiguous.
 // Returns T_audio (or -1 on error).
@@ -382,7 +377,6 @@ static int vae_ggml_decode(
 }
 
 // Free
-
 static void vae_ggml_free(VAEGGML * m) {
     if (m->buf) ggml_backend_buffer_free(m->buf);
     if (m->weight_ctx) ggml_free(m->weight_ctx);

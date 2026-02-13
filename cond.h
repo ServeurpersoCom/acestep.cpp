@@ -15,7 +15,6 @@
 #include "qwen3.h"
 
 // Lyric/Timbre encoder configs
-
 static Qwen3Config qwen3_lyric_config() {
     return {
         .hidden_size       = 2048,
@@ -45,7 +44,6 @@ static Qwen3Config qwen3_timbre_config() {
 }
 
 // Struct
-
 struct CondGGML {
     // Lyric encoder (8L, H=2048)
     Qwen3Config lyric_cfg;
@@ -75,7 +73,6 @@ struct CondGGML {
 };
 
 // Init
-
 static void cond_ggml_init_backend(CondGGML * m) {
     ggml_backend_load_all();
     m->backend = ggml_backend_init_best();
@@ -90,7 +87,6 @@ static void cond_ggml_init_backend(CondGGML * m) {
 // Load from ACEStep model safetensors
 // model_path: checkpoints/acestep-v15-turbo/model.safetensors
 // Tensors have prefix "encoder." for lyric/timbre, and "null_condition_emb"
-
 static bool cond_ggml_load(CondGGML * m, const char * model_path) {
     m->lyric_cfg  = qwen3_lyric_config();
     m->timbre_cfg = qwen3_timbre_config();
@@ -153,7 +149,6 @@ static bool cond_ggml_load(CondGGML * m, const char * model_path) {
 //   *out_enc_S:   total sequence length
 //
 // Layout: all arrays in ggml order (ne[0]=dim contiguous, then sequence)
-
 static void cond_ggml_forward(CondGGML * m,
                                const float * text_hidden, int S_text,
                                const float * lyric_embed, int S_lyric,
@@ -289,7 +284,6 @@ static void cond_ggml_forward(CondGGML * m,
 }
 
 // Free
-
 static void cond_ggml_free(CondGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);

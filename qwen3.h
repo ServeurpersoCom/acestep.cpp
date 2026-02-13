@@ -23,7 +23,6 @@
 #define QWEN3_MAX_LAYERS 32
 
 // Config
-
 struct Qwen3Config {
     int hidden_size;        // H
     int intermediate_size;  // FFN inner dim
@@ -37,7 +36,6 @@ struct Qwen3Config {
 };
 
 // Per-layer weights
-
 struct Qwen3Layer {
     struct ggml_tensor * input_layernorm;       // [H]
     struct ggml_tensor * post_attn_layernorm;   // [H]
@@ -53,7 +51,6 @@ struct Qwen3Layer {
 };
 
 // Standalone model (text encoder)
-
 struct Qwen3GGML {
     Qwen3Config cfg;
     Qwen3Layer layers[QWEN3_MAX_LAYERS];
@@ -70,7 +67,6 @@ struct Qwen3GGML {
 };
 
 // Helpers (pure graph ops, no side effects)
-
 static struct ggml_tensor * qwen3_f32(struct ggml_context * ctx, struct ggml_tensor * t) {
     if (t->type == GGML_TYPE_F32) return t;
     return ggml_cast(ctx, t, GGML_TYPE_F32);
@@ -210,7 +206,6 @@ static struct ggml_tensor * qwen3_build_layers(
 }
 
 // Loading
-
 static void qwen3_load_layer(SFWeightCtx * wctx, const SafeTensors & st,
                                Qwen3Layer * ly, const std::string & prefix) {
     ly->input_layernorm      = sf_load_tensor(wctx, st, prefix + ".input_layernorm.weight");
@@ -227,7 +222,6 @@ static void qwen3_load_layer(SFWeightCtx * wctx, const SafeTensors & st,
 }
 
 // Backend init
-
 static void qwen3_init_backend(Qwen3GGML * m) {
     ggml_backend_load_all();
     m->backend = ggml_backend_init_best();
@@ -241,7 +235,6 @@ static void qwen3_init_backend(Qwen3GGML * m) {
 
 // Load standalone text encoder (Qwen3-Embedding)
 // model_dir: directory containing model.safetensors + tokenizer files
-
 static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * model_dir) {
     m->cfg = {
         .hidden_size       = 1024,
@@ -286,7 +279,6 @@ static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * model_dir) {
 // token_ids: [S] int32 (CPU)
 // output:    [H * S] float (CPU, caller-allocated)
 // Returns hidden states in ggml layout: ne[0]=H contiguous, S rows.
-
 static void qwen3_forward(Qwen3GGML * m, const int * token_ids, int S, float * output) {
     const Qwen3Config & c = m->cfg;
     int H = c.hidden_size;
@@ -365,7 +357,6 @@ static void qwen3_forward(Qwen3GGML * m, const int * token_ids, int S, float * o
 // embed_data: pointer to bf16 weight data [vocab, H] in PyTorch layout (H contiguous per row)
 // token_ids: [S] int32
 // output:    [H * S] float (ggml layout: H contiguous, S tokens)
-
 static void qwen3_cpu_embed_lookup(const void * embed_data, int H,
                                     const int * token_ids, int S,
                                     float * output) {
@@ -383,7 +374,6 @@ static void qwen3_cpu_embed_lookup(const void * embed_data, int H,
 }
 
 // Free
-
 static void qwen3_free(Qwen3GGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);

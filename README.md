@@ -76,7 +76,7 @@ accumulation in VAE and a minor BPE tokenization difference on lyrics.
 ## Checkpoints
 
 ```
-bash checkpoints.sh
+./checkpoints.sh
 ```
 
 Downloads from HuggingFace:

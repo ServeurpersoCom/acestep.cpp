@@ -2,6 +2,7 @@
 // Loads vocab.json + merges.txt from HuggingFace tokenizer directory.
 // Handles: byte-level encoding, GPT-2 regex pre-tokenizer, BPE merges,
 //          special token recognition (<|endoftext|>).
+
 #pragma once
 #include <string>
 #include <vector>

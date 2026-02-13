@@ -22,7 +22,6 @@
 #include <vector>
 
 // Config (mirrors dit.cuh DiTConfig)
-
 struct DiTGGMLConfig {
     int hidden_size        = 2048;
     int intermediate_size  = 6144;
@@ -39,7 +38,6 @@ struct DiTGGMLConfig {
 };
 
 // Layer weights
-
 struct DiTGGMLTembWeights {
     struct ggml_tensor * linear_1_w;    // [256, hidden]
     struct ggml_tensor * linear_1_b;    // [hidden]
@@ -81,7 +79,6 @@ struct DiTGGMLLayer {
 };
 
 // Full model
-
 #define DIT_GGML_MAX_LAYERS 32
 
 struct DiTGGML {
@@ -118,7 +115,6 @@ struct DiTGGML {
 };
 
 // Load timestep embedding weights
-
 static void dit_ggml_load_temb(DiTGGMLTembWeights * w, SFWeightCtx * wctx,
                                 const SafeTensors & st, const std::string & prefix) {
     w->linear_1_w  = sf_load_tensor(wctx, st, prefix + ".linear_1.weight");
@@ -130,7 +126,6 @@ static void dit_ggml_load_temb(DiTGGMLTembWeights * w, SFWeightCtx * wctx,
 }
 
 // Load full DiT model
-
 static bool dit_ggml_load(DiTGGML * m, const char * model_path, DiTGGMLConfig cfg) {
     m->cfg = cfg;
 
@@ -213,7 +208,6 @@ static bool dit_ggml_load(DiTGGML * m, const char * model_path, DiTGGMLConfig cf
 }
 
 // Backend init
-
 static void dit_ggml_init_backend(DiTGGML * m) {
     // Load all available backends (CUDA, Metal, Vulkan...)
     ggml_backend_load_all();
@@ -994,7 +988,6 @@ static void dit_ggml_generate(
 }
 
 // Free
-
 static void dit_ggml_free(DiTGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);

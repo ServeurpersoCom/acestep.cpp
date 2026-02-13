@@ -65,7 +65,6 @@ struct DetokGGML {
 };
 
 // Load from DiT model safetensors
-
 static bool detok_ggml_load(DetokGGML * m, const char * model_path,
                              ggml_backend_t backend, ggml_backend_t cpu_backend) {
     m->cfg = detok_config();
@@ -114,7 +113,6 @@ static bool detok_ggml_load(DetokGGML * m, const char * model_path,
 // codes: [T_5Hz] integer array
 // context_out: [64 * T_25Hz] flat, caller allocates (T_25Hz = T_5Hz * 5)
 //   ggml layout [64, T_25Hz]: element (c, t) = data[t * 64 + c]
-
 static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
                               float * context_out) {
     int T_25Hz = T_5Hz * 5;
@@ -209,7 +207,6 @@ static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
 }
 
 // Load audio codes from file (comma or whitespace separated integers)
-
 static std::vector<int> load_audio_codes(const char * path) {
     std::vector<int> codes;
     FILE * f = fopen(path, "r");
@@ -232,7 +229,6 @@ static std::vector<int> load_audio_codes(const char * path) {
 }
 
 // Free
-
 static void detok_ggml_free(DetokGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     sf_weight_ctx_free(&m->wctx);

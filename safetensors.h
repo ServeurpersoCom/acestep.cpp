@@ -21,9 +21,9 @@
 #include <unistd.h>
 #include <dirent.h>
 
-// ============================================================
+// ==============================================
 // Part 1: Safetensors mmap parser (no ggml deps)
-// ============================================================
+// ==============================================
 
 enum SafeDType { SF_BF16 = 0, SF_F16 = 1, SF_F32 = 2 };
 
@@ -202,9 +202,9 @@ static const SafeTensor &safe_get(const SafeTensors &st, const std::string &name
     return it->second;
 }
 
-// ============================================================
+// ==========================
 // Part 2: ggml tensor loader
-// ============================================================
+// ==========================
 
 static ggml_type sf_dtype_to_ggml(SafeDType dt) {
     switch (dt) {
