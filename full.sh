@@ -1,9 +1,9 @@
 #!/bin/bash
-# LLM (ace-qwen3 CUDA) -> DiT+VAE (ggml) full pipeline
+# Full pipeline: LLM (ace-qwen3 GGML) -> DiT+VAE (GGML) -> WAV
+
 set -eu
 
 SEED="${SEED:--1}"
-CKPT="checkpoints"
 
 CAPTION="Vibrant French house meets tech-house fusion track featuring filtered disco samples, driving funky basslines, and classic four-on-the-floor beats with signature Bob Sinclar vocal chops. Analytical yet euphoric mood blending advanced AI technical vocabulary with dancefloor energy. Instruments include talkbox lead vocals, analog Moog bass synths, glitchy arpeggiated sequencers, punchy TR-808 drum machine, and shimmering high-hat rolls. Production style showcases crisp retro-modern mix with dynamic sidechain compression, warm vinyl crackle, and modular synth modulations. Vocal delivery combines rhythmic French rap verses with melodic, pitch-shifted choruses celebrating machine learning breakthroughs"
 
@@ -47,28 +47,17 @@ L'IA revolutionne, monde transforme
 IA... Intelligence Artificielle...
 Reseaux neuronaux... dansent... forever..."
 
-# Step 1: LLM generates audio codes (CUDA native)
-cd cuda
-./ace-qwen3 ../$CKPT/acestep-5Hz-lm-4B \
+mkdir -p /tmp/ace
+
+./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-4B \
     --caption "$CAPTION" --lyrics "$LYRICS" \
     --bpm 124 --duration 220 --keyscale "F# minor" --timesignature 4 --language fr \
     --fsm --cfg-scale 2.2 \
-    --output-codes /tmp/codes.txt --output-dir /tmp/ace \
+    --output-dir /tmp/ace \
     --temperature 0.80 --top-p 0.9 --seed "$SEED"
-cd ..
 
-# Step 2: DiT + VAE (ggml)
 ./build/dit-vae \
-    --text-encoder $CKPT/Qwen3-Embedding-0.6B \
-    --dit $CKPT/acestep-v15-turbo \
-    --vae $CKPT/vae \
-    --caption "$(cat /tmp/ace/caption)" \
-    --lyrics "$(cat /tmp/ace/lyrics)" \
-    --bpm "$(cat /tmp/ace/bpm)" \
-    --duration "$(cat /tmp/ace/duration)" \
-    --keyscale "$(cat /tmp/ace/keyscale)" \
-    --timesignature "$(cat /tmp/ace/timesignature)" \
-    --language "$(cat /tmp/ace/language)" \
-    --input-codes /tmp/codes.txt \
-    --seed "$SEED" \
-    --output full.wav
+    --input-dir /tmp/ace \
+    --text-encoder checkpoints/Qwen3-Embedding-0.6B \
+    --dit checkpoints/acestep-v15-turbo --vae checkpoints/vae \
+    --seed "$SEED" --output full.wav

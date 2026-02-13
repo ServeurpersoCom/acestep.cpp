@@ -210,10 +210,7 @@ static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
 static std::vector<int> load_audio_codes(const char * path) {
     std::vector<int> codes;
     FILE * f = fopen(path, "r");
-    if (!f) {
-        fprintf(stderr, "[Context] ERROR: cannot open %s\n", path);
-        return codes;
-    }
+    if (!f) return codes;
     char buf[65536];
     while (fgets(buf, sizeof(buf), f)) {
         char * p = buf;

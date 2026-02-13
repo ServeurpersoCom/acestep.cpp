@@ -9,7 +9,6 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <sys/stat.h>
 
 struct DebugDumper {
     char dir[512];
@@ -18,10 +17,8 @@ struct DebugDumper {
 
 static void debug_init(DebugDumper *d, const char *dir) {
     d->enabled = (dir != nullptr);
-    if (d->enabled) {
+    if (d->enabled)
         snprintf(d->dir, sizeof(d->dir), "%s", dir);
-        mkdir(dir, 0755);
-    }
 }
 
 // Dump f32 tensor to binary file

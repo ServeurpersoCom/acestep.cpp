@@ -1,9 +1,9 @@
 // qwen3.h: Qwen3 transformer encoder via ggml
 //
 // Generic Qwen3 backbone used by:
-//   - Text encoder  (Qwen3-Embedding-0.6B): 28L, H=1024, causal, vocab lookup
-//   - Lyric encoder (ACEStep cond):         8L,  H=2048, bidir, linear(1024->2048)
-//   - Timbre encoder (ACEStep cond):        4L,  H=2048, bidir, linear(64->2048)
+//   Text encoder  (Qwen3-Embedding-0.6B): 28L, H=1024, causal, vocab lookup
+//   Lyric encoder (ACEStep cond):         8L,  H=2048, bidir, linear(1024->2048)
+//   Timbre encoder (ACEStep cond):        4L,  H=2048, bidir, linear(64->2048)
 //
 // Architecture per layer:
 //   RMSNorm -> Q/K/V proj -> QK-Norm -> RoPE -> GQA -> O proj -> +residual

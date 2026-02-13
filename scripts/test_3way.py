@@ -35,7 +35,7 @@ BPM      = 120
 DURATION = 30
 SEED     = 42
 
-# ---- binary dump I/O (matches C++ format: [ndim i32] [shape i32...] [data f32]) ----
+# binary dump I/O (matches C++ format: [ndim i32] [shape i32...] [data f32])
 
 def save_dump(path, data):
     """Save tensor in binary dump format."""
@@ -79,7 +79,14 @@ def log_spectral_cos(a, b, n_bands=80):
     d = np.linalg.norm(la) * np.linalg.norm(lb)
     return float(np.dot(la, lb) / d) if d > 1e-10 else 0.0
 
-# ---- C++ binary runners ----
+# C++ binary runners
+
+def write_metadata(dump_dir, caption, lyrics, bpm, duration):
+    """Write proc-style metadata files for dit-vae --input-dir."""
+    for name, val in [("caption", caption), ("lyrics", lyrics),
+                      ("bpm", str(bpm)), ("duration", str(duration))]:
+        with open(os.path.join(dump_dir, name), "w") as f:
+            f.write(val)
 
 def run_binary(binary, label, dump_dir, caption, lyrics, bpm, duration, seed,
                noise_file=None):
@@ -88,11 +95,12 @@ def run_binary(binary, label, dump_dir, caption, lyrics, bpm, duration, seed,
         print(f"[{label}] binary not found: {binary}")
         return False
     os.makedirs(dump_dir, exist_ok=True)
+    write_metadata(dump_dir, caption, lyrics, bpm, duration)
     cmd = [
         binary,
         "--dit", CKPT_DIR, "--vae", VAE_DIR, "--text-encoder", QWEN_DIR,
-        "--caption", caption, "--lyrics", lyrics,
-        "--bpm", str(bpm), "--duration", str(duration), "--seed", str(seed),
+        "--input-dir", dump_dir,
+        "--seed", str(seed),
         "--dump", dump_dir,
         "--output", os.path.join(dump_dir, "output.wav"),
     ]
@@ -110,7 +118,7 @@ def run_binary(binary, label, dump_dir, caption, lyrics, bpm, duration, seed,
     print(f"[{label}] done, {n} dump files")
     return True
 
-# ---- Python via ACE-Step handler ----
+# Python via ACE-Step handler
 
 def run_python(dump_dir, caption, lyrics, bpm, duration, seed):
     """Run Python via ACE-Step handler with monkey-patches for dumps."""
@@ -216,7 +224,7 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed):
     print(f"[Python] done, {len(_dumps)} dump files: {sorted(_dumps.keys())}")
     return True
 
-# ---- comparison ----
+# comparison
 
 STAGES = [
     "text_hidden", "lyric_embed", "enc_hidden", "context", "noise",
@@ -267,7 +275,7 @@ def compare(dirs):
                 print(f" {'N/A':>14s}", end="")
         print()
 
-# ---- main ----
+# main
 
 def main():
     ap = argparse.ArgumentParser(description="3-way CUDA/GGML/Python comparison")

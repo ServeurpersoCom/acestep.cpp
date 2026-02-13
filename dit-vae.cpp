@@ -67,21 +67,14 @@ static bool write_wav(const char * path, const float * audio, int T_audio, int s
 }
 
 static void print_usage(const char * prog) {
-    fprintf(stderr, "Usage: %s [options]\n\n", prog);
-    fprintf(stderr, "Prompt (required):\n");
-    fprintf(stderr, "  --caption <text>        Music caption/description\n");
-    fprintf(stderr, "  --lyrics <text>         Lyrics text (default: [Instrumental])\n");
-    fprintf(stderr, "  --bpm <n>               BPM (default: N/A)\n");
-    fprintf(stderr, "  --duration <sec>        Duration in seconds (default: 120)\n");
-    fprintf(stderr, "  --keyscale <text>       Key scale (e.g. \"F# minor\")\n");
-    fprintf(stderr, "  --timesignature <text>  Time signature (e.g. \"4\")\n");
-    fprintf(stderr, "  --language <text>       Vocal language code (default: en)\n\n");
+    fprintf(stderr, "Usage: %s --input-dir <dir> [options]\n\n", prog);
+    fprintf(stderr, "Input (from ace-qwen3 --output-dir):\n");
+    fprintf(stderr, "  --input-dir <dir>       Directory with codes, caption, lyrics, etc.\n\n");
     fprintf(stderr, "Models (required):\n");
     fprintf(stderr, "  --text-encoder <dir>    Qwen3-Embedding-0.6B directory\n");
     fprintf(stderr, "  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)\n");
     fprintf(stderr, "  --vae <dir>             VAE directory\n\n");
     fprintf(stderr, "Audio:\n");
-    fprintf(stderr, "  --input-codes <file>    LM audio codes (from ace-qwen3 --output-codes)\n");
     fprintf(stderr, "  --seed <n>              Random seed (default: random)\n");
     fprintf(stderr, "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n");
     fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
@@ -93,46 +86,46 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "                          (bypasses text encoder and condition encoder)\n");
 }
 
+// Read file to string, empty if missing
+static std::string read_file_str(const std::string & path) {
+    FILE * f = fopen(path.c_str(), "r");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::string s(len, '\0');
+    fread(&s[0], 1, len, f);
+    fclose(f);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    return s;
+}
+
 int main(int argc, char ** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
 
+    const char * input_dir    = NULL;
     const char * text_enc_dir = NULL;
     const char * dit_dir      = NULL;
     const char * vae_dir      = NULL;
-    const char * caption      = NULL;
-    const char * lyrics       = "[Instrumental]";
     const char * wav_path     = "output.wav";
     const char * dump_dir     = NULL;
     const char * inject_dir   = NULL;
-    const char * codes_path   = NULL;
     const char * noise_file   = NULL;
-    const char * bpm          = "N/A";
-    const char * keyscale     = "N/A";
-    const char * timesig      = "N/A";
-    const char * language     = "en";
-    float duration            = 120.0f;
     float shift               = 3.0f;
     int num_steps             = 8;
     int seed                  = -1;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_dir = argv[++i];
+        if (strcmp(argv[i], "--input-dir") == 0 && i+1 < argc) input_dir = argv[++i];
+        else if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_dir = argv[++i];
         else if (strcmp(argv[i], "--dit") == 0 && i+1 < argc) dit_dir = argv[++i];
         else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_dir = argv[++i];
-        else if (strcmp(argv[i], "--caption") == 0 && i+1 < argc) caption = argv[++i];
-        else if (strcmp(argv[i], "--lyrics") == 0 && i+1 < argc) lyrics = argv[++i];
-        else if (strcmp(argv[i], "--duration") == 0 && i+1 < argc) duration = atof(argv[++i]);
-        else if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) num_steps = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--shift") == 0 && i+1 < argc) shift = atof(argv[++i]);
-        else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--noise-file") == 0 && i+1 < argc) noise_file = argv[++i];
         else if (strcmp(argv[i], "--dump") == 0 && i+1 < argc) dump_dir = argv[++i];
         else if (strcmp(argv[i], "--inject") == 0 && i+1 < argc) inject_dir = argv[++i];
-        else if (strcmp(argv[i], "--input-codes") == 0 && i+1 < argc) codes_path = argv[++i];
-        else if (strcmp(argv[i], "--noise-file") == 0 && i+1 < argc) noise_file = argv[++i];
-        else if (strcmp(argv[i], "--bpm") == 0 && i+1 < argc) bpm = argv[++i];
-        else if (strcmp(argv[i], "--keyscale") == 0 && i+1 < argc) keyscale = argv[++i];
-        else if (strcmp(argv[i], "--timesignature") == 0 && i+1 < argc) timesig = argv[++i];
-        else if (strcmp(argv[i], "--language") == 0 && i+1 < argc) language = argv[++i];
+        else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--shift") == 0 && i+1 < argc) shift = atof(argv[++i]);
+        else if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) num_steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--output") == 0 && i+1 < argc) wav_path = argv[++i];
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]); return 0;
@@ -146,13 +139,50 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "ERROR: --dit required\n");
         print_usage(argv[0]); return 1;
     }
-    if (!inject_dir && !caption) {
-        fprintf(stderr, "ERROR: --caption required (or --inject for debug mode)\n");
+    if (!inject_dir && !input_dir) {
+        fprintf(stderr, "ERROR: --input-dir required (or --inject for debug mode)\n");
         print_usage(argv[0]); return 1;
     }
     if (!inject_dir && !text_enc_dir) {
         fprintf(stderr, "ERROR: --text-encoder required (or --inject for debug mode)\n");
         print_usage(argv[0]); return 1;
+    }
+
+    // Read prompt from input-dir (proc-style: missing file = default)
+    std::string d = input_dir ? input_dir : "";
+    std::string caption_s = input_dir ? read_file_str(d + "/caption") : "";
+    std::string lyrics_s  = input_dir ? read_file_str(d + "/lyrics") : "";
+    std::string bpm_s     = input_dir ? read_file_str(d + "/bpm") : "";
+    std::string ks_s      = input_dir ? read_file_str(d + "/keyscale") : "";
+    std::string ts_s      = input_dir ? read_file_str(d + "/timesig") : "";
+    std::string lang_s    = input_dir ? read_file_str(d + "/language") : "";
+    std::string dur_s     = input_dir ? read_file_str(d + "/duration") : "";
+
+    if (input_dir && caption_s.empty()) {
+        fprintf(stderr, "ERROR: %s/caption missing or empty\n", input_dir);
+        return 1;
+    }
+
+    const char * caption  = caption_s.empty() ? NULL : caption_s.c_str();
+    const char * lyrics   = lyrics_s.empty() ? "[Instrumental]" : lyrics_s.c_str();
+    const char * bpm      = bpm_s.empty() ? "N/A" : bpm_s.c_str();
+    const char * keyscale = ks_s.empty() ? "N/A" : ks_s.c_str();
+    const char * timesig  = ts_s.empty() ? "N/A" : ts_s.c_str();
+    const char * language = lang_s.empty() ? "en" : lang_s.c_str();
+    float duration        = dur_s.empty() ? 120.0f : (float)atof(dur_s.c_str());
+
+    // Load audio codes (optional: absent = text-to-music from noise)
+    std::string codes_path_s = d + "/codes";
+    const char * codes_path = input_dir ? codes_path_s.c_str() : NULL;
+    std::vector<int> codes_vec;
+    if (codes_path) {
+        codes_vec = load_audio_codes(codes_path);
+        if (!codes_vec.empty())
+            fprintf(stderr, "[Pipeline] %zu audio codes from %s (%.1fs @ 5Hz)\n",
+                    codes_vec.size(), codes_path, codes_vec.size() / 5.0f);
+        else
+            fprintf(stderr, "[Pipeline] No codes, text-to-music from noise\n");
+        if (codes_vec.empty()) codes_path = NULL;
     }
 
     int T = 0;
@@ -218,7 +248,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Load] BPE tokenizer: %.1f ms\n", timer.ms());
 
         // 2. Build formatted prompts (match CUDA build_text_prompt/build_lyric_prompt)
-        // Cover mode (--input-codes) uses different instruction than text2music
+        // Cover mode (codes present) uses different instruction than text2music
         const char * instruction = codes_path
             ? "Generate audio semantic tokens based on the given conditions:"
             : "Fill the audio semantic mask based on the given conditions:";
@@ -324,7 +354,7 @@ int main(int argc, char ** argv) {
 
         // 6. Generate context_latents and noise
         // context = cat(src_latents[64,T], chunk_masks[64,T]) = [128, T]
-        // src_latents: decoded audio codes (if --input-codes) or silence encoding
+        // src_latents: decoded audio codes (if present) or silence encoding
         std::mt19937 rng(seed);
         std::normal_distribution<float> normal(0.0f, 1.0f);
 
@@ -354,10 +384,7 @@ int main(int argc, char ** argv) {
         int decoded_T = 0;
         std::vector<float> decoded_latents;
 
-        if (codes_path) {
-            std::vector<int> codes = load_audio_codes(codes_path);
-            if (codes.empty()) { fprintf(stderr, "FATAL: no codes in %s\n", codes_path); return 1; }
-
+        if (!codes_vec.empty()) {
             timer.reset();
             DetokGGML detok = {};
             if (!detok_ggml_load(&detok, dit_dir, model.backend, model.cpu_backend)) {
@@ -365,12 +392,12 @@ int main(int argc, char ** argv) {
             }
             fprintf(stderr, "[Load] Detokenizer: %.1f ms\n", timer.ms());
 
-            int T_5Hz = (int)codes.size();
+            int T_5Hz = (int)codes_vec.size();
             int T_25Hz_codes = T_5Hz * 5;
             decoded_latents.resize(T_25Hz_codes * Oc);
 
             timer.reset();
-            int ret = detok_ggml_decode(&detok, codes.data(), T_5Hz, decoded_latents.data());
+            int ret = detok_ggml_decode(&detok, codes_vec.data(), T_5Hz, decoded_latents.data());
             if (ret < 0) { fprintf(stderr, "FATAL: detokenizer decode failed\n"); return 1; }
             fprintf(stderr, "[Context] Detokenizer decode: %.1f ms\n", timer.ms());
 

@@ -1116,12 +1116,6 @@ static std::vector<int> build_custom_prompt(BPETokenizer &bpe,
 // Write enriched prompt fields as individual text files in a directory
 static bool write_output_dir(const char *dir, const AcePrompt &ace) {
     std::string d(dir);
-    // mkdir -p (portable enough for Linux/macOS)
-    std::string cmd = "mkdir -p " + d;
-    if (system(cmd.c_str()) != 0) {
-        fprintf(stderr, "ERROR: cannot create %s\n", dir);
-        return false;
-    }
     auto write_file = [&](const char *name, const std::string &val) {
         std::string path = d + "/" + name;
         FILE *f = fopen(path.c_str(), "w");
@@ -1131,12 +1125,12 @@ static bool write_output_dir(const char *dir, const AcePrompt &ace) {
     };
     write_file("caption", ace.caption);
     write_file("lyrics", ace.lyrics);
-    write_file("bpm", std::to_string(ace.bpm));
-    write_file("duration", std::to_string((int)ace.duration));
-    write_file("keyscale", ace.keyscale);
-    write_file("timesignature", ace.timesignature);
-    write_file("language", ace.vocal_language);
-    fprintf(stderr, "[Output] %s/ (7 files)\n", dir);
+    if (ace.bpm > 0) write_file("bpm", std::to_string(ace.bpm));
+    if (ace.duration > 0) write_file("duration", std::to_string((int)ace.duration));
+    if (!ace.keyscale.empty()) write_file("keyscale", ace.keyscale);
+    if (!ace.timesignature.empty()) write_file("timesig", ace.timesignature);
+    if (!ace.vocal_language.empty()) write_file("language", ace.vocal_language);
+    fprintf(stderr, "[Output] metadata -> %s/\n", dir);
     return true;
 }
 
@@ -1316,7 +1310,9 @@ static std::vector<int> build_lm_prompt_uncond_with_cot(BPETokenizer &bpe, const
 // Main
 
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s <model_dir> [options]\n\n", prog);
+    fprintf(stderr, "Usage: %s --model <dir> [options]\n\n", prog);
+    fprintf(stderr, "Model:\n");
+    fprintf(stderr, "  --model <dir>          Model directory (safetensors + config.json)\n\n");
     fprintf(stderr, "Custom mode (--system + --user):\n");
     fprintf(stderr, "  --system <text>        System instruction (e.g. INSPIRED/REWRITE instruction)\n");
     fprintf(stderr, "  --user <text>          User content (query, caption+lyrics, etc.)\n\n");
@@ -1334,8 +1330,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --no-codes             Skip audio codes generation\n");
     fprintf(stderr, "  --fsm                  Enable FSM constrained decoding for metadata\n\n");
     fprintf(stderr, "Output:\n");
-    fprintf(stderr, "  --output-codes <file>  Write audio codes CSV\n");
-    fprintf(stderr, "  --output-dir <dir>     Write enriched prompt fields to directory\n");
+    fprintf(stderr, "  --output-dir <dir>     Write codes + metadata for dit-vae\n");
     fprintf(stderr, "  --output-text <file>   Write raw LLM output text\n\n");
     fprintf(stderr, "Sampling:\n");
     fprintf(stderr, "  --max-tokens <n>       Max new tokens (default: auto)\n");
@@ -1346,22 +1341,23 @@ static void usage(const char *prog) {
 }
 
 // Write audio codes to file (shared helper)
-static bool write_codes(const char *path, const std::vector<int> &codes) {
-    FILE *f = fopen(path, "w");
-    if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", path); return false; }
+static bool write_codes(const char *dir, const std::vector<int> &codes) {
+    std::string path = std::string(dir) + "/codes";
+    FILE *f = fopen(path.c_str(), "w");
+    if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", path.c_str()); return false; }
     for (size_t i = 0; i < codes.size(); i++) {
         if (i > 0) fprintf(f, ",");
         fprintf(f, "%d", codes[i]);
     }
     fprintf(f, "\n"); fclose(f);
-    fprintf(stderr, "[Output] %s (%zu audio codes)\n", path, codes.size());
+    fprintf(stderr, "[Output] %s (%zu audio codes)\n", path.c_str(), codes.size());
     return true;
 }
 
 // Phase 2: reset KV, generate codes with CFG + CoT injected from AcePrompt
 static int run_phase2(QwenModel *model, BPETokenizer &bpe, const AcePrompt &ace,
                       std::vector<int> &prompt, float temperature, float top_p, int seed,
-                      float cfg_scale, const char *negative_prompt, const char *output_codes) {
+                      float cfg_scale, const char *negative_prompt, const char *output_dir) {
     fprintf(stderr, "[Phase2] Resetting KV cache\n");
     cudaMemset(model->kv_cache, 0, model->kv_bytes);
     if (model->kv_cache_uncond)
@@ -1380,19 +1376,19 @@ static int run_phase2(QwenModel *model, BPETokenizer &bpe, const AcePrompt &ace,
     double prefill_ms = 0, decode_ms = 0;
     std::vector<int> audio_codes;
     generate(model, prompt, codes_max, temperature, top_p, seed,
-             output_codes ? &audio_codes : nullptr,
+             output_dir ? &audio_codes : nullptr,
              cfg_scale, uncond.empty() ? nullptr : &uncond,
              true, &prefill_ms, &decode_ms);
 
-    if (output_codes && !audio_codes.empty())
-        write_codes(output_codes, audio_codes);
+    if (output_dir && !audio_codes.empty())
+        write_codes(output_dir, audio_codes);
     return (int)audio_codes.size();
 }
 
 int main(int argc, char **argv) {
     if (argc < 2) { usage(argv[0]); return 1; }
 
-    const char *model_dir = argv[1];
+    const char *model_dir = nullptr;
     std::vector<int> prompt;
     int max_tokens = 256;
     float temperature = 0.8f;
@@ -1418,12 +1414,13 @@ int main(int argc, char **argv) {
     const char *cli_language = nullptr;
 
     // Output args
-    const char *output_codes = nullptr;
     const char *output_dir = nullptr;
     const char *output_text = nullptr;
 
-    for (int i = 2; i < argc; i++) {
-        if (!strcmp(argv[i], "--system") && i + 1 < argc)
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--model") && i + 1 < argc)
+            model_dir = argv[++i];
+        else if (!strcmp(argv[i], "--system") && i + 1 < argc)
             system_msg = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc)
             user_msg = argv[++i];
@@ -1441,8 +1438,6 @@ int main(int argc, char **argv) {
             cli_timesig = argv[++i];
         else if (!strcmp(argv[i], "--language") && i + 1 < argc)
             cli_language = argv[++i];
-        else if (!strcmp(argv[i], "--output-codes") && i + 1 < argc)
-            output_codes = argv[++i];
         else if (!strcmp(argv[i], "--output-dir") && i + 1 < argc)
             output_dir = argv[++i];
         else if (!strcmp(argv[i], "--output-text") && i + 1 < argc)
@@ -1470,6 +1465,13 @@ int main(int argc, char **argv) {
             usage(argv[0]);
             return 1;
         }
+    }
+
+    // Validate: need --model
+    if (!model_dir) {
+        fprintf(stderr, "ERROR: --model required\n");
+        usage(argv[0]);
+        return 1;
     }
 
     // Validate: need either --system+--user or --caption
@@ -1545,7 +1547,7 @@ int main(int argc, char **argv) {
 
         if (!no_codes) {
             run_phase2(&model, bpe, ace, prompt, temperature, top_p, seed,
-                       cfg_scale, negative_prompt, output_codes);
+                       cfg_scale, negative_prompt, output_dir);
         }
 
         fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
@@ -1590,12 +1592,12 @@ int main(int argc, char **argv) {
             double prefill_ms = 0, decode_ms = 0;
             std::vector<int> audio_codes;
             generate(&model, prompt, max_tokens, temperature, top_p, seed,
-                     output_codes ? &audio_codes : nullptr,
+                     output_dir ? &audio_codes : nullptr,
                      cfg_scale, uncond.empty() ? nullptr : &uncond,
                      true, &prefill_ms, &decode_ms);
 
-            if (output_codes && !audio_codes.empty())
-                write_codes(output_codes, audio_codes);
+            if (output_dir && !audio_codes.empty())
+                write_codes(output_dir, audio_codes);
             if (output_dir) write_output_dir(output_dir, ace);
 
             fprintf(stderr, "[Ace-Qwen3] Load %.0f | Prefill %.0f | Decode %.0f | Total %.0fms\n",
@@ -1644,7 +1646,7 @@ int main(int argc, char **argv) {
 
             if (!no_codes) {
                 run_phase2(&model, bpe, ace, prompt, temperature, top_p, seed,
-                           cfg_scale, negative_prompt, output_codes);
+                           cfg_scale, negative_prompt, output_dir);
             }
 
             fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());

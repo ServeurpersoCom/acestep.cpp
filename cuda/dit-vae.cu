@@ -466,7 +466,7 @@ static std::string build_lyric_prompt(const Prompt &p) {
 static std::vector<int> load_audio_codes(const char *path) {
     std::vector<int> codes;
     FILE *f = fopen(path, "r");
-    if (!f) { fprintf(stderr, "ERROR: cannot open %s\n", path); return codes; }
+    if (!f) return codes;
     char buf[65536];
     while (fgets(buf, sizeof(buf), f)) {
         const char *p = buf;
@@ -481,23 +481,30 @@ static std::vector<int> load_audio_codes(const char *path) {
     return codes;
 }
 
+// Read file to string, empty if missing
+static std::string read_file(const std::string &path) {
+    FILE *f = fopen(path.c_str(), "r");
+    if (!f) return "";
+    fseek(f, 0, SEEK_END);
+    long len = ftell(f);
+    fseek(f, 0, SEEK_SET);
+    std::string s(len, '\0');
+    fread(&s[0], 1, len, f);
+    fclose(f);
+    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
+    return s;
+}
+
 // Main
 static void usage(const char *prog) {
-    fprintf(stderr, "Usage: %s [options]\n\n", prog);
-    fprintf(stderr, "Prompt (required):\n");
-    fprintf(stderr, "  --caption <text>        Music caption/description\n");
-    fprintf(stderr, "  --lyrics <text>         Lyrics text\n");
-    fprintf(stderr, "  --bpm <n>               BPM\n");
-    fprintf(stderr, "  --duration <sec>        Duration in seconds (default: 120)\n");
-    fprintf(stderr, "  --keyscale <text>       Key scale (e.g. \"F# minor\")\n");
-    fprintf(stderr, "  --timesignature <text>  Time signature (e.g. \"4\")\n");
-    fprintf(stderr, "  --language <text>       Vocal language code (e.g. \"en\")\n\n");
+    fprintf(stderr, "Usage: %s --input-dir <dir> [options]\n\n", prog);
+    fprintf(stderr, "Input (from ace-qwen3 --output-dir):\n");
+    fprintf(stderr, "  --input-dir <dir>       Directory with codes, caption, lyrics, etc.\n\n");
     fprintf(stderr, "Models (required):\n");
     fprintf(stderr, "  --text-encoder <dir>    Qwen3-Embedding-0.6B directory\n");
     fprintf(stderr, "  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)\n");
     fprintf(stderr, "  --vae <dir>             VAE directory\n\n");
     fprintf(stderr, "Audio:\n");
-    fprintf(stderr, "  --input-codes <file>    LM audio codes (from ace-qwen3 --output-codes)\n");
     fprintf(stderr, "  --seed <n>              Random seed (default: random)\n");
     fprintf(stderr, "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n");
     fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
@@ -508,47 +515,26 @@ static void usage(const char *prog) {
 }
 
 int main(int argc, char **argv) {
-    const char *cli_caption = nullptr;
-    const char *cli_lyrics = nullptr;
-    const char *cli_bpm = nullptr;
-    const char *cli_keyscale = nullptr;
-    const char *cli_timesig = nullptr;
-    const char *cli_language = nullptr;
+    const char *input_dir = nullptr;
     const char *text_enc_dir = nullptr;
     const char *dit_dir = nullptr;
     const char *vae_dir = nullptr;
-    const char *audio_codes_file = nullptr;
     const char *noise_file = nullptr;
     const char *dump_dir = nullptr;
     const char *output = "output.wav";
-    float duration = -1;
     int seed = -1;
     float shift = 3.0f;
     int steps = 8;
 
     for (int i = 1; i < argc; i++) {
-        if (!strcmp(argv[i], "--caption") && i + 1 < argc)
-            cli_caption = argv[++i];
-        else if (!strcmp(argv[i], "--lyrics") && i + 1 < argc)
-            cli_lyrics = argv[++i];
-        else if (!strcmp(argv[i], "--bpm") && i + 1 < argc)
-            cli_bpm = argv[++i];
-        else if (!strcmp(argv[i], "--duration") && i + 1 < argc)
-            duration = atof(argv[++i]);
-        else if (!strcmp(argv[i], "--keyscale") && i + 1 < argc)
-            cli_keyscale = argv[++i];
-        else if (!strcmp(argv[i], "--timesignature") && i + 1 < argc)
-            cli_timesig = argv[++i];
-        else if (!strcmp(argv[i], "--language") && i + 1 < argc)
-            cli_language = argv[++i];
+        if (!strcmp(argv[i], "--input-dir") && i + 1 < argc)
+            input_dir = argv[++i];
         else if (!strcmp(argv[i], "--text-encoder") && i + 1 < argc)
             text_enc_dir = argv[++i];
         else if (!strcmp(argv[i], "--dit") && i + 1 < argc)
             dit_dir = argv[++i];
         else if (!strcmp(argv[i], "--vae") && i + 1 < argc)
             vae_dir = argv[++i];
-        else if (!strcmp(argv[i], "--input-codes") && i + 1 < argc)
-            audio_codes_file = argv[++i];
         else if (!strcmp(argv[i], "--noise-file") && i + 1 < argc)
             noise_file = argv[++i];
         else if (!strcmp(argv[i], "--dump") && i + 1 < argc)
@@ -571,8 +557,8 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (!cli_caption) {
-        fprintf(stderr, "ERROR: --caption required\n");
+    if (!input_dir) {
+        fprintf(stderr, "ERROR: --input-dir required\n");
         usage(argv[0]);
         return 1;
     }
@@ -582,35 +568,41 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    // Build prompt from CLI args
+    // Read prompt from input-dir (proc-style: missing file = default)
+    std::string d(input_dir);
+    std::string caption = read_file(d + "/caption");
+    if (caption.empty()) {
+        fprintf(stderr, "ERROR: %s/caption missing or empty\n", input_dir);
+        return 1;
+    }
+
     Prompt prompt;
-    prompt.caption = cli_caption;
-    prompt.lyrics = cli_lyrics ? cli_lyrics : "";
+    prompt.caption = caption;
+    prompt.lyrics = read_file(d + "/lyrics");
     prompt.instrumental = (prompt.lyrics == "[Instrumental]");
-    if (cli_bpm) prompt.bpm = cli_bpm;
-    if (cli_keyscale) prompt.keyscale = cli_keyscale;
-    if (cli_timesig) prompt.timesignature = cli_timesig;
-    if (cli_language) prompt.vocal_language = cli_language;
-    if (duration < 0) duration = 120.0f;
+    prompt.bpm = read_file(d + "/bpm");
+    prompt.keyscale = read_file(d + "/keyscale");
+    prompt.timesignature = read_file(d + "/timesig");
+    prompt.vocal_language = read_file(d + "/language");
+
+    std::string dur_str = read_file(d + "/duration");
+    float duration = dur_str.empty() ? 120.0f : (float)atof(dur_str.c_str());
     prompt.duration = duration;
+
     if (seed < 0) {
         std::random_device rd;
         seed = (int)(rd() & 0x7FFFFFFF);
     }
 
-    // Load audio codes (before prompt building to detect cover mode)
-    std::vector<int> audio_codes;
-    bool is_cover = false;
-    if (audio_codes_file) {
-        audio_codes = load_audio_codes(audio_codes_file);
-        if (audio_codes.empty()) {
-            fprintf(stderr, "ERROR: no audio codes in %s\n", audio_codes_file);
-            return 1;
-        }
-        is_cover = true;
+    // Load audio codes (optional: absent = text-to-music from noise)
+    std::string codes_path = d + "/codes";
+    std::vector<int> audio_codes = load_audio_codes(codes_path.c_str());
+    bool is_cover = !audio_codes.empty();
+    if (is_cover)
         fprintf(stderr, "[Pipeline] %zu audio codes from %s (%.1fs @ 5Hz)\n",
-                audio_codes.size(), audio_codes_file, audio_codes.size() / 5.0f);
-    }
+                audio_codes.size(), codes_path.c_str(), audio_codes.size() / 5.0f);
+    else
+        fprintf(stderr, "[Pipeline] No codes, text-to-music from noise\n");
 
     // Tokenize
     std::string bpe_dir = std::string(text_enc_dir);

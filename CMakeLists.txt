@@ -32,6 +32,31 @@ if(TARGET ggml-vulkan)
     target_compile_definitions(dit-vae PRIVATE ACESTEP_HAVE_VULKAN)
 endif()
 
+# ace-qwen3: LLM inference (CoT + audio codes)
+add_executable(ace-qwen3 ace-qwen3.cpp)
+
+target_include_directories(ace-qwen3 PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
+)
+
+target_link_libraries(ace-qwen3 PRIVATE ggml ggml-base ggml-cpu)
+
+if(TARGET ggml-cuda)
+    target_link_libraries(ace-qwen3 PRIVATE ggml-cuda)
+    target_compile_definitions(ace-qwen3 PRIVATE ACESTEP_HAVE_CUDA)
+endif()
+
+if(TARGET ggml-metal)
+    target_link_libraries(ace-qwen3 PRIVATE ggml-metal)
+    target_compile_definitions(ace-qwen3 PRIVATE ACESTEP_HAVE_METAL)
+endif()
+
+if(TARGET ggml-vulkan)
+    target_link_libraries(ace-qwen3 PRIVATE ggml-vulkan)
+    target_compile_definitions(ace-qwen3 PRIVATE ACESTEP_HAVE_VULKAN)
+endif()
+
 # compare: cosine similarity between tensor dumps (debug tool)
 add_executable(compare compare.cpp)
 target_include_directories(compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})

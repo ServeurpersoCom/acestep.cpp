@@ -31,7 +31,7 @@ Loss function minimisée, convergence assurée
 Overfitting évité, dataset équilibré
 
 [Chorus - Talkbox Vocals]
-C'est l'ère de l'intelligence artificielle (AI!)
+C'est l'ère de l'intelligence artificielle
 Algorithmes de backpropagation dansent sur le beat
 Deep learning en action, réseau fully connected
 Processing en temps réel, le futur est lancé !
@@ -46,22 +46,17 @@ L'IA révolutionne, monde transformé
 IA... Intelligence Artificielle...
 Réseaux neuronaux... dansent... forever..."
 
-./ace-qwen3 ../checkpoints/acestep-5Hz-lm-4B \
+mkdir -p /tmp/ace
+
+./ace-qwen3 --model ../checkpoints/acestep-5Hz-lm-4B \
     --caption "$CAPTION" --lyrics "$LYRICS" \
     --bpm 124 --duration 220 --keyscale "F# minor" --timesignature 4 --language fr \
     --fsm --cfg-scale 2.2 \
-    --output-codes /tmp/codes.txt --output-dir /tmp/ace \
+    --output-dir /tmp/ace \
     --temperature 0.80 --top-p 0.9 --seed "$SEED"
 
 ./dit-vae \
-    --caption "$(cat /tmp/ace/caption)" \
-    --lyrics "$(cat /tmp/ace/lyrics)" \
-    --bpm "$(cat /tmp/ace/bpm)" \
-    --duration "$(cat /tmp/ace/duration)" \
-    --keyscale "$(cat /tmp/ace/keyscale)" \
-    --timesignature "$(cat /tmp/ace/timesignature)" \
-    --language "$(cat /tmp/ace/language)" \
-    --input-codes /tmp/codes.txt \
+    --input-dir /tmp/ace \
     --text-encoder ../checkpoints/Qwen3-Embedding-0.6B \
     --dit ../checkpoints/acestep-v15-turbo --vae ../checkpoints/vae \
     --seed "$SEED" --output full.wav

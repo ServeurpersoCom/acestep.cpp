@@ -1,6 +1,6 @@
 #!/bin/bash
 # Format: caption+lyrics -> LLM enriched metadata (no codes, no dit-vae)
-# Output: /tmp/ace/ (7 text files) -> feed to dit-vae via cat
+# Output: /tmp/ace/ -> feed to dit-vae via --input-dir
 
 set -eu
 SEED="${SEED:--1}"
@@ -13,7 +13,9 @@ Every song reminds me of when you were gone
 Turn it up, turn it up, let the music play
 We got nothing left but a beautiful day"
 
-./ace-qwen3 ../checkpoints/acestep-5Hz-lm-4B \
+mkdir -p /tmp/ace
+
+./ace-qwen3 --model ../checkpoints/acestep-5Hz-lm-4B \
     --system "Format the user's input into a more detailed and specific musical description:" \
     --user "$(printf '# Caption\n%s\n\n# Lyric\n%s' "$CAPTION" "$LYRICS")" \
     --fsm --no-codes \
