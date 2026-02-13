@@ -848,6 +848,7 @@ static void run_phase2(Qwen3LM * m, BPETokenizer & bpe, const AcePrompt & ace,
                        float cfg_scale, const char * negative_prompt,
                        const char * output_dir) {
     std::string cot = build_cot_yaml(ace);
+    fprintf(stderr, "[Phase2] CoT:\n%s", cot.c_str());
     std::vector<int> prompt = build_lm_prompt_with_cot(bpe, ace, cot);
     std::vector<int> uncond;
     if (cfg_scale > 1.0f)
@@ -888,14 +889,6 @@ static bool write_codes(const char * dir, const std::vector<int> & codes) {
     fclose(f);
     fprintf(stderr, "[Output] %s (%zu audio codes)\n", path.c_str(), codes.size());
     return true;
-}
-
-static void write_text(const char * path, const std::string & text) {
-    FILE * f = fopen(path, "w");
-    if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", path); return; }
-    fwrite(text.data(), 1, text.size(), f);
-    fclose(f);
-    fprintf(stderr, "[Output] %s (%zuB text)\n", path, text.size());
 }
 
 static void write_output_dir(const char * dir, const AcePrompt & ace) {
@@ -953,7 +946,6 @@ static void usage(const char * prog) {
         "  --no-codes             Phase 1 only (no audio codes)\n"
         "\n"
         "Output:\n"
-        "  --output-text <path>   Write generated text\n"
         "  --output-dir <dir>     Write codes + metadata for dit-vae\n"
         "\n", prog);
 }
@@ -978,7 +970,6 @@ int main(int argc, char ** argv) {
     const char * negative_prompt = nullptr;
     bool use_fsm = false;
     bool no_codes = false;
-    const char * output_text = nullptr;
     const char * output_dir = nullptr;
     const char * dump_logits = nullptr;
     const char * dump_tokens = nullptr;
@@ -1022,8 +1013,6 @@ int main(int argc, char ** argv) {
             use_fsm = true;
         else if (!strcmp(argv[i], "--no-codes"))
             no_codes = true;
-        else if (!strcmp(argv[i], "--output-text") && i + 1 < argc)
-            output_text = argv[++i];
         else if (!strcmp(argv[i], "--output-dir") && i + 1 < argc)
             output_dir = argv[++i];
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc)
@@ -1093,8 +1082,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
         fprintf(stderr, "[Phase1] output:\n%s\n", gen_text.c_str());
 
-        if (output_text) write_text(output_text, gen_text);
-
         AcePrompt ace = {};
         if (!parse_cot_and_lyrics(gen_text, &ace)) {
             fprintf(stderr, "ERROR: failed to parse Phase 1 output\n");
@@ -1136,6 +1123,7 @@ int main(int argc, char ** argv) {
         } else if (has_all_metas) {
             // All metas known: inject CoT, generate codes directly
             std::string cot = build_cot_yaml(ace);
+            fprintf(stderr, "[All-metas] CoT:\n%s", cot.c_str());
             prompt = build_lm_prompt_with_cot(bpe, ace, cot);
             std::vector<int> uncond;
             if (cfg_scale > 1.0f)
@@ -1212,8 +1200,6 @@ int main(int argc, char ** argv) {
             std::string gen_text = bpe_decode(bpe, gen_tokens);
             fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
             fprintf(stderr, "[Partial-metas] CoT:\n%s\n", gen_text.c_str());
-
-            if (output_text) write_text(output_text, gen_text);
 
             AcePrompt parsed = ace;
             if (!parse_cot_and_lyrics(gen_text, &parsed)) {

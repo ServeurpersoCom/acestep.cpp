@@ -1330,8 +1330,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --no-codes             Skip audio codes generation\n");
     fprintf(stderr, "  --fsm                  Enable FSM constrained decoding for metadata\n\n");
     fprintf(stderr, "Output:\n");
-    fprintf(stderr, "  --output-dir <dir>     Write codes + metadata for dit-vae\n");
-    fprintf(stderr, "  --output-text <file>   Write raw LLM output text\n\n");
+    fprintf(stderr, "  --output-dir <dir>     Write codes + metadata for dit-vae\n\n");
     fprintf(stderr, "Sampling:\n");
     fprintf(stderr, "  --max-tokens <n>       Max new tokens (default: auto)\n");
     fprintf(stderr, "  --temperature <f>      Sampling temperature (default: 0.8)\n");
@@ -1364,6 +1363,7 @@ static int run_phase2(QwenModel *model, BPETokenizer &bpe, const AcePrompt &ace,
         cudaMemset(model->kv_cache_uncond, 0, model->kv_bytes);
 
     std::string cot = build_cot_yaml(ace);
+    fprintf(stderr, "[Phase2] CoT:\n%s", cot.c_str());
     prompt = build_lm_prompt_with_cot(bpe, ace, cot);
     std::vector<int> uncond;
     if (cfg_scale > 1.0f)
@@ -1415,7 +1415,6 @@ int main(int argc, char **argv) {
 
     // Output args
     const char *output_dir = nullptr;
-    const char *output_text = nullptr;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc)
@@ -1440,8 +1439,6 @@ int main(int argc, char **argv) {
             cli_language = argv[++i];
         else if (!strcmp(argv[i], "--output-dir") && i + 1 < argc)
             output_dir = argv[++i];
-        else if (!strcmp(argv[i], "--output-text") && i + 1 < argc)
-            output_text = argv[++i];
         else if (!strcmp(argv[i], "--no-codes"))
             no_codes = true;
         else if (!strcmp(argv[i], "--fsm"))
@@ -1511,14 +1508,6 @@ int main(int argc, char **argv) {
         fsm.init(bpe, model.cfg.vocab_size);
 
     // Helper: write raw text to file
-    auto write_text = [](const char *path, const std::string &text) {
-        FILE *f = fopen(path, "w");
-        if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", path); return; }
-        fwrite(text.data(), 1, text.size(), f);
-        fclose(f);
-        fprintf(stderr, "[Output] %s (%zuB text)\n", path, text.size());
-    };
-
     if (system_msg) {
         // Custom mode: Phase 1 with custom system/user prompt, then optional Phase 2
         fprintf(stderr, "[Custom] system: %.60s...\n", system_msg);
@@ -1532,8 +1521,6 @@ int main(int argc, char **argv) {
         std::string gen_text = bpe_decode(bpe, gen_tokens);
         fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
         fprintf(stderr, "[Phase1] output:\n%s\n", gen_text.c_str());
-
-        if (output_text) write_text(output_text, gen_text);
 
         AcePrompt ace = {};
         if (!parse_cot_and_lyrics(gen_text, &ace)) {
@@ -1580,6 +1567,7 @@ int main(int argc, char **argv) {
 
         } else if (has_all_metas) {
             std::string cot = build_cot_yaml(ace);
+            fprintf(stderr, "[All-metas] CoT:\n%s", cot.c_str());
             prompt = build_lm_prompt_with_cot(bpe, ace, cot);
             std::vector<int> uncond;
             if (cfg_scale > 1.0f)
@@ -1625,8 +1613,6 @@ int main(int argc, char **argv) {
             std::string gen_text = bpe_decode(bpe, gen_tokens);
             fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
             fprintf(stderr, "[Partial-metas] CoT:\n%s\n", gen_text.c_str());
-
-            if (output_text) write_text(output_text, gen_text);
 
             AcePrompt parsed = ace;
             if (!parse_cot_and_lyrics(gen_text, &parsed)) {
