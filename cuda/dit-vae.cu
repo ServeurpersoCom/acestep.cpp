@@ -13,7 +13,8 @@
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
 
-#include "bpe.h"
+#include "../bpe.h"
+#include "../debug.h"
 
 using bf16 = __nv_bfloat16;
 
@@ -135,7 +136,8 @@ static void generate_audio(
     int num_steps,
     const int *audio_codes = nullptr,
     int n_audio_codes = 0,
-    const char *noise_file = nullptr)
+    const char *noise_file = nullptr,
+    const DebugDumper *dbg = nullptr)
 {
     Timer t0;
 
@@ -216,11 +218,13 @@ static void generate_audio(
     // Step 1: TextEncoder
     fprintf(stderr, "[Encode] TextEncoder: %d tokens -> [%d, 1024]\n", S_text, S_text);
     text_encoder_forward(&text_enc, text_ids, S_text);
+    debug_dump_bf16_2d(dbg, "text_hidden", text_enc.enc.buf_hidden, S_text, 1024);
 
     // Step 2: Lyric embedding
     bf16 *lyric_embed_gpu;
     cudaMalloc(&lyric_embed_gpu, (size_t)S_lyric * 1024 * sizeof(bf16));
     lyric_embed(&text_enc, lyric_ids, S_lyric, lyric_embed_gpu);
+    debug_dump_bf16_2d(dbg, "lyric_embed", lyric_embed_gpu, S_lyric, 1024);
 
     // Step 3: ConditionEncoder
     int S_ref = 750;  // 30 seconds @ 25Hz
@@ -240,6 +244,7 @@ static void generate_audio(
                               timbre_feats_gpu, S_ref);
     int S_enc = cond_enc.enc_seq_len;
     fprintf(stderr, "[Encode] ConditionEncoder: [%d, 2048]\n", S_enc);
+    debug_dump_bf16_2d(dbg, "enc_hidden", cond_enc.encoder_hidden_states, S_enc, 2048);
     double encode_ms = t_encode.ms();
     fprintf(stderr, "[Encode] %.0fms\n", encode_ms);
 
@@ -320,6 +325,7 @@ static void generate_audio(
         cudaFree(chunk_mask_gpu);
     }
     fprintf(stderr, "[Context] [%d, 128] Ready\n", T_25Hz);
+    debug_dump_bf16_2d(dbg, "context", context_latents_gpu, T_25Hz, 128);
 
     // Step 5: Noise [T_25Hz, 64]
     int noise_n = T_25Hz * 64;
@@ -350,6 +356,7 @@ static void generate_audio(
         cudaFree(noise_f32_gpu);
         fprintf(stderr, "[Context] Noise: [%d, 64] (seed=%d)\n", T_25Hz, seed);
     }
+    debug_dump_bf16_2d(dbg, "noise", noise_gpu, T_25Hz, 64);
     double context_ms = t_context.ms();
     fprintf(stderr, "[Context] %.0fms\n", context_ms);
 
@@ -363,7 +370,7 @@ static void generate_audio(
     dit_generate(&dit, noise_gpu, context_latents_gpu,
                  cond_enc.encoder_hidden_states, S_enc, T_25Hz,
                  t_schedule, num_steps,
-                 x0_gpu);
+                 x0_gpu, dbg);
     cudaDeviceSynchronize();
 
     double dit_ms = t_dit.ms();
@@ -399,6 +406,7 @@ static void generate_audio(
     cudaMemcpy(audio_cpu.data(), audio_f32_gpu, audio_elems * sizeof(float), cudaMemcpyDeviceToHost);
 
     write_wav(output_path, audio_cpu.data(), actual_T_audio, 2, 48000);
+    debug_dump_2d(dbg, "vae_audio", audio_cpu.data(), 2, actual_T_audio);
     double wav_ms = t_wav.ms();
     fprintf(stderr, "[WAV] %s (%.1fs @ 48kHz stereo) %.0fms\n",
             output_path, (float)actual_T_audio / 48000.0f, wav_ms);
@@ -491,9 +499,12 @@ static void usage(const char *prog) {
     fprintf(stderr, "Audio:\n");
     fprintf(stderr, "  --input-codes <file>    LM audio codes (from ace-qwen3 --output-codes)\n");
     fprintf(stderr, "  --seed <n>              Random seed (default: random)\n");
+    fprintf(stderr, "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n");
     fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
     fprintf(stderr, "  --steps <n>             Euler steps (default: 8)\n");
-    fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n");
+    fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
+    fprintf(stderr, "Debug:\n");
+    fprintf(stderr, "  --dump <dir>            Dump intermediate tensors for debug\n");
 }
 
 int main(int argc, char **argv) {
@@ -508,6 +519,7 @@ int main(int argc, char **argv) {
     const char *vae_dir = nullptr;
     const char *audio_codes_file = nullptr;
     const char *noise_file = nullptr;
+    const char *dump_dir = nullptr;
     const char *output = "output.wav";
     float duration = -1;
     int seed = -1;
@@ -537,8 +549,10 @@ int main(int argc, char **argv) {
             vae_dir = argv[++i];
         else if (!strcmp(argv[i], "--input-codes") && i + 1 < argc)
             audio_codes_file = argv[++i];
-        else if (!strcmp(argv[i], "--noise") && i + 1 < argc)
+        else if (!strcmp(argv[i], "--noise-file") && i + 1 < argc)
             noise_file = argv[++i];
+        else if (!strcmp(argv[i], "--dump") && i + 1 < argc)
+            dump_dir = argv[++i];
         else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
             seed = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--shift") && i + 1 < argc)
@@ -633,13 +647,16 @@ int main(int argc, char **argv) {
     for (int i = 0; i < steps; i++) fprintf(stderr, "%s%.4f", i ? ", " : "", t_schedule[i]);
     fprintf(stderr, "]\n");
 
+    DebugDumper dbg;
+    debug_init(&dbg, dump_dir);
+
     generate_audio(text_enc_dir, dit_dir, vae_dir,
                    text_ids.data(), (int)text_ids.size(),
                    lyric_ids.data(), (int)lyric_ids.size(),
                    duration, seed, output, t_schedule, steps,
                    audio_codes.empty() ? nullptr : audio_codes.data(),
                    (int)audio_codes.size(),
-                   noise_file);
+                   noise_file, &dbg);
 
     return 0;
 }

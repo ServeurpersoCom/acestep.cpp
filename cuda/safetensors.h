@@ -1,17 +1,11 @@
 #pragma once
-// safetensors.h: Safetensors mmap parser + ggml tensor loader.
-// Loads BF16/F16/F32 weights directly into ggml backend buffers.
-// No GGUF conversion. Zero-copy mmap where possible.
-
-#include "ggml.h"
-#include "ggml-backend.h"
-#include "ggml-alloc.h"
-
+// Minimal safetensors loader via mmap. Zero-copy, zero-dep.
+// Supports multi-file models (model-00001-of-00002.safetensors etc.)
 #include <cstdint>
 #include <cstdio>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
-#include <algorithm>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -20,10 +14,6 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
-
-// ============================================================
-// Part 1: Safetensors mmap parser (no ggml deps)
-// ============================================================
 
 enum SafeDType { SF_BF16 = 0, SF_F16 = 1, SF_F32 = 2 };
 
@@ -131,6 +121,7 @@ static bool safe_load_file(SafeTensors &st, const char *path) {
     const char *p = header;
     const char *header_end = header + header_len;
     while (p < header_end) {
+        // Find next tensor name (skip __metadata__)
         const char *q = strchr(p, '"');
         if (!q || q >= header_end) break;
         q++;
@@ -139,11 +130,13 @@ static bool safe_load_file(SafeTensors &st, const char *path) {
         std::string name(q, name_end);
         p = name_end + 1;
 
+        // Skip to the value object
         const char *brace = strchr(p, '{');
         if (!brace || brace >= header_end) break;
         const char *brace_end = strchr(brace, '}');
         if (!brace_end || brace_end >= header_end) break;
 
+        // Extract a null-terminated copy of this entry for parsing
         std::string entry(brace, brace_end + 1);
         p = brace_end + 1;
 
@@ -200,134 +193,4 @@ static const SafeTensor &safe_get(const SafeTensors &st, const std::string &name
         exit(1);
     }
     return it->second;
-}
-
-// ============================================================
-// Part 2: ggml tensor loader
-// ============================================================
-
-static ggml_type sf_dtype_to_ggml(SafeDType dt) {
-    switch (dt) {
-        case SF_BF16: return GGML_TYPE_BF16;
-        case SF_F16:  return GGML_TYPE_F16;
-        case SF_F32:  return GGML_TYPE_F32;
-    }
-    return GGML_TYPE_F32;
-}
-
-// Weight loading context.
-// Manages a ggml_context for weight tensors + their backend buffer.
-// Usage:
-//   SFWeightCtx wctx;
-//   sf_weight_ctx_init(&wctx, n_tensors);
-//   ggml_tensor* w = sf_load_tensor(&wctx, st, "layer.0.weight");
-//   sf_weight_ctx_alloc(&wctx, backend);
-//
-// After alloc, all tensors live in the backend buffer (GPU/CPU).
-
-struct SFWeightCtx {
-    struct ggml_context * ctx;
-    ggml_backend_buffer_t buffer;
-
-    struct PendingCopy {
-        struct ggml_tensor * tensor;
-        const void * src;
-        size_t nbytes;
-    };
-    std::vector<PendingCopy> pending;
-};
-
-static void sf_weight_ctx_init(SFWeightCtx * wctx, int n_tensors) {
-    size_t ctx_size = (size_t)n_tensors * ggml_tensor_overhead() + 1024;
-
-    struct ggml_init_params params = {
-        /*.mem_size   =*/ ctx_size,
-        /*.mem_buffer =*/ NULL,
-        /*.no_alloc   =*/ true,
-    };
-    wctx->ctx = ggml_init(params);
-    wctx->buffer = NULL;
-    wctx->pending.clear();
-    wctx->pending.reserve(n_tensors);
-}
-
-// Load a single tensor from safetensors into the weight context.
-// Returns the ggml_tensor (not yet backed by memory, call sf_weight_ctx_alloc after).
-static struct ggml_tensor * sf_load_tensor(
-        SFWeightCtx * wctx,
-        const SafeTensors & st,
-        const std::string & name,
-        const int64_t * shape_override = nullptr,
-        int n_dims_override = 0) {
-
-    auto it = st.tensors.find(name);
-    if (it == st.tensors.end()) {
-        fprintf(stderr, "[Safetensors] FATAL: tensor '%s' not found\n", name.c_str());
-        exit(1);
-    }
-    const SafeTensor & t = it->second;
-
-    ggml_type type = sf_dtype_to_ggml(t.dtype);
-
-    // ggml uses ne[0]=innermost (column-major metadata)
-    // safetensors shape is [dim0, dim1, ...] in row-major (PyTorch convention)
-    // For a 2D weight [out, in]: ggml ne[0]=in, ne[1]=out
-    int n_dims;
-    int64_t ne[4] = {1, 1, 1, 1};
-
-    if (shape_override && n_dims_override > 0) {
-        n_dims = n_dims_override;
-        for (int i = 0; i < n_dims; i++) ne[i] = shape_override[i];
-    } else {
-        n_dims = (int)t.shape.size();
-        // Reverse: PyTorch [d0, d1, ...] -> ggml [d_last, ..., d0]
-        for (int i = 0; i < n_dims && i < 4; i++) {
-            ne[i] = t.shape[n_dims - 1 - i];
-        }
-    }
-
-    struct ggml_tensor * tensor = ggml_new_tensor(wctx->ctx, type, n_dims, ne);
-    ggml_set_name(tensor, name.c_str());
-
-    wctx->pending.push_back({tensor, t.data, t.nbytes});
-
-    return tensor;
-}
-
-// Try to load, returns nullptr if not found (no exit)
-static struct ggml_tensor * sf_try_load_tensor(
-        SFWeightCtx * wctx,
-        const SafeTensors & st,
-        const std::string & name) {
-    auto it = st.tensors.find(name);
-    if (it == st.tensors.end()) return nullptr;
-    return sf_load_tensor(wctx, st, name);
-}
-
-// Allocate backend buffer and copy all pending tensor data.
-// Call this ONCE after all sf_load_tensor calls.
-static bool sf_weight_ctx_alloc(SFWeightCtx * wctx, ggml_backend_t backend) {
-    wctx->buffer = ggml_backend_alloc_ctx_tensors(wctx->ctx, backend);
-    if (!wctx->buffer) {
-        fprintf(stderr, "[Safetensors] FATAL: failed to allocate backend buffer\n");
-        return false;
-    }
-
-    size_t total = 0;
-    for (auto & pc : wctx->pending) {
-        ggml_backend_tensor_set(pc.tensor, pc.src, 0, pc.nbytes);
-        total += pc.nbytes;
-    }
-    fprintf(stderr, "[Safetensors] Loaded %zu tensors, %.1f MB into backend\n",
-            wctx->pending.size(), (float)total / (1024 * 1024));
-
-    wctx->pending.clear();
-    return true;
-}
-
-static void sf_weight_ctx_free(SFWeightCtx * wctx) {
-    if (wctx->buffer) ggml_backend_buffer_free(wctx->buffer);
-    if (wctx->ctx) ggml_free(wctx->ctx);
-    wctx->buffer = NULL;
-    wctx->ctx = NULL;
 }

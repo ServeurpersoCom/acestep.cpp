@@ -14,7 +14,7 @@
 #include <chrono>
 #include <cublas_v2.h>
 #include <cuda_bf16.h>
-#include "bpe.h"
+#include "../bpe.h"
 #include "safetensors.h"
 #include "kernels.cuh"
 

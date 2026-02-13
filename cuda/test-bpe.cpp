@@ -3,7 +3,7 @@
 #include <cstdlib>
 #include <string>
 #include <vector>
-#include "bpe.h"
+#include "../bpe.h"
 
 int main(int argc, char **argv) {
     const char *dir = argc > 1 ? argv[1] : "checkpoints/Qwen3-Embedding-0.6B";

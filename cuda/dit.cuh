@@ -9,6 +9,7 @@
 #include <vector>
 #include <cuda_bf16.h>
 #include <cublas_v2.h>
+#include "../debug.h"
 
 using bf16 = __nv_bfloat16;
 
@@ -596,9 +597,10 @@ struct DiTModel {
 
     // Timestep embedding scratch
     bf16 *buf_temb;         // [hidden_size]  (combined temb)
+    bf16 *buf_temb_r;       // [hidden_size]  (temb_r out, avoids aliasing with buf_temb_tmp)
     bf16 *buf_tproj;        // [6, hidden_size] (combined timestep_proj)
     bf16 *buf_sinusoidal;   // [256] sinusoidal
-    bf16 *buf_temb_tmp;     // [hidden_size] temp
+    bf16 *buf_temb_tmp;     // [hidden_size] temp for linear_2 inside forward_temb
     float *buf_t_f32;       // [1] timestep scalar on GPU
 
     // Cross-attention KV cache: [n_layers][2][enc_S][n_kv_heads*head_dim]
@@ -847,6 +849,7 @@ static void load_dit_model(DiTModel *m, const char *model_dir, DiTConfig cfg) {
 
     // Timestep embedding buffers
     DIT_MALLOC(m->buf_temb,       H * sizeof(bf16));
+    DIT_MALLOC(m->buf_temb_r,     H * sizeof(bf16));
     DIT_MALLOC(m->buf_tproj,      6 * H * sizeof(bf16));
     DIT_MALLOC(m->buf_sinusoidal, 256 * sizeof(bf16));
     DIT_MALLOC(m->buf_temb_tmp,   H * sizeof(bf16));
@@ -869,15 +872,26 @@ static void load_dit_model(DiTModel *m, const char *model_dir, DiTConfig cfg) {
 // Input: t scalar (f32 on GPU)
 // Output: temb [hidden_size], timestep_proj [6, hidden_size]
 static void forward_temb(DiTModel *m, const TimestepEmbWeights &w,
-                         const float *t_gpu, bf16 *out_temb, bf16 *out_proj) {
+                         const float *t_gpu, bf16 *out_temb, bf16 *out_proj,
+                         const DebugDumper *dbg = nullptr, const char *suffix = "") {
     int H = m->cfg.hidden_size;
 
     // 1) Sinusoidal embedding: t -> [256]
     sinusoidal_emb(m->buf_sinusoidal, t_gpu, 1, 256, 1000.0f, 10000.0f);
+    if (dbg && dbg->enabled) {
+        char name[64];
+        snprintf(name, sizeof(name), "sinusoidal%s", suffix);
+        debug_dump_bf16_2d(dbg, name, m->buf_sinusoidal, 1, 256);
+    }
 
     // 2) linear_1: [256] -> [H]
     linear_batch(out_temb, m->buf_sinusoidal, w.linear_1_w, nullptr, 1, H, 256, m->cublas);
     add_bias_2d(out_temb, w.linear_1_b, 1, H);
+    if (dbg && dbg->enabled) {
+        char name[64];
+        snprintf(name, sizeof(name), "temb_lin1%s", suffix);
+        debug_dump_bf16_2d(dbg, name, out_temb, 1, H);
+    }
 
     // 3) SiLU
     silu_inplace(out_temb, H);
@@ -896,7 +910,8 @@ static void forward_temb(DiTModel *m, const TimestepEmbWeights &w,
 }
 
 // DiT self-attention forward (bidirectional, batch)
-static void dit_self_attention(DiTModel *m, DiTLayer &ly, int S, int window) {
+static void dit_self_attention(DiTModel *m, DiTLayer &ly, int S, int window,
+                               const DebugDumper *dbg = nullptr, int layer = -1, int step = -1) {
     DiTConfig &c = m->cfg;
     int H = c.hidden_size;
     int Nh = c.n_heads;
@@ -926,6 +941,12 @@ static void dit_self_attention(DiTModel *m, DiTLayer &ly, int S, int window) {
     // RoPE (bidirectional, sequential positions)
     rope_batch(m->buf_q, m->buf_k, Nh, Nkv, S, D, c.rope_theta);
 
+    // Debug: dump Q and K after QK-Norm + RoPE
+    if (layer == 0 && step == 0 && dbg && dbg->enabled) {
+        debug_dump_bf16_2d(dbg, "layer0_q_after_rope", m->buf_q, Nh * S, D);
+        debug_dump_bf16_2d(dbg, "layer0_k_after_rope", m->buf_k, Nkv * S, D);
+    }
+
     // GQA expand K, V: [Nkv, S, D] -> [Nh, S, D]
     gqa_expand(m->buf_k_exp, m->buf_k, Nh, Nkv, S, D);
     gqa_expand(m->buf_v_exp, m->buf_v, Nh, Nkv, S, D);
@@ -943,6 +964,10 @@ static void dit_self_attention(DiTModel *m, DiTLayer &ly, int S, int window) {
 
     // Reshape back: [Nh, S, D] -> [S, Nh*D]
     reshape_from_heads(m->buf_attn_out, m->buf_q, S, Nh, D);
+
+    // Debug: attention output before O-proj
+    if (layer == 0 && step == 0 && dbg && dbg->enabled)
+        debug_dump_bf16_2d(dbg, "layer0_attn_out", m->buf_attn_out, S, Nh * D);
 
     // O projection: [S, Nh*D] -> [S, H]
     linear_batch(m->buf_norm, m->buf_attn_out, ly.sa_o_proj, nullptr, S, H, Nh * D, m->cublas);  // reuse buf_norm
@@ -1058,7 +1083,8 @@ __global__ void concat_channels_kernel(bf16 *dst, const bf16 *a, const bf16 *b,
 static void forward_dit(DiTModel *m, bf16 *xt, bf16 *context_latents,
                         float t_value, float t_r_value,
                         bf16 *encoder_hidden_states, int enc_S,
-                        bf16 *output, int T) {
+                        bf16 *output, int T,
+                        const DebugDumper *dbg = nullptr, int step = -1) {
     DiTConfig &c = m->cfg;
     int H = c.hidden_size;
     int P = c.patch_size;
@@ -1086,21 +1112,33 @@ static void forward_dit(DiTModel *m, bf16 *xt, bf16 *context_latents,
     CUDA_CHECK(cudaMemcpy(m->buf_t_f32, &t_val, sizeof(float), cudaMemcpyDefault));
     bf16 *temb_t = m->buf_temb;         // [H]
     bf16 *tproj_t = m->buf_tproj;       // [6*H]
-    forward_temb(m, m->time_embed, m->buf_t_f32, temb_t, tproj_t);
+    const DebugDumper *step0_dbg = (step == 0) ? dbg : nullptr;
+    forward_temb(m, m->time_embed, m->buf_t_f32, temb_t, tproj_t, step0_dbg, "_t");
 
     // t_r embedding (t - t_r, but in turbo mode t_r = t, so t - t_r = 0)
     float tr_val = t_value - t_r_value;
     CUDA_CHECK(cudaMemcpy(m->buf_t_f32, &tr_val, sizeof(float), cudaMemcpyDefault));
-    bf16 *temb_r = m->buf_temb_tmp;     // temp [H]
+    bf16 *temb_r = m->buf_temb_r;      // [H] (dedicated buffer, avoids aliasing with buf_temb_tmp)
     // Need second tproj buffer, reuse buf_sinusoidal area? No, too small.
     // Use part of buf_gate for tproj_r (6*H bf16 = 6*2048*2 = 24KB, buf_gate = S*I*2 >> that)
     bf16 *tproj_r = m->buf_gate;        // [6*H] temp
-    forward_temb(m, m->time_embed_r, m->buf_t_f32, temb_r, tproj_r);
+    forward_temb(m, m->time_embed_r, m->buf_t_f32, temb_r, tproj_r, step0_dbg, "_r");
+
+    // Dump individual temb_t/temb_r before combining
+    if (step == 0 && dbg && dbg->enabled) {
+        debug_dump_bf16_2d(dbg, "temb_t", temb_t, 1, H);
+        debug_dump_bf16_2d(dbg, "temb_r", temb_r, 1, H);
+    }
 
     // Combine: temb = temb_t + temb_r, tproj = tproj_t + tproj_r
     add_2d(temb_t, temb_r, H);
     add_2d(tproj_t, tproj_r, 6 * H);
     // temb_t = combined temb [H], tproj_t = combined tproj [6, H]
+
+    if (step == 0 && dbg && dbg->enabled) {
+        debug_dump_bf16_2d(dbg, "tproj", tproj_t, 6, H);
+        debug_dump_bf16_2d(dbg, "temb", temb_t, 1, H);
+    }
 
     // 2) Concatenate context_latents [T, ctx_ch] and xt [T, out_ch] -> [T, in_ch]
     // Python: hidden_states = torch.cat([context_latents, hidden_states], dim=-1)
@@ -1118,12 +1156,30 @@ static void forward_dit(DiTModel *m, bf16 *xt, bf16 *context_latents,
     linear_batch(m->buf_hidden, m->buf_concat, m->proj_in_w, nullptr, S, H, in_dim, m->cublas);
     add_bias_2d(m->buf_hidden, m->proj_in_b, S, H);
     // buf_hidden: [S, H]
+    if (step == 0 && dbg && dbg->enabled) {
+        debug_dump_bf16_2d(dbg, "hidden_after_proj_in", m->buf_hidden, S, H);
+        // Print tproj first4 values (bf16 on GPU)
+        {
+            float tmp[4];
+            std::vector<float> buf(6 * H);
+            // Convert tproj bf16 -> f32 to host
+            bf16 tmp16[4];
+            cudaMemcpy(tmp16, tproj_t, 4 * sizeof(bf16), cudaMemcpyDeviceToHost);
+            for (int i = 0; i < 4; i++) tmp[i] = __bfloat162float(tmp16[i]);
+            fprintf(stderr, "[Debug] tproj first4: %.6f %.6f %.6f %.6f\n", tmp[0], tmp[1], tmp[2], tmp[3]);
+            cudaMemcpy(tmp16, temb_t, 4 * sizeof(bf16), cudaMemcpyDeviceToHost);
+            for (int i = 0; i < 4; i++) tmp[i] = __bfloat162float(tmp16[i]);
+            fprintf(stderr, "[Debug] temb first4: %.6f %.6f %.6f %.6f\n", tmp[0], tmp[1], tmp[2], tmp[3]);
+        }
+    }
 
     // 3) Project encoder hidden states
     if (!m->cross_kv_valid) {
         linear_batch(m->buf_enc_hidden, encoder_hidden_states, m->cond_emb_w, nullptr,
                      enc_S, H, H, m->cublas);
         add_bias_2d(m->buf_enc_hidden, m->cond_emb_b, enc_S, H);
+        if (step == 0 && dbg && dbg->enabled)
+            debug_dump_bf16_2d(dbg, "enc_after_cond_emb", m->buf_enc_hidden, enc_S, H);
     }
 
     // 4) Process through DiT layers
@@ -1153,18 +1209,30 @@ static void forward_dit(DiTModel *m, bf16 *xt, bf16 *context_latents,
         rmsnorm_2d(m->buf_norm, m->buf_hidden, ly.self_attn_norm, S, H, c.rms_norm_eps);
         adaln_modulate(m->buf_norm, m->buf_norm, scale_msa, shift_msa, S, H);
 
+        if (l == 0 && step == 0 && dbg && dbg->enabled)
+            debug_dump_bf16_2d(dbg, "layer0_sa_input", m->buf_norm, S, H);
+
         // Self-attention (writes result to buf_norm)
-        dit_self_attention(m, ly, S, window);
+        dit_self_attention(m, ly, S, window, dbg, l, step);
+
+        if (l == 0 && step == 0 && dbg && dbg->enabled)
+            debug_dump_bf16_2d(dbg, "layer0_sa_output", m->buf_norm, S, H);
 
         // Gated residual: hidden = residual + attn_output * gate_msa
         copy_2d(m->buf_hidden, m->buf_residual, S * H);
         gated_add(m->buf_hidden, m->buf_norm, gate_msa, S, H);
+
+        if (l == 0 && step == 0 && dbg && dbg->enabled)
+            debug_dump_bf16_2d(dbg, "layer0_after_self_attn", m->buf_hidden, S, H);
 
         // Step 2: Cross-attention (always, every layer)
         rmsnorm_2d(m->buf_norm, m->buf_hidden, ly.cross_attn_norm, S, H, c.rms_norm_eps);
         dit_cross_attention(m, ly, l, S);
         // Residual add (no gate for cross-attention)
         add_2d(m->buf_hidden, m->buf_norm, S * H);
+
+        if (l == 0 && step == 0 && dbg && dbg->enabled)
+            debug_dump_bf16_2d(dbg, "layer0_after_cross_attn", m->buf_hidden, S, H);
 
         // Step 3: MLP with AdaLN
         // c_shift_msa, c_scale_msa, c_gate_msa still valid in buf_adaln (dedicated buffer)
@@ -1182,6 +1250,9 @@ static void forward_dit(DiTModel *m, bf16 *xt, bf16 *context_latents,
         // Gated residual: hidden = residual + mlp_output * c_gate
         copy_2d(m->buf_hidden, m->buf_residual, S * H);
         gated_add(m->buf_hidden, m->buf_norm, c_gate_msa, S, H);
+
+        if (l == 0 && step == 0 && dbg && dbg->enabled)
+            debug_dump_bf16_2d(dbg, "hidden_after_layer0", m->buf_hidden, S, H);
     }
 
     // Mark cross-KV cache as valid after first complete forward pass
@@ -1252,7 +1323,8 @@ static void dit_generate(DiTModel *m,
                          int enc_S, int T,
                          const float *t_schedule,  // [num_steps] descending timesteps
                          int num_steps,
-                         bf16 *output) {            // [T, out_channels]
+                         bf16 *output,             // [T, out_channels]
+                         const DebugDumper *dbg = nullptr) {
     int out_ch = m->cfg.out_channels;
     int n = T * out_ch;
 
@@ -1268,15 +1340,32 @@ static void dit_generate(DiTModel *m,
         float t_curr = t_schedule[step];
 
         forward_dit(m, xt, context_latents, t_curr, t_curr,
-                    encoder_hidden_states, enc_S, vt, T);
+                    encoder_hidden_states, enc_S, vt, T, dbg, step);
+
+        // debug dump vt
+        if (dbg && dbg->enabled) {
+            char name[64];
+            snprintf(name, sizeof(name), "dit_step%d_vt", step);
+            debug_dump_bf16_2d(dbg, name, vt, T, out_ch);
+        }
 
         if (step == num_steps - 1) {
             // Final step: x0 = zt - vt * t
             get_x0_from_noise(output, xt, vt, t_curr, n);
+
+            if (dbg && dbg->enabled) {
+                debug_dump_bf16_2d(dbg, "dit_x0", output, T, out_ch);
+            }
         } else {
             // Euler step: xt = xt - vt * dt
             float dt = t_curr - t_schedule[step + 1];
             euler_step(xt, vt, dt, n);
+
+            if (dbg && dbg->enabled) {
+                char name[64];
+                snprintf(name, sizeof(name), "dit_step%d_xt", step);
+                debug_dump_bf16_2d(dbg, name, xt, T, out_ch);
+            }
         }
     }
 }

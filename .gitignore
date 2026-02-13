@@ -10,3 +10,7 @@ pt2bin
 # Data
 checkpoints/
 *.bf16
+
+# ggml (cloned dependency)
+ggml/
+build/

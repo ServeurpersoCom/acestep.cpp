@@ -1,0 +1,392 @@
+// vae.h: AutoencoderOobleck decoder (audio VAE) via ggml
+//
+// Architecture: conv1(64->2048,k=7) -> 5xblock(snake+convT+3xresunit) -> snake+conv2(128->2,k=7)
+// ResUnit(ch, dil): skip=x -> snake->conv(k=7,dil)->snake->conv(k=1)->+skip
+// Snake: x + sin^2(e^a * x) / e^b
+// Weight norm fused at load: w = g*v/||v||
+// Upsample: 10x6x4x4x2 = 1920x
+
+#pragma once
+#include "ggml.h"
+#include "ggml-backend.h"
+#include "safetensors.h"
+#include <cmath>
+#include <cstdio>
+#include <cstring>
+#include <string>
+#include <vector>
+
+// Structs
+
+struct VAEResUnit {
+    struct ggml_tensor * s1a, * s1b;   // snake1 exp(alpha), exp(beta) [1, C]
+    struct ggml_tensor * c1w, * c1b;   // conv1 fused [7, C, C], bias [C]
+    struct ggml_tensor * s2a, * s2b;   // snake2
+    struct ggml_tensor * c2w, * c2b;   // conv2 fused [1, C, C], bias [C]
+    int dilation;
+};
+
+struct VAEBlock {
+    struct ggml_tensor * sa, * sb;     // snake exp(a/b) [1, in_ch]
+    struct ggml_tensor * ctw, * ctb;   // conv_transpose fused [K, out_ch, in_ch], bias [out_ch]
+    int in_ch, out_ch, stride, kernel;
+    VAEResUnit ru[3];
+};
+
+struct VAEGGML {
+    struct ggml_tensor * c1w, * c1b;   // conv1 [7, 64, 2048], bias [2048]
+    VAEBlock blk[5];
+    struct ggml_tensor * sa, * sb;     // final snake [1, 128]
+    struct ggml_tensor * c2w;          // conv2 [7, 128, 2] (no bias)
+
+    ggml_backend_t backend;
+    ggml_backend_t cpu_backend;
+    ggml_backend_buffer_t buf;
+    struct ggml_context * weight_ctx;  // holds weight tensor metadata
+};
+
+// Load helpers
+
+// Fuse weight_norm: w = g*v/||v||, write f32 into pre-allocated ggml_tensor
+// Works for both Conv1d [OC,IC,K] and ConvTranspose1d [IC,OC,K]:
+// weight_norm normalizes over dim=0 (shape[0]), regardless of semantics.
+static void vae_fuse_wn(struct ggml_tensor * dst, const SafeTensors & st, const std::string & pfx) {
+    const SafeTensor & tg = st.tensors.at(pfx + ".weight_g");
+    const SafeTensor & tv = st.tensors.at(pfx + ".weight_v");
+    int dim0 = (int)tv.shape[0];
+    int fan  = 1;
+    for (size_t i = 1; i < tv.shape.size(); i++) fan *= (int)tv.shape[i];
+    const uint16_t * g = (const uint16_t *)tg.data;
+    const uint16_t * v = (const uint16_t *)tv.data;
+    std::vector<float> w(dim0 * fan);
+    for (int d = 0; d < dim0; d++) {
+        float gv = ggml_bf16_to_fp32(*(const ggml_bf16_t *)&g[d]);
+        float nsq = 0;
+        for (int i = 0; i < fan; i++) {
+            float vv = ggml_bf16_to_fp32(*(const ggml_bf16_t *)&v[d * fan + i]);
+            nsq += vv * vv;
+        }
+        float s = gv / (sqrtf(nsq) + 1e-12f);
+        for (int i = 0; i < fan; i++) {
+            float vv = ggml_bf16_to_fp32(*(const ggml_bf16_t *)&v[d * fan + i]);
+            w[d * fan + i] = vv * s;
+        }
+    }
+    ggml_backend_tensor_set(dst, w.data(), 0, w.size() * sizeof(float));
+}
+
+// Load bf16 snake param [1,C,1] -> exp -> f32 [1, C]
+static void vae_load_snake(struct ggml_tensor * dst, const SafeTensors & st, const std::string & name) {
+    const SafeTensor & t = st.tensors.at(name);
+    int C = (int)t.shape[1];
+    const uint16_t * raw = (const uint16_t *)t.data;
+    std::vector<float> d(C);
+    for (int i = 0; i < C; i++)
+        d[i] = expf(ggml_bf16_to_fp32(*(const ggml_bf16_t *)&raw[i]));
+    ggml_backend_tensor_set(dst, d.data(), 0, C * sizeof(float));
+}
+
+// Load bf16 bias [C] -> f32
+static void vae_load_bias(struct ggml_tensor * dst, const SafeTensors & st, const std::string & name) {
+    const SafeTensor & t = st.tensors.at(name);
+    int C = (int)t.shape[0];
+    const uint16_t * raw = (const uint16_t *)t.data;
+    std::vector<float> d(C);
+    for (int i = 0; i < C; i++)
+        d[i] = ggml_bf16_to_fp32(*(const ggml_bf16_t *)&raw[i]);
+    ggml_backend_tensor_set(dst, d.data(), 0, C * sizeof(float));
+}
+
+// Load model
+
+static void vae_ggml_load(VAEGGML * m, const char * path) {
+    SafeTensors st;
+    if (!safe_load(st, path)) {
+        fprintf(stderr, "[VAE] FATAL: cannot load %s\n", path);
+        exit(1);
+    }
+    fprintf(stderr, "[VAE] Loaded safetensors: %zu tensors\n", st.tensors.size());
+
+    static const int strides[]   = {10, 6, 4, 4, 2};
+    static const int in_ch[]     = {2048, 1024, 512, 256, 128};
+    static const int out_ch[]    = {1024, 512, 256, 128, 128};
+    static const int dilations[] = {1, 3, 9};
+
+    // Phase 1: create tensor metadata (no_alloc context)
+    size_t ctx_size = ggml_tensor_overhead() * 200;
+    struct ggml_init_params p = { ctx_size, NULL, true };
+    m->weight_ctx = ggml_init(p);
+    struct ggml_context * ctx = m->weight_ctx;
+
+    m->c1w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, 64, 2048);
+    m->c1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2048);
+
+    for (int i = 0; i < 5; i++) {
+        VAEBlock & b = m->blk[i];
+        b.in_ch  = in_ch[i];
+        b.out_ch = out_ch[i];
+        b.stride = strides[i];
+        b.kernel = strides[i] * 2;
+        int C    = out_ch[i];
+        b.sa  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, in_ch[i]);
+        b.sb  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, in_ch[i]);
+        b.ctw = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, b.kernel, out_ch[i], in_ch[i]);
+        b.ctb = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, out_ch[i]);
+        for (int r = 0; r < 3; r++) {
+            VAEResUnit & ru = b.ru[r];
+            ru.dilation = dilations[r];
+            ru.s1a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
+            ru.s1b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
+            ru.c1w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, C, C);
+            ru.c1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
+            ru.s2a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
+            ru.s2b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
+            ru.c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, C, C);
+            ru.c2b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
+        }
+    }
+    m->sa  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
+    m->sb  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
+    m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, 128, 2);
+
+    // Phase 2: allocate backend buffer on CUDA (im2col grid Y fix enables long-sequence conv1d)
+    m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+    m->backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, NULL);
+    if (!m->backend) {
+        fprintf(stderr, "[VAE] CUDA unavailable, falling back to CPU\n");
+        m->backend = m->cpu_backend;
+    }
+    m->buf = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
+    fprintf(stderr, "[VAE] Backend: %s, Weight buffer: %.1f MB\n",
+            ggml_backend_name(m->backend),
+            (float)ggml_backend_buffer_get_size(m->buf) / (1024 * 1024));
+
+    // Phase 3: load & fuse weights
+    vae_fuse_wn(m->c1w, st, "decoder.conv1");
+    vae_load_bias(m->c1b, st, "decoder.conv1.bias");
+
+    for (int i = 0; i < 5; i++) {
+        VAEBlock & b = m->blk[i];
+        std::string bp = "decoder.block." + std::to_string(i);
+        vae_load_snake(b.sa, st, bp + ".snake1.alpha");
+        vae_load_snake(b.sb, st, bp + ".snake1.beta");
+        vae_fuse_wn(b.ctw, st, bp + ".conv_t1");
+        vae_load_bias(b.ctb, st, bp + ".conv_t1.bias");
+        for (int r = 0; r < 3; r++) {
+            VAEResUnit & ru = b.ru[r];
+            std::string rp = bp + ".res_unit" + std::to_string(r + 1);
+            vae_load_snake(ru.s1a, st, rp + ".snake1.alpha");
+            vae_load_snake(ru.s1b, st, rp + ".snake1.beta");
+            vae_fuse_wn(ru.c1w, st, rp + ".conv1");
+            vae_load_bias(ru.c1b, st, rp + ".conv1.bias");
+            vae_load_snake(ru.s2a, st, rp + ".snake2.alpha");
+            vae_load_snake(ru.s2b, st, rp + ".snake2.beta");
+            vae_fuse_wn(ru.c2w, st, rp + ".conv2");
+            vae_load_bias(ru.c2b, st, rp + ".conv2.bias");
+        }
+    }
+    vae_load_snake(m->sa, st, "decoder.snake1.alpha");
+    vae_load_snake(m->sb, st, "decoder.snake1.beta");
+    vae_fuse_wn(m->c2w, st, "decoder.conv2");
+
+    fprintf(stderr, "[VAE] Loaded: 5 blocks, upsample=1920x\n");
+    // st goes out of scope here, mmaps freed, all data in ggml buffer
+}
+
+// Graph building
+
+// Snake activation: x + sin^2(exp_a * x) / exp_b
+// x: [T, C], exp_a: [1, C], exp_b: [1, C]
+static struct ggml_tensor * vae_snake(
+        struct ggml_context * ctx,
+        struct ggml_tensor * x,
+        struct ggml_tensor * exp_a,
+        struct ggml_tensor * exp_b) {
+    struct ggml_tensor * ax = ggml_mul(ctx, x, exp_a);      // [T, C] (broadcast 1->T)
+    struct ggml_tensor * s  = ggml_sin(ctx, ax);             // sin(e^a * x)
+    struct ggml_tensor * s2 = ggml_sqr(ctx, s);              // sin^2
+    struct ggml_tensor * d  = ggml_div(ctx, s2, exp_b);      // / e^b
+    return ggml_add(ctx, x, d);                              // x + ...
+}
+
+// Conv1d + bias: data [T, IC] -> [T_out, OC]
+static struct ggml_tensor * vae_conv1d(
+        struct ggml_context * ctx,
+        struct ggml_tensor * w,    // [K, IC, OC]
+        struct ggml_tensor * b,    // [OC] or NULL
+        struct ggml_tensor * x,    // [T, IC]
+        int stride, int padding, int dilation) {
+    // ggml_conv_1d im2col requires F16 kernel
+    struct ggml_tensor * wf16 = ggml_cast(ctx, w, GGML_TYPE_F16);
+    struct ggml_tensor * y = ggml_conv_1d(ctx, wf16, x, stride, padding, dilation);
+    // ggml_conv_1d returns [OL, OC, N=1], squeeze to 2d
+    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    if (b) {
+        // bias [OC] -> [1, OC] for broadcast over OL dimension
+        struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
+        y = ggml_add(ctx, y, b2d);
+    }
+    return y;
+}
+
+// ConvTranspose1d + bias
+static struct ggml_tensor * vae_conv_t1d(
+        struct ggml_context * ctx,
+        struct ggml_tensor * w,    // [K, out_ch, in_ch]
+        struct ggml_tensor * b,    // [out_ch] or NULL
+        struct ggml_tensor * x,    // [T, in_ch]
+        int stride, int padding) {
+    // ggml_conv_transpose_1d asserts p0==0, so we crop manually
+    struct ggml_tensor * y = ggml_conv_transpose_1d(ctx, w, x, stride, 0, 1);
+    // y is 4d: [OL, OC, 1, 1], squeeze to 2d
+    y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
+    // Crop padding from both sides: [OL, OC] -> [OL - 2*pad, OC]
+    if (padding > 0) {
+        y = ggml_view_2d(ctx, y, y->ne[0] - 2 * padding, y->ne[1],
+                         y->nb[1], padding * sizeof(float));
+    }
+    if (b) {
+        struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
+        y = ggml_add(ctx, y, b2d);
+    }
+    return y;
+}
+
+// ResUnit forward
+static struct ggml_tensor * vae_res_unit(
+        struct ggml_context * ctx,
+        VAEResUnit * ru,
+        struct ggml_tensor * x) {   // [T, C]
+    struct ggml_tensor * skip = x;
+
+    // snake1 -> dilated conv(k=7) -> snake2 -> conv(k=1)
+    int pad = 3 * ru->dilation;  // (k-1)*dil/2 = 3*dil
+    x = vae_snake(ctx, x, ru->s1a, ru->s1b);
+    x = vae_conv1d(ctx, ru->c1w, ru->c1b, x, 1, pad, ru->dilation);
+    x = vae_snake(ctx, x, ru->s2a, ru->s2b);
+    x = vae_conv1d(ctx, ru->c2w, ru->c2b, x, 1, 0, 1);
+
+    return ggml_add(ctx, skip, x);
+}
+
+// Build full VAE decode graph
+// latent: [T_latent, 64] -> audio: [T_audio, 2]
+static struct ggml_tensor * vae_ggml_build_graph(
+        struct ggml_context * ctx,
+        VAEGGML * m,
+        struct ggml_tensor * latent) {   // [T, 64] input
+
+    // conv1: [T, 64] -> [T, 2048]
+    struct ggml_tensor * x = vae_conv1d(ctx, m->c1w, m->c1b, latent, 1, 3, 1);
+
+    // 5 decoder blocks
+    for (int i = 0; i < 5; i++) {
+        VAEBlock & b = m->blk[i];
+        // snake -> conv_transpose (upsample)
+        x = vae_snake(ctx, x, b.sa, b.sb);
+        int pad = (b.kernel - b.stride) / 2;
+        x = vae_conv_t1d(ctx, b.ctw, b.ctb, x, b.stride, pad);
+        // 3 res units
+        for (int r = 0; r < 3; r++)
+            x = vae_res_unit(ctx, &b.ru[r], x);
+    }
+
+    // Final: snake -> conv2(128->2, k=7, pad=3)
+    x = vae_snake(ctx, x, m->sa, m->sb);
+    x = vae_conv1d(ctx, m->c2w, NULL, x, 1, 3, 1);
+
+    return x;  // [T_audio, 2]
+}
+
+// Decode API
+
+// Decode latent [out_ch, T_latent] -> audio [2, T_audio]
+// Input layout matches DiT output: [Oc, T] with ne[0]=Oc contiguous.
+// Returns T_audio (or -1 on error).
+static int vae_ggml_decode(
+        VAEGGML * m,
+        const float * latent,   // [out_ch=64, T_latent] flat (DiT output layout)
+        int T_latent,
+        float * audio_out,      // [2, T_audio] flat (caller allocs T_latent*1920*2 floats)
+        int max_T_audio) {
+
+    int T_audio = T_latent * 1920;
+    if (T_audio > max_T_audio) {
+        fprintf(stderr, "[VAE] T_audio %d exceeds max %d\n", T_audio, max_T_audio);
+        return -1;
+    }
+
+    // Build graph context (large: VAE has many ops with big intermediate tensors)
+    size_t ctx_size = ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(8192, false);
+    std::vector<uint8_t> ctx_buf(ctx_size);
+    struct ggml_init_params p = { ctx_size, ctx_buf.data(), true };
+    struct ggml_context * ctx = ggml_init(p);
+
+    // Input: [T_latent, 64] for ggml conv_1d (ne[0]=T_latent contiguous)
+    struct ggml_tensor * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_latent, 64);
+    ggml_set_name(input, "vae_input");
+    ggml_set_input(input);
+
+    // Build graph
+    struct ggml_tensor * output = vae_ggml_build_graph(ctx, m, input);
+    ggml_set_name(output, "vae_output");
+    ggml_set_output(output);
+
+    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8192, false);
+    ggml_build_forward_expand(gf, output);
+    fprintf(stderr, "[VAE] Graph: %d nodes, output ne=[%lld, %lld]\n",
+            ggml_graph_n_nodes(gf), (long long)output->ne[0], (long long)output->ne[1]);
+
+    // Allocate compute buffers (scheduler needs CPU as last backend for fallback)
+    int n_backends = 1;
+    ggml_backend_t backends[2] = { m->backend, NULL };
+    if (m->backend != m->cpu_backend) {
+        backends[1] = m->cpu_backend;
+        n_backends = 2;
+    }
+    ggml_backend_sched_t sched = ggml_backend_sched_new(backends, NULL, n_backends, 8192, false, false);
+    if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+        fprintf(stderr, "[VAE] FATAL: graph alloc failed\n");
+        ggml_backend_sched_free(sched);
+        ggml_free(ctx);
+        return -1;
+    }
+
+    // Set input: transpose DiT [Oc, T] -> ggml [T, 64]
+    // DiT flat: frame t at offset t*64, element (t,c) = latent[t*64 + c]
+    // ggml [T, 64]: ne[0]=T contiguous, element (t,c) = data[c*T + t]
+    std::vector<float> transposed(64 * T_latent);
+    for (int t = 0; t < T_latent; t++)
+        for (int c = 0; c < 64; c++)
+            transposed[c * T_latent + t] = latent[t * 64 + c];
+    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "vae_input"),
+                            transposed.data(), 0, transposed.size() * sizeof(float));
+
+    // Compute
+    ggml_backend_sched_graph_compute(sched, gf);
+
+    // Read output: ggml [T_audio, 2] ne[0]=T_audio -> element (t,c) = data[c*T_audio + t]
+    // Target: [2, T_audio] flat = channel 0 then channel 1
+    int T_out = (int)output->ne[0];
+    std::vector<float> raw(T_out * 2);
+    ggml_backend_tensor_get(output, raw.data(), 0, raw.size() * sizeof(float));
+    // raw is already [c=0: T_out floats, c=1: T_out floats] due to ggml layout
+    memcpy(audio_out, raw.data(), T_out * 2 * sizeof(float));
+
+    fprintf(stderr, "[VAE] Decoded: T_latent=%d -> T_audio=%d (%.2fs @ 48kHz)\n",
+            T_latent, T_out, (float)T_out / 48000.0f);
+
+    ggml_backend_sched_free(sched);
+    ggml_free(ctx);
+    return T_out;
+}
+
+// Free
+
+static void vae_ggml_free(VAEGGML * m) {
+    if (m->buf) ggml_backend_buffer_free(m->buf);
+    if (m->weight_ctx) ggml_free(m->weight_ctx);
+    if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
+    if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
+    memset(m, 0, sizeof(*m));
+}

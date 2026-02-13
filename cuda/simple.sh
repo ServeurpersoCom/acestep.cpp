@@ -4,7 +4,7 @@
 set -eu
 SEED="${SEED:--1}"
 
-./ace-qwen3 checkpoints/acestep-5Hz-lm-4B \
+./ace-qwen3 ../checkpoints/acestep-5Hz-lm-4B \
     --system "Expand the user's input into a more detailed and specific musical description:" \
     --user "$(printf 'Une chanson française sur le thème des animaux\n\ninstrumental: false')" \
     --fsm --cfg-scale 2.2 \
@@ -20,6 +20,6 @@ SEED="${SEED:--1}"
     --timesignature "$(cat /tmp/ace/timesignature)" \
     --language "$(cat /tmp/ace/language)" \
     --input-codes /tmp/codes.txt \
-    --text-encoder checkpoints/Qwen3-Embedding-0.6B \
-    --dit checkpoints/acestep-v15-turbo --vae checkpoints/vae \
+    --text-encoder ../checkpoints/Qwen3-Embedding-0.6B \
+    --dit ../checkpoints/acestep-v15-turbo --vae ../checkpoints/vae \
     --seed "$SEED" --output simple.wav

@@ -160,7 +160,7 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string &text) {
         if (is_digit(cp)) {
             int start = i;
             while (i < len && is_digit((unsigned char)s[i])) i++;
-            // Actually GPT-2 regex matches single \p{N}, let's match one at a time
+            // GPT-2 regex matches single \p{N}, let's match one at a time
             // to be safe, but in practice consecutive digits usually merge anyway.
             // The regex is \p{N} (single digit), so split each digit:
             for (int j = start; j < i; j++) {
