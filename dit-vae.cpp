@@ -250,7 +250,7 @@ int main(int argc, char ** argv) {
         }
         fprintf(stderr, "[Load] BPE tokenizer: %.1f ms\n", timer.ms());
 
-        // 2. Build formatted prompts (match CUDA build_text_prompt/build_lyric_prompt)
+        // 2. Build formatted prompts (match Python build_text_prompt/build_lyric_prompt)
         // Python always uses "Fill the audio semantic mask..." for text2music (even with LM codes)
         const char * instruction = "Fill the audio semantic mask based on the given conditions:";
         char metas[512];
@@ -327,7 +327,7 @@ int main(int argc, char ** argv) {
         }
         fprintf(stderr, "[Load] ConditionEncoder: %.1f ms\n", timer.ms());
 
-        // Load silence_latent.bin as timbre input (same as CUDA reference)
+        // Load silence_latent.bin as timbre input (same as Python reference)
         // Format: raw f32 [15000, 64], we use first 750 frames (30s @ 25Hz)
         const int S_ref = 750;
         std::vector<float> silence_feats(S_ref * 64);

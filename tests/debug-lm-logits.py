@@ -141,36 +141,35 @@ def main():
     with open(tokens_path, 'r') as f:
         prompt_tokens = [int(x) for x in f.read().strip().split(',')]
 
-    print(f"Prompt: {len(prompt_tokens)} tokens")
-    print(f"First 10: {prompt_tokens[:10]}")
+    print(f"[Test] Prompt: {len(prompt_tokens)} tokens, first 10: {prompt_tokens[:10]}")
 
     # PyTorch reference
     pt_logits = test_pytorch_logits(model_dir, prompt_tokens)
 
-    print(f"PT logits: min={pt_logits.min():.4f} max={pt_logits.max():.4f}")
-    print(f"PT argmax: {pt_logits.argmax()} (val={pt_logits.max():.4f})")
-    print(f"PT top5: {np.argsort(pt_logits)[-5:][::-1]}")
+    print(f"[Python] logits: min={pt_logits.min():.4f} max={pt_logits.max():.4f}")
+    print(f"[Python] argmax: {pt_logits.argmax()} (val={pt_logits.max():.4f})")
+    print(f"[Python] top5: {np.argsort(pt_logits)[-5:][::-1]}")
 
     # GGML logits
     if ggml_logits_path and os.path.exists(ggml_logits_path):
         with open(ggml_logits_path, 'rb') as f:
             ggml_logits = np.frombuffer(f.read(), dtype=np.float32)
 
-        print(f"\nGGML logits: min={ggml_logits.min():.4f} max={ggml_logits.max():.4f}")
-        print(f"GGML argmax: {ggml_logits.argmax()} (val={ggml_logits.max():.4f})")
-        print(f"GGML top5: {np.argsort(ggml_logits)[-5:][::-1]}")
+        print(f"[GGML] logits: min={ggml_logits.min():.4f} max={ggml_logits.max():.4f}")
+        print(f"[GGML] argmax: {ggml_logits.argmax()} (val={ggml_logits.max():.4f})")
+        print(f"[GGML] top5: {np.argsort(ggml_logits)[-5:][::-1]}")
 
         # Cosine similarity
         dot = np.dot(pt_logits, ggml_logits)
         norm_pt = np.linalg.norm(pt_logits)
         norm_gg = np.linalg.norm(ggml_logits)
         cos = dot / (norm_pt * norm_gg + 1e-12)
-        print(f"\nCosine similarity PT<>GGML: {cos:.6f}")
+        print(f"[Test] Cosine similarity Python<>GGML: {cos:.6f}")
 
         # Top-k agreement
         pt_top10 = set(np.argsort(pt_logits)[-10:])
         gg_top10 = set(np.argsort(ggml_logits)[-10:])
-        print(f"Top-10 overlap: {len(pt_top10 & gg_top10)}/10")
+        print(f"[Test] Top-10 overlap: {len(pt_top10 & gg_top10)}/10")
 
 if __name__ == "__main__":
     main()

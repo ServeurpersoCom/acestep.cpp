@@ -146,11 +146,11 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->sb  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
     m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, 128, 2);
 
-    // Phase 2: allocate backend buffer on CUDA (im2col grid Y fix enables long-sequence conv1d)
+    // Phase 2: allocate backend buffer on GPU (im2col grid Y fix enables long-sequence conv1d)
     m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
     m->backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, NULL);
     if (!m->backend) {
-        fprintf(stderr, "[VAE] CUDA unavailable, falling back to CPU\n");
+        fprintf(stderr, "[VAE] GPU unavailable, falling back to CPU\n");
         m->backend = m->cpu_backend;
     }
     m->buf = ggml_backend_alloc_ctx_tensors(ctx, m->backend);

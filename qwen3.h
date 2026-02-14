@@ -130,7 +130,7 @@ static struct ggml_tensor * qwen3_build_self_attn(
 
     // 4) RoPE
     // ggml pitfall: mode=2 (NEOX half-split [i, i+D/2]), NOT mode=0 (consecutive [2i, 2i+1])
-    // CUDA ref: rope_batch_kernel pairs ptr[d] with ptr[d+half] = NEOX
+    // Python ref: rope_batch_kernel pairs ptr[d] with ptr[d+half] = NEOX
     q = ggml_rope_ext(ctx, q, positions, NULL,
                        D, 2, 0, c.rope_theta, 1.0f, 0.0f, 1.0f, 0.0f, 0.0f);
     k = ggml_rope_ext(ctx, k, positions, NULL,

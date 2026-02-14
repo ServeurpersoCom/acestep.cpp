@@ -30,6 +30,29 @@ LYRICS   = "[Instrumental]"
 BPM      = 120
 DURATION = 30
 SEED     = 42
+T_MAX    = 8500  # 340s * 25Hz, covers any duration up to 340s
+
+def generate_philox_noise(path, seed=42, T=T_MAX, C=64):
+    """Generate Philox CUDA RNG noise and save as raw bf16.
+
+    Matches PyTorch handler.py: torch.randn([1, C, T], generator=Philox(seed), device='cuda').
+    File layout: [C, T] contiguous bf16 (same as PyTorch memory order).
+    """
+    try:
+        import torch
+    except ImportError:
+        print(f"[Noise] ERROR: torch required to generate {path}")
+        return False
+    if not torch.cuda.is_available():
+        print(f"[Noise] ERROR: CUDA required for Philox RNG (generates different values on CPU)")
+        return False
+    gen = torch.Generator(device="cuda").manual_seed(seed)
+    noise = torch.randn([1, C, T], generator=gen, device="cuda", dtype=torch.bfloat16)
+    raw = noise[0].cpu().contiguous().view(torch.uint8).numpy().tobytes()
+    with open(path, "wb") as f:
+        f.write(raw)
+    print(f"[Noise] Generated {path}: [{C}, {T}] bf16 ({len(raw)} bytes, seed={seed})")
+    return True
 
 # binary dump I/O (matches C++ format: [ndim i32] [shape i32...] [data f32])
 
@@ -98,8 +121,7 @@ def run_ggml(dump_dir, caption, lyrics, bpm, duration, seed, noise_file=None):
     if noise_file:
         cmd += ["--noise-file", noise_file]
     print("[GGML] running...")
-    r = subprocess.run(cmd, capture_output=True, text=True)
-    sys.stdout.write(r.stderr)
+    r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     if r.returncode != 0:
         print(f"[GGML] FAILED (exit {r.returncode})")
         if r.stdout:
@@ -232,7 +254,7 @@ def compare(dirs):
         tag = f"{a}<>{b}"
         print(f" {tag:>14s}", end="")
     print()
-    print("=" * (30 + 15 * len(pairs)))
+    print("-" * (30 + 15 * len(pairs)))
 
     for stage in STAGES:
         data = {}
@@ -283,6 +305,10 @@ def main():
     noise_file = args.noise_file
     if noise_file is None and args.seed == 42:
         auto = os.path.join(SCRIPT_DIR, "rng_philox_seed42.bf16")
+        if not os.path.isfile(auto):
+            print(f"[Noise] {auto} not found, generating...")
+            if not generate_philox_noise(auto, seed=42):
+                print("[Noise] WARNING: cannot generate noise file, GGML will use mt19937 (results will differ)")
         if os.path.isfile(auto):
             noise_file = auto
 
@@ -291,7 +317,7 @@ def main():
     if not args.skip_ggml:
         if os.path.isdir(DUMP_GGML):
             shutil.rmtree(DUMP_GGML)
-        print("\n" + "=" * 60 + "\nGGML\n" + "=" * 60)
+        print("\n[Test] GGML backend")
         if run_ggml(DUMP_GGML, args.caption, args.lyrics,
                     args.bpm, args.duration, args.seed,
                     noise_file=noise_file):
@@ -300,18 +326,16 @@ def main():
     if not args.skip_python:
         if os.path.isdir(DUMP_PYTHON):
             shutil.rmtree(DUMP_PYTHON)
-        print("\n" + "=" * 60 + "\nPython\n" + "=" * 60)
+        print("\n[Test] Python backend")
         if run_python(DUMP_PYTHON, args.caption, args.lyrics, args.bpm,
                       args.duration, args.seed):
             dirs["Python"] = DUMP_PYTHON
 
     if len(dirs) < 2:
-        print(f"\nNeed both backends, got {len(dirs)}: {list(dirs.keys())}")
+        print(f"[Test] Need both backends, got {len(dirs)}: {list(dirs.keys())}")
         return 1
 
-    print("\n" + "=" * 60)
-    print("COMPARISON (GGML vs Python)")
-    print("=" * 60)
+    print("\n[Test] Comparison GGML vs Python")
     compare(dirs)
     return 0
 

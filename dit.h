@@ -1,6 +1,6 @@
 #pragma once
 // dit.h: ACE-Step DiT (Diffusion Transformer) via ggml compute graph
-// Coexists with dit.cuh (CUDA reference). Same weights, same safetensors.
+// Ported from Python ACE-Step-1.5 reference. Same weights, same safetensors.
 //
 // Architecture: 24-layer transformer with AdaLN, GQA self-attn + cross-attn, SwiGLU MLP.
 // Flow matching: 8 Euler steps (turbo schedule).
@@ -287,7 +287,7 @@ static struct ggml_tensor * dit_ggml_adaln(
 // Helper: Gated residual
 // out = residual + x * gate
 // residual: [H, S], x: [H, S], gate: [H]
-// NOTE: no sigmoid, gate is a raw scaling factor (matches Python and CUDA reference)
+// NOTE: no sigmoid, gate is a raw scaling factor (matches Python reference)
 static struct ggml_tensor * dit_ggml_gated_add(
         struct ggml_context * ctx,
         struct ggml_tensor * residual,
@@ -307,7 +307,7 @@ static struct ggml_tensor * dit_ggml_build_temb(
         struct ggml_tensor ** out_tproj,
         const char * suffix = "") {
 
-    // scale timestep by 1000 (diffusion convention, matches CUDA)
+    // scale timestep by 1000 (diffusion convention, matches Python)
     struct ggml_tensor * t_scaled = ggml_scale(ctx, t_scalar, 1000.0f);
 
     // sinusoidal embedding: [1] -> [256]
@@ -657,7 +657,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(
         ggml_set_output(temb_t);
 
         struct ggml_tensor * tproj_r;
-        // CUDA passes (t - t_r) to time_embed_r, not t_r directly
+        // Python passes (t - t_r) to time_embed_r, not t_r directly
         // In turbo mode t = t_r, so input is 0
         struct ggml_tensor * t_diff = ggml_sub(ctx, t_val, tr_val);
         struct ggml_tensor * temb_r = dit_ggml_build_temb(ctx, &m->time_embed_r, t_diff, &tproj_r, "_r");
@@ -799,7 +799,7 @@ static void dit_ggml_generate(
     struct ggml_tensor * t_enc = ggml_graph_get_tensor(gf, "enc_hidden");
     ggml_backend_tensor_set(t_enc, enc_hidden_data, 0, c.hidden_size * enc_S * sizeof(float));
 
-    // t_r is set per-step in the loop (= t_curr, same as CUDA reference)
+    // t_r is set per-step in the loop (= t_curr, same as Python reference)
     struct ggml_tensor * t_tr = ggml_graph_get_tensor(gf, "t_r");
 
     // Positions: [0, 1, ..., S-1]

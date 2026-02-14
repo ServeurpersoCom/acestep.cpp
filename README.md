@@ -5,18 +5,40 @@ Text + lyrics in, stereo 48kHz WAV out. Runs on CPU, CUDA, Metal, Vulkan.
 
 ## Build
 
-```
+```bash
 git submodule update --init
-cd build && cmake .. && make -j$(nproc)
+./build.sh
 ```
 
-Enable GPU backends with cmake flags:
+`build.sh` auto-detects your platform: Metal + Accelerate on macOS,
+CUDA on Linux with nvcc, Vulkan if available, and OpenBLAS when found.
 
-```
+Manual cmake if you prefer:
+
+```bash
+mkdir build && cd build
+
+# macOS (Metal + Accelerate BLAS auto-enabled)
+cmake ..
+
+# Linux with NVIDIA GPU
 cmake .. -DGGML_CUDA=ON
-cmake .. -DGGML_METAL=ON
+
+# Linux with Vulkan
 cmake .. -DGGML_VULKAN=ON
+
+# CPU with OpenBLAS (recommended for CPU-only machines)
+cmake .. -DGGML_BLAS=ON
+
+# Combine as needed
+cmake .. -DGGML_CUDA=ON -DGGML_BLAS=ON
+
+cmake --build . --config Release -j$(nproc)
 ```
+
+BLAS accelerates CPU matrix multiplications. On macOS, Accelerate is
+enabled by default. On Linux, install `libopenblas-dev` and pass
+`-DGGML_BLAS=ON`.
 
 Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 

@@ -1,5 +1,5 @@
 #pragma once
-// debug.h: tensor dump/compare utilities for CUDA vs ggml validation
+// debug.h: tensor dump/compare utilities for Python vs GGML validation
 // Dumps raw f32 arrays to binary files. Both backends convert to f32 before dump.
 // File format: [int32 ndims] [int32 dim0] [int32 dim1] ... [float data...]
 
@@ -113,28 +113,3 @@ static double debug_mean_abs_err(const float *a, const float *b, int n) {
     return sum / n;
 }
 
-#ifdef __CUDACC__
-// CUDA: dump bf16 GPU tensor (converts to f32 on host then dumps)
-#include <cuda_bf16.h>
-static void debug_dump_bf16_gpu(const DebugDumper *d, const char *name,
-                                const __nv_bfloat16 *gpu_data, const int *shape, int ndims) {
-    if (!d->enabled) return;
-    int numel = 1;
-    for (int i = 0; i < ndims; i++) numel *= shape[i];
-
-    std::vector<__nv_bfloat16> buf_bf16(numel);
-    cudaMemcpy(buf_bf16.data(), gpu_data, numel * sizeof(__nv_bfloat16), cudaMemcpyDeviceToHost);
-
-    std::vector<float> buf_f32(numel);
-    for (int i = 0; i < numel; i++)
-        buf_f32[i] = __bfloat162float(buf_bf16[i]);
-
-    debug_dump(d, name, buf_f32.data(), shape, ndims);
-}
-
-static void debug_dump_bf16_2d(const DebugDumper *d, const char *name,
-                               const __nv_bfloat16 *gpu_data, int dim0, int dim1) {
-    int shape[2] = {dim0, dim1};
-    debug_dump_bf16_gpu(d, name, gpu_data, shape, 2);
-}
-#endif

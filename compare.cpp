@@ -1,5 +1,5 @@
-// compare.cpp: compare tensor dumps between CUDA and ggml
-// Usage: ./compare <cuda_dump_dir> <ggml_dump_dir>
+// compare.cpp: compare tensor dumps between two backends
+// Usage: ./compare <dump_dir_a> <dump_dir_b>
 // Reads all .bin files in both directories, matches by name, computes cosine sim.
 
 #include "debug.h"
@@ -9,8 +9,8 @@
 int main(int argc, char **argv) {
     if (argc < 3) {
         fprintf(stderr, "Usage: %s <dir_a> <dir_b>\n", argv[0]);
-        fprintf(stderr, "Compares tensor dumps from two backends.\n");
-        fprintf(stderr, "Example: %s /tmp/cuda_dump /tmp/ggml_dump\n", argv[0]);
+        fprintf(stderr, "Compares tensor dumps from two runs (e.g. Python vs GGML).\n");
+        fprintf(stderr, "Example: %s tests/python tests/ggml\n", argv[0]);
         return 1;
     }
 

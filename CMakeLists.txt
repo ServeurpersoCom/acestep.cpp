@@ -17,6 +17,10 @@ target_include_directories(dit-vae PRIVATE
 
 target_link_libraries(dit-vae PRIVATE ggml ggml-base ggml-cpu)
 
+if(TARGET ggml-blas)
+    target_link_libraries(dit-vae PRIVATE ggml-blas)
+endif()
+
 if(TARGET ggml-cuda)
     target_link_libraries(dit-vae PRIVATE ggml-cuda)
     target_compile_definitions(dit-vae PRIVATE ACESTEP_HAVE_CUDA)
@@ -41,6 +45,10 @@ target_include_directories(ace-qwen3 PRIVATE
 )
 
 target_link_libraries(ace-qwen3 PRIVATE ggml ggml-base ggml-cpu)
+
+if(TARGET ggml-blas)
+    target_link_libraries(ace-qwen3 PRIVATE ggml-blas)
+endif()
 
 if(TARGET ggml-cuda)
     target_link_libraries(ace-qwen3 PRIVATE ggml-cuda)
