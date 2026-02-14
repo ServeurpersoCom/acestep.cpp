@@ -1,14 +1,14 @@
 // cond.h: ACEStep Condition Encoder via ggml
 //
-// Produces encoder_hidden_states [2048, S_total] from:
-//   - text_hidden [1024, S_text]   : from Qwen3-Embedding text encoder
-//   - lyric_embed [1024, S_lyric]  : from CPU vocab lookup of lyric tokens
-//   - timbre_feats [64, S_ref]     : reference audio features (optional)
+// Produces encoder_hidden_states [S_total, 2048] from (all arrays H-contiguous per token):
+//   - text_hidden [S_text, 1024]   : from Qwen3-Embedding text encoder
+//   - lyric_embed [S_lyric, 1024]  : from CPU vocab lookup of lyric tokens
+//   - timbre_feats [S_ref, 64]     : reference audio features (optional)
 //
-// Internal pipeline:
-//   text_hidden  -> Linear(1024->2048)                    -> [2048, S_text]
-//   lyric_embed  -> Linear(1024->2048)+bias -> 8L -> norm   -> [2048, S_lyric]
-//   timbre_feats -> Linear(64->2048)+bias   -> 4L -> norm   -> take frame[0] -> [2048, 1]
+// Internal pipeline (ggml notation [ne0, ne1]):
+//   text_hidden  -> Linear(1024->2048)                     -> [2048, S_text]
+//   lyric_embed  -> Linear(1024->2048)+bias  -> 8L -> norm -> [2048, S_lyric]
+//   timbre_feats -> Linear(64->2048)+bias    -> 4L -> norm -> take frame[0] -> [2048, 1]
 //   Pack: cat(lyric, timbre[0:1], text_proj) -> [2048, S_total]
 
 #pragma once

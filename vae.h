@@ -295,12 +295,12 @@ static struct ggml_tensor * vae_ggml_build_graph(
 }
 
 // Decode API
-// Decode latent [out_ch, T_latent] -> audio [2, T_audio]
-// Input layout matches DiT output: [Oc, T] with ne[0]=Oc contiguous.
+// Decode latent [T_latent, out_ch] -> audio [2, T_audio]
+// Input layout matches DiT output: [T, Oc] time-major (Oc contiguous per frame).
 // Returns T_audio (or -1 on error).
 static int vae_ggml_decode(
         VAEGGML * m,
-        const float * latent,   // [out_ch=64, T_latent] flat (DiT output layout)
+        const float * latent,   // [T_latent, 64] flat time-major (DiT output layout)
         int T_latent,
         float * audio_out,      // [2, T_audio] flat (caller allocs T_latent*1920*2 floats)
         int max_T_audio) {
@@ -347,7 +347,7 @@ static int vae_ggml_decode(
         return -1;
     }
 
-    // Set input: transpose DiT [Oc, T] -> ggml [T, 64]
+    // Set input: transpose [T, 64] time-major -> ggml ne=[T, 64] channel-major
     // DiT flat: frame t at offset t*64, element (t,c) = latent[t*64 + c]
     // ggml [T, 64]: ne[0]=T contiguous, element (t,c) = data[c*T + t]
     std::vector<float> transposed(64 * T_latent);
@@ -385,7 +385,7 @@ static int vae_ggml_decode(
 // Returns T_audio (total samples per channel) or -1 on error.
 static int vae_ggml_decode_tiled(
         VAEGGML * m,
-        const float * latent,       // [out_ch=64, T_latent] flat (DiT output layout)
+        const float * latent,       // [T_latent, 64] flat time-major (DiT output layout)
         int T_latent,
         float * audio_out,          // [2, T_audio] flat (caller allocs)
         int max_T_audio,
@@ -410,7 +410,7 @@ static int vae_ggml_decode_tiled(
     int max_win = chunk_size + 2 * overlap;
     int max_tile_audio = max_win * 1920 + 1920;  // margin for conv padding
     std::vector<float> tile_audio(2 * max_tile_audio);
-    // Temp latent slice [64, win_len] in DiT layout
+    // Temp latent slice [win_len, 64] time-major
     std::vector<float> tile_latent(64 * max_win);
 
     float upsample_factor = 0.0f;
@@ -429,8 +429,8 @@ static int vae_ggml_decode_tiled(
         if (win_end > T_latent) win_end = T_latent;
         int win_len = win_end - win_start;
 
-        // Extract latent window: DiT layout [64, T_latent] -> [64, win_len]
-        // Element (c, t) in full = latent[t * 64 + c]
+        // Extract latent window: [T_latent, 64] -> [win_len, 64] time-major
+        // Element (t, c) in full = latent[t * 64 + c]
         for (int t = 0; t < win_len; t++)
             for (int c = 0; c < 64; c++)
                 tile_latent[t * 64 + c] = latent[(win_start + t) * 64 + c];

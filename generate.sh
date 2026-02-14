@@ -25,9 +25,14 @@ mkdir -p "$TMP"
 # LLM: metadata + lyrics + audio codes
 "$BIN/ace-qwen3" --model "$LM" --output-dir "$TMP" --seed "$SEED" "$@"
 
+DIT_ARGS=""
+[ "${SHIFT:-}" ]           && DIT_ARGS="$DIT_ARGS --shift $SHIFT"
+[ "${STEPS:-}" ]           && DIT_ARGS="$DIT_ARGS --steps $STEPS"
+[ "${GUIDANCE_SCALE:-}" ]  && DIT_ARGS="$DIT_ARGS --guidance-scale $GUIDANCE_SCALE"
+
 # DiT + VAE: flow matching -> WAV
 "$BIN/dit-vae" --input-dir "$TMP" \
     --text-encoder "$TE" --dit "$DIT" --vae "$VAE" \
-    --seed "$SEED" --output "$OUT"
+    --seed "$SEED" --output "$OUT" $DIT_ARGS
 
 echo "Output: $OUT"

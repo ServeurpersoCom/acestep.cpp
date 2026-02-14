@@ -79,6 +79,7 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n");
     fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
     fprintf(stderr, "  --steps <n>             Euler steps (default: 8)\n");
+    fprintf(stderr, "  --guidance-scale <f>    DiT CFG guidance (default: 1.0=off, 7.0 for base/sft)\n");
     fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
     fprintf(stderr, "VAE tiling (memory control):\n");
     fprintf(stderr, "  --vae-chunk <n>         Latent frames per tile (default: 256, matches Python)\n");
@@ -114,6 +115,7 @@ int main(int argc, char ** argv) {
     float shift               = 3.0f;
     int num_steps             = 8;
     int seed                  = -1;
+    float guidance_scale      = 1.0f;
     int vae_chunk             = 256;
     int vae_overlap           = 64;
 
@@ -127,6 +129,7 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shift") == 0 && i+1 < argc) shift = atof(argv[++i]);
         else if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) num_steps = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--guidance-scale") == 0 && i+1 < argc) guidance_scale = atof(argv[++i]);
         else if (strcmp(argv[i], "--output") == 0 && i+1 < argc) wav_path = argv[++i];
         else if (strcmp(argv[i], "--vae-chunk") == 0 && i+1 < argc) vae_chunk = atoi(argv[++i]);
         else if (strcmp(argv[i], "--vae-overlap") == 0 && i+1 < argc) vae_overlap = atoi(argv[++i]);
@@ -354,7 +357,7 @@ int main(int argc, char ** argv) {
         cond_ggml_free(&cond);
 
         // 6. Generate context_latents and noise
-        // context = cat(src_latents[64,T], chunk_masks[64,T]) = [128, T]
+        // context = cat(src_latents[T,64], chunk_masks[T,64]) = [T, 128]
         // src_latents: decoded audio codes (if present) or silence encoding
         std::mt19937 rng(seed);
         std::normal_distribution<float> normal(0.0f, 1.0f);
@@ -422,34 +425,37 @@ int main(int argc, char ** argv) {
 
         // Initial noise for flow matching
         if (noise_file) {
-            // Load pre-generated Philox noise from bf16 file [T_max, Oc]
+            // Load pre-generated Philox noise from bf16 file.
+            // File layout: [T, C=64] time-major (matches prepare_noise: torch.randn([1, T, C])).
+            // C++ layout: noise[t * Oc + c] = time-major (same order).
+            // Read linearly: file[t * Oc + c] -> noise[t * Oc + c].
             FILE * nf = fopen(noise_file, "rb");
             if (!nf) { fprintf(stderr, "FATAL: cannot open noise file %s\n", noise_file); return 1; }
             fseek(nf, 0, SEEK_END);
             int total_bf16 = (int)(ftell(nf) / sizeof(uint16_t));
             fseek(nf, 0, SEEK_SET);
-            int need = Oc * T;
-            if (total_bf16 < need) {
-                fprintf(stderr, "FATAL: noise file too short: %d bf16 < %d needed\n", total_bf16, need);
+            int T_file = total_bf16 / Oc;
+            if (T_file < T) {
+                fprintf(stderr, "FATAL: noise file too short: T_file=%d < T=%d\n", T_file, T);
                 fclose(nf); return 1;
             }
-            std::vector<uint16_t> bf16(need);
-            fread(bf16.data(), sizeof(uint16_t), need, nf);
+            std::vector<uint16_t> bf16_all(Oc * T);
+            fread(bf16_all.data(), sizeof(uint16_t), Oc * T, nf);
             fclose(nf);
-            for (int i = 0; i < need; i++) {
-                uint32_t w = (uint32_t)bf16[i] << 16;
+            for (int i = 0; i < Oc * T; i++) {
+                uint32_t w = (uint32_t)bf16_all[i] << 16;
                 float v; memcpy(&v, &w, 4);
                 noise[i] = v;
             }
-            fprintf(stderr, "[Context] loaded noise from %s: %d bf16 -> [%d, %d] f32\n",
-                    noise_file, need, T, Oc);
+            fprintf(stderr, "[Context] loaded noise from %s: [%d, %d] bf16 (time-major, T_file=%d)\n",
+                    noise_file, T, Oc, T_file);
         } else {
             for (int i = 0; i < Oc * T; i++)
                 noise[i] = normal(rng);
         }
 
-        fprintf(stderr, "[Context] context: [%d, %d], noise: [%d, %d], enc: [2048, %d]\n",
-                ctx_ch, T, Oc, T, enc_S);
+        fprintf(stderr, "[Context] context: [%d, %d], noise: [%d, %d], enc: [%d, 2048]\n",
+                T, ctx_ch, T, Oc, enc_S);
         debug_dump_2d(&dbg, "noise", noise.data(), T, Oc);
         debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
     }
@@ -462,13 +468,14 @@ int main(int argc, char ** argv) {
 
     timer.reset();
     dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(),
-                      enc_S, T, num_steps, schedule.data(), output.data(), &dbg);
+                      enc_S, T, num_steps, schedule.data(), output.data(),
+                      guidance_scale, &dbg);
     fprintf(stderr, "[DiT] Total generation: %.1f ms\n", timer.ms());
 
     // Output stats
     {
         int n_output = Oc * T;
-        fprintf(stderr, "[Output] shape: [%d, %d], first 8 values:", Oc, T);
+        fprintf(stderr, "[Output] shape: [%d, %d], first 8 values:", T, Oc);
         for (int i = 0; i < 8 && i < n_output; i++)
             fprintf(stderr, " %.6f", output[i]);
         fprintf(stderr, "\n");
@@ -508,6 +515,22 @@ int main(int argc, char ** argv) {
             return 1;
         }
         fprintf(stderr, "[VAE] Decode: %.1f ms\n", timer.ms());
+
+        // Anti-clipping normalization (matches Python handler.py line 2106-2109)
+        {
+            float peak = 0.0f;
+            int n_samples = 2 * T_audio;  // stereo
+            for (int i = 0; i < n_samples; i++) {
+                float a = audio[i] < 0 ? -audio[i] : audio[i];
+                if (a > peak) peak = a;
+            }
+            if (peak > 1.0f) {
+                float inv_peak = 1.0f / peak;
+                for (int i = 0; i < n_samples; i++)
+                    audio[i] *= inv_peak;
+                fprintf(stderr, "[VAE] Anti-clip normalize: peak=%.3f -> 1.0\n", peak);
+            }
+        }
 
         if (write_wav(wav_path, audio.data(), T_audio, 48000)) {
             fprintf(stderr, "[VAE] Wrote %s: %d samples (%.2fs @ 48kHz stereo)\n",
