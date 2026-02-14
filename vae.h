@@ -376,6 +376,116 @@ static int vae_ggml_decode(
     return T_out;
 }
 
+// Tiled decode: overlap-discard chunking for bounded VRAM usage.
+// Matches Python handler.py tiled_decode / _tiled_decode_gpu:
+//   stride = chunk_size - 2*overlap
+//   For each tile: decode latent window with overlap context, trim to core, concatenate.
+// Default chunk=256, overlap=64 matches Python handler.py fallback defaults.
+// Python auto-tunes chunk by VRAM: >=24GB->512, >=16GB->384, >=12GB->256, <12GB->128.
+// Returns T_audio (total samples per channel) or -1 on error.
+static int vae_ggml_decode_tiled(
+        VAEGGML * m,
+        const float * latent,       // [out_ch=64, T_latent] flat (DiT output layout)
+        int T_latent,
+        float * audio_out,          // [2, T_audio] flat (caller allocs)
+        int max_T_audio,
+        int chunk_size = 256,
+        int overlap = 64) {
+
+    // Ensure positive stride (matches Python effective_overlap reduction)
+    while (chunk_size - 2 * overlap <= 0 && overlap > 0)
+        overlap /= 2;
+
+    // Short sequence: decode directly
+    if (T_latent <= chunk_size)
+        return vae_ggml_decode(m, latent, T_latent, audio_out, max_T_audio);
+
+    int stride = chunk_size - 2 * overlap;
+    int num_steps = (T_latent + stride - 1) / stride;
+
+    fprintf(stderr, "[VAE] Tiled decode: %d tiles (chunk=%d, overlap=%d, stride=%d)\n",
+            num_steps, chunk_size, overlap, stride);
+
+    // Temp buffer for one tile output (max tile = chunk_size + 2*overlap latent frames)
+    int max_win = chunk_size + 2 * overlap;
+    int max_tile_audio = max_win * 1920 + 1920;  // margin for conv padding
+    std::vector<float> tile_audio(2 * max_tile_audio);
+    // Temp latent slice [64, win_len] in DiT layout
+    std::vector<float> tile_latent(64 * max_win);
+
+    float upsample_factor = 0.0f;
+    int audio_write_pos = 0;
+
+    for (int i = 0; i < num_steps; i++) {
+        // Core range in latent frames (the part we keep)
+        int core_start = i * stride;
+        int core_end = core_start + stride;
+        if (core_end > T_latent) core_end = T_latent;
+
+        // Window range with overlap context
+        int win_start = core_start - overlap;
+        if (win_start < 0) win_start = 0;
+        int win_end = core_end + overlap;
+        if (win_end > T_latent) win_end = T_latent;
+        int win_len = win_end - win_start;
+
+        // Extract latent window: DiT layout [64, T_latent] -> [64, win_len]
+        // Element (c, t) in full = latent[t * 64 + c]
+        for (int t = 0; t < win_len; t++)
+            for (int c = 0; c < 64; c++)
+                tile_latent[t * 64 + c] = latent[(win_start + t) * 64 + c];
+
+        // Decode tile
+        int tile_T = vae_ggml_decode(m, tile_latent.data(), win_len,
+                                     tile_audio.data(), max_tile_audio);
+        if (tile_T < 0) {
+            fprintf(stderr, "[VAE] FATAL: tile %d decode failed\n", i);
+            return -1;
+        }
+
+        // Determine upsample factor from first tile
+        if (i == 0) {
+            upsample_factor = (float)tile_T / (float)win_len;
+            fprintf(stderr, "[VAE] Upsample factor: %.2f (expected ~1920)\n", upsample_factor);
+        }
+
+        // Compute trim in audio samples (matches Python int(round(...)))
+        int added_start = core_start - win_start;
+        int trim_start = (int)roundf(added_start * upsample_factor);
+        int added_end = win_end - core_end;
+        int trim_end = (int)roundf(added_end * upsample_factor);
+
+        int end_idx = (trim_end > 0) ? (tile_T - trim_end) : tile_T;
+        int core_len = end_idx - trim_start;
+        if (core_len <= 0) continue;
+
+        // Check output bounds
+        if (audio_write_pos + core_len > max_T_audio) {
+            fprintf(stderr, "[VAE] FATAL: tiled output exceeds max_T_audio\n");
+            return -1;
+        }
+
+        // Append core audio: tile_audio is [2, tile_T] = ch0[0..tile_T-1] ch1[tile_T..2*tile_T-1]
+        memcpy(audio_out + audio_write_pos,
+               tile_audio.data() + trim_start,
+               core_len * sizeof(float));
+        memcpy(audio_out + max_T_audio + audio_write_pos,
+               tile_audio.data() + tile_T + trim_start,
+               core_len * sizeof(float));
+        audio_write_pos += core_len;
+    }
+
+    // Compact ch1 from offset max_T_audio to offset audio_write_pos
+    memmove(audio_out + audio_write_pos,
+            audio_out + max_T_audio,
+            audio_write_pos * sizeof(float));
+
+    fprintf(stderr, "[VAE] Tiled decode done: %d tiles -> T_audio=%d (%.2fs @ 48kHz)\n",
+            num_steps, audio_write_pos, (float)audio_write_pos / 48000.0f);
+
+    return audio_write_pos;
+}
+
 // Free
 static void vae_ggml_free(VAEGGML * m) {
     if (m->buf) ggml_backend_buffer_free(m->buf);

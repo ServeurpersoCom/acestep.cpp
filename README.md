@@ -24,7 +24,7 @@ Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 
 ```bash
 ./checkpoints.sh                    # download models from HuggingFace
-./generate.sh --query "A French chanson about Paris"
+./generate.sh --query "A smooth RnB track with soulful vocals and warm keys"
 ```
 
 The unified `generate.sh` script chains both binaries automatically.
@@ -42,7 +42,7 @@ Natural language in, music out. The LLM generates metadata, lyrics, and
 audio codes from a free-form description:
 
 ```bash
-./generate.sh --query "Une chanson française sur la ville de Paris"
+./generate.sh --query "Indie rock with jangly guitars and nostalgic vocals"
 ./generate.sh --query "ambient piano meditation" --instrumental
 ```
 
@@ -56,12 +56,12 @@ partial, the LLM fills in missing fields via CoT first.
 ```bash
 # All metadata provided: direct code generation
 ./generate.sh \
-    --caption "French house, talkbox vocals, TR-808 drums" \
-    --lyrics "[Verse 1]\nOptimisation des poids synaptiques..." \
-    --bpm 124 --duration 220 --keyscale "F# minor" --timesignature 4 --language fr
+    --caption "90s RnB slow jam, silky vocals, Rhodes piano, 808 bass" \
+    --lyrics "[Verse 1]\nI've been thinking about you all night long..." \
+    --bpm 85 --duration 200 --keyscale "Eb major" --timesignature 4 --language en
 
 # Partial metadata: LLM fills bpm, key, timesig via CoT
-./generate.sh --caption "Ambient electronic soundscape" --duration 180
+./generate.sh --caption "Garage rock, distorted guitars, raw energy" --duration 180
 ```
 
 ### Raw mode (advanced)
@@ -152,8 +152,6 @@ Audio:
 
 Debug:
   --dump <dir>            Dump intermediate tensors
-  --inject <dir>          Inject noise/context/enc_hidden from dump dir
-                          (bypasses text encoder and condition encoder)
 ```
 
 ## Exchange directory
@@ -213,53 +211,38 @@ dit-vae
   -> WAV stereo 48kHz
 ```
 
-## CUDA backend (legacy)
-
-Standalone CUDA implementation under `cuda/`, kept as reference.
-Requires nvcc + sm_120 (Blackwell). Same CLI interface as the GGML build.
-
-```
-cd cuda && make
-```
-
-The `cuda/` directory has its own `generate.sh` and example scripts,
-mirroring the root-level ones but calling the CUDA binaries directly.
-
 ## Accuracy
 
-LLM logits (prefill, 0.6B):
+LLM logits (prefill, 0.6B, `tests/debug-lm-logits.py`):
 
 ```
 GGML<>PyTorch cosine similarity: 0.999980
 Top-5 argmax: identical
 ```
 
-DiT+VAE pipeline (3-way comparison, seed 42, Philox noise).
-Values are cosine similarity between intermediate tensors (1.0 = identical):
+DiT+VAE pipeline (`tests/debug-cos-sim.py`, seed 42, Philox noise).
+Cosine similarity between GGML and Python intermediate tensors (1.0 = identical):
 
-```
-stage                               CUDA<>GGML    CUDA<>Python   GGML<>Python
+| Stage | GGML <-> Python |
+|---|---:|
+| text_hidden | 0.9998 |
+| lyric_embed | 1.0000 |
+| enc_hidden | 0.9998 |
+| context | 1.0000 |
+| noise | 1.0000 |
+| dit_step0_vt | 0.9970 |
+| dit_step1_vt | 0.9994 |
+| dit_step2_vt | 0.9989 |
+| dit_step3_vt | 0.9980 |
+| dit_step4_vt | 0.9966 |
+| dit_step5_vt | 0.9950 |
+| dit_step6_vt | 0.9949 |
+| dit_step7_vt | 0.9904 |
+| dit_x0 | 0.9951 |
+| vae_audio | 0.9897 |
+| vae_audio (log spectral) | 0.9770 |
 
-text_hidden                          0.999843       0.999755       0.999810
-lyric_embed                          0.176042       0.176042       1.000000
-enc_hidden                           0.176002       0.175578       0.999826
-context                              1.000002       1.000000       1.000002
-noise                                1.000000       1.000000       1.000000
-dit_step0_vt                         0.949375       0.949714       0.996955
-dit_step1_vt                         0.981008       0.982935       0.999365
-dit_step2_vt                         0.957166       0.959070       0.998946
-dit_step3_vt                         0.937398       0.942449       0.997979
-dit_step4_vt                         0.935670       0.944726       0.996615
-dit_step5_vt                         0.930438       0.943404       0.995034
-dit_step6_vt                         0.925888       0.936682       0.994890
-dit_step7_vt                         0.906374       0.920733       0.990427
-dit_x0                               0.929130       0.942255       0.995127
-
-vae_audio (log spectral)             0.912169       0.940828       0.977008
-```
-
-GGML matches PyTorch to >0.99 across all stages. CUDA drift comes from bf16
-accumulation in VAE and a minor BPE tokenization difference on lyrics.
+Residual drift is FP32 (GGML) vs BF16 (PyTorch) accumulation over 8 Euler steps.
 
 ## Checkpoints
 

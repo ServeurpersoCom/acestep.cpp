@@ -1,6 +1,6 @@
 // ace-qwen3.cpp : ACE-Step 5Hz LM inference (GGML)
 // Qwen3 causal LM: CoT reasoning + audio code generation
-// Port of cuda/ace-qwen3.cu to GGML backend
+// ace-qwen3: Qwen3 causal LM for ACE-Step music generation (GGML backend)
 #include "qwen3-lm.h"
 #include "bpe.h"
 

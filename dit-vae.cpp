@@ -80,6 +80,9 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
     fprintf(stderr, "  --steps <n>             Euler steps (default: 8)\n");
     fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
+    fprintf(stderr, "VAE tiling (memory control):\n");
+    fprintf(stderr, "  --vae-chunk <n>         Latent frames per tile (default: 256, matches Python)\n");
+    fprintf(stderr, "  --vae-overlap <n>       Overlap frames per side (default: 64)\n\n");
     fprintf(stderr, "Debug:\n");
     fprintf(stderr, "  --dump <dir>            Dump intermediate tensors\n");
 }
@@ -111,6 +114,8 @@ int main(int argc, char ** argv) {
     float shift               = 3.0f;
     int num_steps             = 8;
     int seed                  = -1;
+    int vae_chunk             = 256;
+    int vae_overlap           = 64;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--input-dir") == 0 && i+1 < argc) input_dir = argv[++i];
@@ -123,6 +128,8 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--shift") == 0 && i+1 < argc) shift = atof(argv[++i]);
         else if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) num_steps = atoi(argv[++i]);
         else if (strcmp(argv[i], "--output") == 0 && i+1 < argc) wav_path = argv[++i];
+        else if (strcmp(argv[i], "--vae-chunk") == 0 && i+1 < argc) vae_chunk = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--vae-overlap") == 0 && i+1 < argc) vae_overlap = atoi(argv[++i]);
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]); return 0;
         } else {
@@ -492,7 +499,8 @@ int main(int argc, char ** argv) {
         std::vector<float> audio(2 * T_audio_max);
 
         timer.reset();
-        int T_audio = vae_ggml_decode(&vae, output.data(), T_latent, audio.data(), T_audio_max);
+        int T_audio = vae_ggml_decode_tiled(&vae, output.data(), T_latent, audio.data(), T_audio_max,
+                                            vae_chunk, vae_overlap);
         if (T_audio < 0) {
             fprintf(stderr, "FATAL: VAE decode failed\n");
             vae_ggml_free(&vae);

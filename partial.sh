@@ -4,4 +4,4 @@
 set -eu
 
 export SEED="${SEED:--1}" OUT="${OUT:-partial.wav}"
-exec ./generate.sh --caption "TODO" --lyrics "[Instrumental]" --duration 180
+exec ./generate.sh --caption "Ambient electronic soundscape with warm analog pads" --lyrics "[Instrumental]" --duration 180
