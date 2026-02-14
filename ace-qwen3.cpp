@@ -237,6 +237,8 @@ static bool parse_cot_and_lyrics(const std::string & text, AcePrompt * out) {
         while (!lyrics_after.empty() &&
                (lyrics_after.back() == ' ' || lyrics_after.back() == '\n' || lyrics_after.back() == '\r'))
             lyrics_after.pop_back();
+        if (!lyrics_after.empty())
+            out->lyrics = lyrics_after;
     }
 
     return (out->bpm > 0 || out->duration > 0);
