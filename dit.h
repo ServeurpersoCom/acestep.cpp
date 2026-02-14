@@ -602,9 +602,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(
         int T,                  // temporal length (before patching)
         int enc_S,              // encoder sequence length
         struct ggml_tensor ** p_input,      // [out] input tensor to fill
-        struct ggml_tensor ** p_output,     // [out] output tensor to read
-        struct ggml_tensor ** p_tproj = nullptr,  // [out] tproj tensor (for injection)
-        bool inject_tproj = false) {        // use external tproj input
+        struct ggml_tensor ** p_output) {   // [out] output tensor to read
 
     DiTGGMLConfig & c = m->cfg;
     int S = T / c.patch_size;   // sequence length after patching
@@ -652,18 +650,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(
     struct ggml_tensor * tproj;
     struct ggml_tensor * temb;
 
-    if (inject_tproj) {
-        // External tproj input (from CUDA dump)
-        tproj = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 6 * H);
-        ggml_set_name(tproj, "tproj");
-        ggml_set_input(tproj);
-
-        // Still need temb for the final norm. Use a zero placeholder
-        // (temb only affects final_norm which we can compare separately)
-        temb = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, H);
-        ggml_set_name(temb, "temb");
-        ggml_set_input(temb);
-    } else {
+    {
         struct ggml_tensor * tproj_t;
         struct ggml_tensor * temb_t = dit_ggml_build_temb(ctx, &m->time_embed, t_val, &tproj_t, "_t");
         ggml_set_name(temb_t, "temb_t");
@@ -685,7 +672,6 @@ static struct ggml_cgraph * dit_ggml_build_graph(
         ggml_set_name(tproj, "tproj");
         ggml_set_output(tproj);
     }
-    if (p_tproj) *p_tproj = tproj;
 
     // 2) proj_in: patchify + linear
     struct ggml_tensor * patched = ggml_reshape_2d(ctx, input, c.in_channels * P, S);
@@ -771,9 +757,7 @@ static void dit_ggml_generate(
         int num_steps,
         const float * schedule,
         float * output,
-        const DebugDumper * dbg = nullptr,
-        const float * inject_tproj_data = nullptr,  // [6*H] f32 from CUDA dump
-        const float * inject_temb_data  = nullptr) { // [H] f32 from CUDA dump
+        const DebugDumper * dbg = nullptr) {
 
     DiTGGMLConfig & c = model->cfg;
     int Oc    = c.out_channels;      // 64
@@ -782,11 +766,6 @@ static void dit_ggml_generate(
     int S     = T / c.patch_size;
     int n     = T * Oc;              // output element count
     int H     = c.hidden_size;
-
-    bool do_inject_tproj = (inject_tproj_data != nullptr);
-    if (do_inject_tproj) {
-        fprintf(stderr, "[DiT] tproj injection ENABLED (bypassing timestep MLP)\n");
-    }
 
     // Build graph once (shapes are constant across steps)
     size_t ctx_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
@@ -801,11 +780,8 @@ static void dit_ggml_generate(
 
     struct ggml_tensor * t_input  = NULL;
     struct ggml_tensor * t_output = NULL;
-    struct ggml_tensor * t_tproj  = NULL;
     struct ggml_cgraph * gf = dit_ggml_build_graph(model, ctx, T, enc_S,
-                                                    &t_input, &t_output,
-                                                    do_inject_tproj ? &t_tproj : nullptr,
-                                                    do_inject_tproj);
+                                                    &t_input, &t_output);
 
     fprintf(stderr, "[DiT] Graph: %d nodes\n", ggml_graph_n_nodes(gf));
 
@@ -824,7 +800,7 @@ static void dit_ggml_generate(
     ggml_backend_tensor_set(t_enc, enc_hidden_data, 0, c.hidden_size * enc_S * sizeof(float));
 
     // t_r is set per-step in the loop (= t_curr, same as CUDA reference)
-    struct ggml_tensor * t_tr = do_inject_tproj ? nullptr : ggml_graph_get_tensor(gf, "t_r");
+    struct ggml_tensor * t_tr = ggml_graph_get_tensor(gf, "t_r");
 
     // Positions: [0, 1, ..., S-1]
     struct ggml_tensor * t_pos = ggml_graph_get_tensor(gf, "positions");
@@ -848,25 +824,6 @@ static void dit_ggml_generate(
         ggml_backend_tensor_set(t_mask, mask_data.data(), 0, S * S * sizeof(uint16_t));
     }
 
-    // Inject tproj/temb from CUDA dump (if provided)
-    if (do_inject_tproj && t_tproj) {
-        struct ggml_tensor * t_tp = ggml_graph_get_tensor(gf, "tproj");
-        if (t_tp) {
-            ggml_backend_tensor_set(t_tp, inject_tproj_data, 0, 6 * H * sizeof(float));
-            fprintf(stderr, "[inject] tproj: %d floats set\n", 6 * H);
-        }
-        struct ggml_tensor * t_te = ggml_graph_get_tensor(gf, "temb");
-        if (t_te && inject_temb_data) {
-            ggml_backend_tensor_set(t_te, inject_temb_data, 0, H * sizeof(float));
-            fprintf(stderr, "[inject] temb: %d floats set\n", H);
-        } else if (t_te) {
-            // Zero out temb if not provided (it's only used in final norm)
-            std::vector<float> zeros(H, 0.0f);
-            ggml_backend_tensor_set(t_te, zeros.data(), 0, H * sizeof(float));
-            fprintf(stderr, "[inject] temb: zeroed (no data provided)\n");
-        }
-    }
-
     // Prepare host buffers
     // xt: evolves across steps (starts as noise)
     std::vector<float> xt(noise, noise + n);
@@ -879,7 +836,7 @@ static void dit_ggml_generate(
     //                           input(c, t) = xt(c - ctx_ch, t) if c >= ctx_ch
     std::vector<float> input_buf(in_ch * T);
 
-    struct ggml_tensor * t_t = do_inject_tproj ? nullptr : ggml_graph_get_tensor(gf, "t");
+    struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
 
     // Flow matching loop
     for (int step = 0; step < num_steps; step++) {

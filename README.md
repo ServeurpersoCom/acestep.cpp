@@ -20,42 +20,146 @@ cmake .. -DGGML_VULKAN=ON
 
 Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 
-## Full pipeline (LLM + DiT + VAE)
-
-The LLM generates a chain-of-thought (BPM, key, time signature) then audio
-tokens (integers 0-63999 from a 64000-level FSQ codebook, at 5Hz). These
-audio tokens are written as `codes` in the exchange directory and decoded
-into source latents for the DiT.
+## Quick start
 
 ```bash
-# Step 1: LLM generates metadata + audio tokens
-./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-0.6B \
-    --caption "Hip hop, jazzy piano, vinyl crackle" \
-    --lyrics "[Instrumental]" \
-    --bpm 90 --duration 60 --keyscale "Bb minor" --timesignature 4 \
-    --cfg-scale 2.2 --fsm --seed 42 \
-    --output-dir /tmp/ace
-
-# Step 2: DiT + VAE renders audio from tokens
-./build/dit-vae --input-dir /tmp/ace \
-    --text-encoder checkpoints/Qwen3-Embedding-0.6B \
-    --dit checkpoints/acestep-v15-turbo \
-    --vae checkpoints/vae \
-    --seed 42 --output output.wav
+./checkpoints.sh                    # download models from HuggingFace
+./generate.sh --query "A French chanson about Paris"
 ```
 
-Or use `full.sh` which chains both steps with a default prompt.
+The unified `generate.sh` script chains both binaries automatically.
+Model paths default to `checkpoints/` and can be overridden via environment
+variables (`ACE_LM`, `ACE_DIT`, `ACE_TE`, `ACE_VAE`).
 
-Three LLM sizes are available: 0.6B (fast), 1.7B, 4B (best quality).
-When all metadata is provided (bpm, duration, keyscale, timesignature),
-the LLM skips chain-of-thought and generates audio tokens directly.
-When metadata is partial or missing, the LLM runs two phases: first
-generating the missing metadata via CoT, then generating audio tokens.
+## Generation modes
+
+Three modes match the original ACE-Step WebUI, with sane defaults
+(temperature 0.85, CFG 2.0, FSM constrained decoding on by default).
+
+### Simple mode (WebUI "Simple" tab)
+
+Natural language in, music out. The LLM generates metadata, lyrics, and
+audio codes from a free-form description:
+
+```bash
+./generate.sh --query "Une chanson française sur la ville de Paris"
+./generate.sh --query "ambient piano meditation" --instrumental
+```
+
+### Custom mode (WebUI "Custom" tab)
+
+Provide caption, lyrics, and optionally metadata. When all metadata is
+present (bpm, duration, keyscale, timesignature), the LLM skips
+chain-of-thought and generates audio codes directly. When metadata is
+partial, the LLM fills in missing fields via CoT first.
+
+```bash
+# All metadata provided: direct code generation
+./generate.sh \
+    --caption "French house, talkbox vocals, TR-808 drums" \
+    --lyrics "[Verse 1]\nOptimisation des poids synaptiques..." \
+    --bpm 124 --duration 220 --keyscale "F# minor" --timesignature 4 --language fr
+
+# Partial metadata: LLM fills bpm, key, timesig via CoT
+./generate.sh --caption "Ambient electronic soundscape" --duration 180
+```
+
+### Raw mode (advanced)
+
+Custom system/user prompts for experimentation:
+
+```bash
+./generate.sh \
+    --system "Format the user's input into a detailed musical description:" \
+    --user "$(printf '# Caption\n%s\n\n# Lyric\n%s' "$CAPTION" "$LYRICS")" \
+    --no-codes
+```
+
+## Environment variables
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `ACE_LM` | `checkpoints/acestep-5Hz-lm-4B` | LLM model directory |
+| `ACE_DIT` | `checkpoints/acestep-v15-turbo` | DiT model directory |
+| `ACE_TE` | `checkpoints/Qwen3-Embedding-0.6B` | Text encoder directory |
+| `ACE_VAE` | `checkpoints/vae` | VAE directory |
+| `SEED` | random | RNG seed (`-1` = random) |
+| `OUT` | `output.wav` | Output WAV path |
+| `TMP` | `/tmp/ace` | Exchange directory |
+| `BIN` | `./build` | Binary directory |
+
+## ace-qwen3 reference
+
+```
+Usage: ace-qwen3 --model <dir> [options]
+
+Model:
+  --model <dir>          Model directory (safetensors + config.json)
+
+Simple mode (inspiration):
+  --query <text>         Natural language music description
+  --instrumental         Generate instrumental (no vocals)
+
+Custom mode:
+  --caption <text>       Music description
+  --lyrics <text>        Lyrics (default: empty)
+  --bpm <N>              BPM (0=LLM decides)
+  --duration <N>         Duration in seconds (0=LLM decides)
+  --keyscale <text>      Key/scale (e.g. 'C major')
+  --timesignature <N>    Time signature (2,3,4,6)
+  --language <code>      Vocal language (en,fr,zh,...)
+
+Raw mode (advanced):
+  --system <text>        Custom system message
+  --user <text>          Custom user message
+
+Generation:
+  --max-tokens <N>       Max new tokens (default: 256)
+  --max-seq <N>          KV cache size (default: 8192)
+  --temperature <f>      Sampling temperature (default: 0.85)
+  --top-p <f>            Top-p sampling (default: 0.9, 1.0=disabled)
+  --seed <N>             RNG seed (default: random)
+  --cfg-scale <f>        CFG scale for Phase 2 (default: 2.0, 1.0=disabled)
+  --negative-prompt <t>  Negative prompt for CFG
+  --no-fsm               Disable FSM constrained decoding
+  --no-codes             Phase 1 only (no audio codes)
+
+Output:
+  --output-dir <dir>     Write codes + metadata for dit-vae
+```
+
+Three LLM sizes: 0.6B (fast), 1.7B, 4B (best quality).
+
+## dit-vae reference
+
+```
+Usage: dit-vae --input-dir <dir> [options]
+
+Input (from ace-qwen3 --output-dir):
+  --input-dir <dir>       Directory with codes, caption, lyrics, etc.
+
+Models (required):
+  --text-encoder <dir>    Qwen3-Embedding-0.6B directory
+  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)
+  --vae <dir>             VAE directory
+
+Audio:
+  --seed <n>              Random seed (default: random)
+  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)
+  --shift <f>             Timestep shift (default: 3.0)
+  --steps <n>             Euler steps (default: 8)
+  --output <path>         Output WAV (default: output.wav)
+
+Debug:
+  --dump <dir>            Dump intermediate tensors
+  --inject <dir>          Inject noise/context/enc_hidden from dump dir
+                          (bypasses text encoder and condition encoder)
+```
 
 ## Exchange directory
 
 The two binaries communicate through a directory of plain text files.
-One file per field, no extensions. The directory must exist before running.
+One file per field, no extensions.
 
 ```
 <dir>/
@@ -69,11 +173,7 @@ One file per field, no extensions. The directory must exist before running.
   language      Vocal language code, e.g. "fr" (default: en)
 ```
 
-Missing file = default value (N/A for bpm/keyscale/timesig, matching
-the original ACE-Step training data).
-
-dit-vae only reads files, it does not care how they got there.
-You can write them yourself to run dit-vae standalone:
+dit-vae only reads files, so you can write them yourself to run it standalone:
 
 ```bash
 mkdir -p /tmp/ace
@@ -116,11 +216,14 @@ dit-vae
 ## CUDA backend (legacy)
 
 Standalone CUDA implementation under `cuda/`, kept as reference.
-Requires nvcc + sm_120 (Blackwell). The GGML build replaces this.
+Requires nvcc + sm_120 (Blackwell). Same CLI interface as the GGML build.
 
 ```
 cd cuda && make
 ```
+
+The `cuda/` directory has its own `generate.sh` and example scripts,
+mirroring the root-level ones but calling the CUDA binaries directly.
 
 ## Accuracy
 

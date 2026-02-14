@@ -82,8 +82,6 @@ static void print_usage(const char * prog) {
     fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
     fprintf(stderr, "Debug:\n");
     fprintf(stderr, "  --dump <dir>            Dump intermediate tensors\n");
-    fprintf(stderr, "  --inject <dir>          Inject noise/context/enc_hidden from dump dir\n");
-    fprintf(stderr, "                          (bypasses text encoder and condition encoder)\n");
 }
 
 // Read file to string, empty if missing
@@ -109,7 +107,6 @@ int main(int argc, char ** argv) {
     const char * vae_dir      = NULL;
     const char * wav_path     = "output.wav";
     const char * dump_dir     = NULL;
-    const char * inject_dir   = NULL;
     const char * noise_file   = NULL;
     float shift               = 3.0f;
     int num_steps             = 8;
@@ -122,7 +119,6 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_dir = argv[++i];
         else if (strcmp(argv[i], "--noise-file") == 0 && i+1 < argc) noise_file = argv[++i];
         else if (strcmp(argv[i], "--dump") == 0 && i+1 < argc) dump_dir = argv[++i];
-        else if (strcmp(argv[i], "--inject") == 0 && i+1 < argc) inject_dir = argv[++i];
         else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
         else if (strcmp(argv[i], "--shift") == 0 && i+1 < argc) shift = atof(argv[++i]);
         else if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) num_steps = atoi(argv[++i]);
@@ -139,24 +135,24 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "ERROR: --dit required\n");
         print_usage(argv[0]); return 1;
     }
-    if (!inject_dir && !input_dir) {
-        fprintf(stderr, "ERROR: --input-dir required (or --inject for debug mode)\n");
+    if (!input_dir) {
+        fprintf(stderr, "ERROR: --input-dir required\n");
         print_usage(argv[0]); return 1;
     }
-    if (!inject_dir && !text_enc_dir) {
-        fprintf(stderr, "ERROR: --text-encoder required (or --inject for debug mode)\n");
+    if (!text_enc_dir) {
+        fprintf(stderr, "ERROR: --text-encoder required\n");
         print_usage(argv[0]); return 1;
     }
 
     // Read prompt from input-dir (proc-style: missing file = default)
-    std::string d = input_dir ? input_dir : "";
-    std::string caption_s = input_dir ? read_file_str(d + "/caption") : "";
-    std::string lyrics_s  = input_dir ? read_file_str(d + "/lyrics") : "";
-    std::string bpm_s     = input_dir ? read_file_str(d + "/bpm") : "";
-    std::string ks_s      = input_dir ? read_file_str(d + "/keyscale") : "";
-    std::string ts_s      = input_dir ? read_file_str(d + "/timesig") : "";
-    std::string lang_s    = input_dir ? read_file_str(d + "/language") : "";
-    std::string dur_s     = input_dir ? read_file_str(d + "/duration") : "";
+    std::string d(input_dir);
+    std::string caption_s = read_file_str(d + "/caption");
+    std::string lyrics_s  = read_file_str(d + "/lyrics");
+    std::string bpm_s     = read_file_str(d + "/bpm");
+    std::string ks_s      = read_file_str(d + "/keyscale");
+    std::string ts_s      = read_file_str(d + "/timesig");
+    std::string lang_s    = read_file_str(d + "/language");
+    std::string dur_s     = read_file_str(d + "/duration");
 
     if (input_dir && caption_s.empty()) {
         fprintf(stderr, "ERROR: %s/caption missing or empty\n", input_dir);
@@ -248,10 +244,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Load] BPE tokenizer: %.1f ms\n", timer.ms());
 
         // 2. Build formatted prompts (match CUDA build_text_prompt/build_lyric_prompt)
-        // Cover mode (codes present) uses different instruction than text2music
-        const char * instruction = codes_path
-            ? "Generate audio semantic tokens based on the given conditions:"
-            : "Fill the audio semantic mask based on the given conditions:";
+        // Python always uses "Fill the audio semantic mask..." for text2music (even with LM codes)
+        const char * instruction = "Fill the audio semantic mask based on the given conditions:";
         char metas[512];
         snprintf(metas, sizeof(metas),
                  "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
@@ -453,70 +447,6 @@ int main(int argc, char ** argv) {
         debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
     }
 
-    // Inject overrides from CUDA dump (for apples-to-apples comparison)
-    if (inject_dir) {
-        char path[512];
-        std::vector<int> shape;
-
-        snprintf(path, sizeof(path), "%s/noise.bin", inject_dir);
-        if (FILE *f = fopen(path, "rb")) {
-            fclose(f);
-            auto data = debug_load(path, shape);
-            if (!data.empty()) {
-                int numel = data.size();
-                // Resize and update T if needed
-                T = numel / Oc;
-                S = T / cfg.patch_size;
-                noise.assign(data.begin(), data.end());
-                fprintf(stderr, "[inject] noise: %zu floats from %s (T=%d)\n", data.size(), path, T);
-            }
-        }
-
-        snprintf(path, sizeof(path), "%s/context.bin", inject_dir);
-        if (FILE *f = fopen(path, "rb")) {
-            fclose(f);
-            auto data = debug_load(path, shape);
-            if (!data.empty()) {
-                context.assign(data.begin(), data.end());
-                fprintf(stderr, "[inject] context: %zu floats from %s\n", data.size(), path);
-            }
-        }
-
-        snprintf(path, sizeof(path), "%s/enc_hidden.bin", inject_dir);
-        if (FILE *f = fopen(path, "rb")) {
-            fclose(f);
-            auto data = debug_load(path, shape);
-            if (!data.empty()) {
-                enc_hidden.assign(data.begin(), data.end());
-                enc_S = data.size() / cfg.hidden_size;
-                fprintf(stderr, "[inject] enc_hidden: %zu floats from %s (enc_S=%d)\n", data.size(), path, enc_S);
-            }
-        }
-    }
-
-    // Load tproj/temb from CUDA dump (if available)
-    std::vector<float> inject_tproj, inject_temb;
-    if (inject_dir) {
-        char path[512];
-        std::vector<int> shape;
-
-        snprintf(path, sizeof(path), "%s/tproj.bin", inject_dir);
-        if (FILE *f = fopen(path, "rb")) {
-            fclose(f);
-            inject_tproj = debug_load(path, shape);
-            if (!inject_tproj.empty())
-                fprintf(stderr, "[inject] tproj: %zu floats from %s\n", inject_tproj.size(), path);
-        }
-
-        snprintf(path, sizeof(path), "%s/temb.bin", inject_dir);
-        if (FILE *f = fopen(path, "rb")) {
-            fclose(f);
-            inject_temb = debug_load(path, shape);
-            if (!inject_temb.empty())
-                fprintf(stderr, "[inject] temb: %zu floats from %s\n", inject_temb.size(), path);
-        }
-    }
-
     // DiT Generate
     std::vector<float> output(Oc * T);
 
@@ -525,9 +455,7 @@ int main(int argc, char ** argv) {
 
     timer.reset();
     dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(),
-                      enc_S, T, num_steps, schedule.data(), output.data(), &dbg,
-                      inject_tproj.empty() ? nullptr : inject_tproj.data(),
-                      inject_temb.empty()  ? nullptr : inject_temb.data());
+                      enc_S, T, num_steps, schedule.data(), output.data(), &dbg);
     fprintf(stderr, "[DiT] Total generation: %.1f ms\n", timer.ms());
 
     // Output stats
@@ -548,20 +476,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Output] mean=%.6f, std=%.6f\n", mean, sqrtf(var > 0 ? var : 0));
 
         debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
-    }
-
-    // Override output with CUDA dit_x0 if available (VAE isolation test)
-    if (inject_dir) {
-        char path[512];
-        snprintf(path, sizeof(path), "%s/dit_x0.bin", inject_dir);
-        std::vector<int> shape;
-        auto data = debug_load(path, shape);
-        if (!data.empty()) {
-            // CUDA dit_x0 is [T, Oc] row-major, ggml output is [Oc, T]
-            // transpose: ggml[c + t*Oc] = cuda[t*Oc + c] (same flat layout)
-            output.assign(data.begin(), data.end());
-            fprintf(stderr, "[inject] dit_x0: %zu floats from %s\n", data.size(), path);
-        }
     }
 
     // VAE Decode

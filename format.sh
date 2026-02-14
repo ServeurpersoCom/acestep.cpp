@@ -15,7 +15,7 @@ We got nothing left but a beautiful day"
 
 mkdir -p /tmp/ace
 
-./ace-qwen3 --model ../checkpoints/acestep-5Hz-lm-4B \
+./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-4B \
     --system "Format the user's input into a more detailed and specific musical description:" \
     --user "$(printf '# Caption\n%s\n\n# Lyric\n%s' "$CAPTION" "$LYRICS")" \
     --no-codes \

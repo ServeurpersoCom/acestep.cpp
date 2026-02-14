@@ -1,8 +1,8 @@
 #!/bin/bash
-# Standard: all metas on CLI -> LLM codes -> DiT -> WAV
+# Custom mode (all metas): caption + lyrics + metadata -> codes -> DiT -> WAV
 
 set -eu
-SEED="${SEED:--1}"
+export SEED="${SEED:--1}" OUT="${OUT:-full.wav}"
 
 CAPTION="Vibrant French house meets tech-house fusion track featuring filtered disco samples, driving funky basslines, and classic four-on-the-floor beats with signature Bob Sinclar vocal chops. Analytical yet euphoric mood blending advanced AI technical vocabulary with dancefloor energy. Instruments include talkbox lead vocals, analog Moog bass synths, glitchy arpeggiated sequencers, punchy TR-808 drum machine, and shimmering high-hat rolls. Production style showcases crisp retro-modern mix with dynamic sidechain compression, warm vinyl crackle, and modular synth modulations. Vocal delivery combines rhythmic French rap verses with melodic, pitch-shifted choruses celebrating machine learning breakthroughs"
 
@@ -46,17 +46,6 @@ L'IA révolutionne, monde transformé
 IA... Intelligence Artificielle...
 Réseaux neuronaux... dansent... forever..."
 
-mkdir -p /tmp/ace
-
-./ace-qwen3 --model ../checkpoints/acestep-5Hz-lm-4B \
+exec ./generate.sh \
     --caption "$CAPTION" --lyrics "$LYRICS" \
-    --bpm 124 --duration 220 --keyscale "F# minor" --timesignature 4 --language fr \
-    --fsm --cfg-scale 2.2 \
-    --output-dir /tmp/ace \
-    --temperature 0.80 --top-p 0.9 --seed "$SEED"
-
-./dit-vae \
-    --input-dir /tmp/ace \
-    --text-encoder ../checkpoints/Qwen3-Embedding-0.6B \
-    --dit ../checkpoints/acestep-v15-turbo --vae ../checkpoints/vae \
-    --seed "$SEED" --output full.wav
+    --bpm 124 --duration 220 --keyscale "F# minor" --timesignature 4 --language fr

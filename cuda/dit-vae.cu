@@ -441,10 +441,10 @@ struct Prompt {
 
 // ACE-Step prompt templates
 static const char *INSTRUCTION_TEXT2MUSIC = "Fill the audio semantic mask based on the given conditions:";
-static const char *INSTRUCTION_COVER = "Generate audio semantic tokens based on the given conditions:";
 
-static std::string build_text_prompt(const Prompt &p, bool is_cover) {
-    const char *instruction = is_cover ? INSTRUCTION_COVER : INSTRUCTION_TEXT2MUSIC;
+static std::string build_text_prompt(const Prompt &p, bool /* is_cover */) {
+    // Python always uses "Fill the audio semantic mask..." for text2music (even with LM codes)
+    const char *instruction = INSTRUCTION_TEXT2MUSIC;
     std::string bpm_str = p.bpm.empty() ? "N/A" : p.bpm;
     std::string ts_str = p.timesignature.empty() ? "N/A" : p.timesignature;
     std::string ks_str = p.keyscale.empty() ? "N/A" : p.keyscale;
@@ -511,7 +511,7 @@ static void usage(const char *prog) {
     fprintf(stderr, "  --steps <n>             Euler steps (default: 8)\n");
     fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
     fprintf(stderr, "Debug:\n");
-    fprintf(stderr, "  --dump <dir>            Dump intermediate tensors for debug\n");
+    fprintf(stderr, "  --dump <dir>            Dump intermediate tensors\n");
 }
 
 int main(int argc, char **argv) {

@@ -923,32 +923,40 @@ static void usage(const char * prog) {
         "Model:\n"
         "  --model <dir>          Model directory (safetensors + config.json)\n"
         "\n"
-        "Prompt (standard mode):\n"
+        "Simple mode (inspiration):\n"
+        "  --query <text>         Natural language music description\n"
+        "  --instrumental         Generate instrumental (no vocals)\n"
+        "\n"
+        "Custom mode:\n"
         "  --caption <text>       Music description\n"
-        "  --lyrics <text>        Lyrics (default: [Instrumental])\n"
+        "  --lyrics <text>        Lyrics (default: empty)\n"
         "  --bpm <N>              BPM (0=LLM decides)\n"
         "  --duration <N>         Duration in seconds (0=LLM decides)\n"
         "  --keyscale <text>      Key/scale (e.g. 'C major')\n"
         "  --timesignature <N>    Time signature (2,3,4,6)\n"
         "  --language <code>      Vocal language (en,fr,zh,...)\n"
         "\n"
-        "Prompt (custom mode):\n"
+        "Raw mode (advanced):\n"
         "  --system <text>        Custom system message\n"
         "  --user <text>          Custom user message\n"
         "\n"
         "Generation:\n"
         "  --max-tokens <N>       Max new tokens (default: 256)\n"
         "  --max-seq <N>          KV cache size (default: 8192)\n"
-        "  --temperature <f>      Sampling temperature (default: 0.8)\n"
-        "  --top-p <f>            Top-p sampling (default: 0.9)\n"
+        "  --temperature <f>      Sampling temperature (default: 0.85)\n"
+        "  --top-p <f>            Top-p sampling (default: 0.9, 1.0=disabled)\n"
         "  --seed <N>             RNG seed (default: random)\n"
-        "  --cfg-scale <f>        CFG scale (1.0=disabled, default: 1.0)\n"
+        "  --cfg-scale <f>        CFG scale for Phase 2 (default: 2.0, 1.0=disabled)\n"
         "  --negative-prompt <t>  Negative prompt for CFG\n"
-        "  --fsm                  Enable FSM constrained decoding\n"
+        "  --no-fsm               Disable FSM constrained decoding\n"
         "  --no-codes             Phase 1 only (no audio codes)\n"
         "\n"
         "Output:\n"
         "  --output-dir <dir>     Write codes + metadata for dit-vae\n"
+        "\n"
+        "Debug:\n"
+        "  --dump-logits <path>   Dump prefill logits (binary f32)\n"
+        "  --dump-tokens <path>   Dump prompt token IDs (CSV)\n"
         "\n", prog);
 }
 
@@ -961,16 +969,18 @@ int main(int argc, char ** argv) {
     const char * cli_keyscale = nullptr;
     const char * cli_timesig = nullptr;
     const char * cli_language = nullptr;
+    const char * cli_query = nullptr;
+    bool cli_instrumental = false;
     const char * system_msg = nullptr;
     const char * user_msg = nullptr;
     int max_tokens = 256;
     int max_seq = 8192;
-    float temperature = 0.8f;
+    float temperature = 0.85f;
     float top_p = 0.9f;
     int seed = -1;
-    float cfg_scale = 1.0f;
+    float cfg_scale = 2.0f;
     const char * negative_prompt = nullptr;
-    bool use_fsm = false;
+    bool use_fsm = true;
     bool no_codes = false;
     const char * output_dir = nullptr;
     const char * dump_logits = nullptr;
@@ -997,6 +1007,10 @@ int main(int argc, char ** argv) {
             system_msg = argv[++i];
         else if (!strcmp(argv[i], "--user") && i + 1 < argc)
             user_msg = argv[++i];
+        else if (!strcmp(argv[i], "--query") && i + 1 < argc)
+            cli_query = argv[++i];
+        else if (!strcmp(argv[i], "--instrumental"))
+            cli_instrumental = true;
         else if (!strcmp(argv[i], "--max-tokens") && i + 1 < argc)
             max_tokens = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc)
@@ -1011,8 +1025,8 @@ int main(int argc, char ** argv) {
             cfg_scale = (float)atof(argv[++i]);
         else if (!strcmp(argv[i], "--negative-prompt") && i + 1 < argc)
             negative_prompt = argv[++i];
-        else if (!strcmp(argv[i], "--fsm"))
-            use_fsm = true;
+        else if (!strcmp(argv[i], "--no-fsm"))
+            use_fsm = false;
         else if (!strcmp(argv[i], "--no-codes"))
             no_codes = true;
         else if (!strcmp(argv[i], "--output-dir") && i + 1 < argc)
@@ -1021,6 +1035,10 @@ int main(int argc, char ** argv) {
             dump_logits = argv[++i];
         else if (!strcmp(argv[i], "--dump-tokens") && i + 1 < argc)
             dump_tokens = argv[++i];
+        else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
+            usage(argv[0]);
+            return 0;
+        }
         else {
             fprintf(stderr, "Unknown option: %s\n", argv[i]);
             usage(argv[0]);
@@ -1033,17 +1051,18 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
-    if (!system_msg && !cli_caption) {
-        fprintf(stderr, "ERROR: provide --system + --user (custom mode) or --caption (standard mode)\n");
+    int n_modes = (cli_query ? 1 : 0) + (cli_caption ? 1 : 0) + (system_msg ? 1 : 0);
+    if (n_modes == 0) {
+        fprintf(stderr, "ERROR: provide --query (simple), --caption (custom), or --system + --user (raw)\n");
         usage(argv[0]);
+        return 1;
+    }
+    if (n_modes > 1) {
+        fprintf(stderr, "ERROR: --query, --caption, and --system are mutually exclusive\n");
         return 1;
     }
     if (system_msg && !user_msg) {
         fprintf(stderr, "ERROR: --system requires --user\n");
-        return 1;
-    }
-    if (system_msg && cli_caption) {
-        fprintf(stderr, "ERROR: --system and --caption are mutually exclusive\n");
         return 1;
     }
 
@@ -1069,9 +1088,48 @@ int main(int argc, char ** argv) {
     MetadataFSM fsm;
     if (use_fsm) fsm.init(bpe, model.cfg.vocab_size);
 
-    if (system_msg) {
-        // Custom mode
-        fprintf(stderr, "[Custom] system: %.60s...\n", system_msg);
+    if (cli_query) {
+        // Simple/Inspiration mode: query -> metadata + lyrics -> codes
+        fprintf(stderr, "[Simple] query: %s, instrumental: %s\n",
+                cli_query, cli_instrumental ? "true" : "false");
+
+        // Build inspiration prompt (matches Python create_sample_from_query)
+        std::string instr_user = std::string(cli_query) + "\n\ninstrumental: "
+                               + (cli_instrumental ? "true" : "false");
+        std::vector<int> p1_prompt = build_custom_prompt(bpe,
+            "# Instruction\nExpand the user's input into a more detailed and specific musical description:\n",
+            instr_user.c_str());
+        fprintf(stderr, "[Phase1] %zu tokens, seed: %d\n", p1_prompt.size(), seed);
+
+        // Phase 1: inspiration (no CFG, top_p disabled, matches Python)
+        fsm.reset();
+        std::vector<int> gen_tokens = generate_text(&model, &bpe, p1_prompt, 2048,
+                                                     temperature, 1.0f, seed,
+                                                     use_fsm ? &fsm : nullptr);
+        std::string gen_text = bpe_decode(bpe, gen_tokens);
+        fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
+        fprintf(stderr, "[Phase1] output:\n%s\n", gen_text.c_str());
+
+        AcePrompt ace = {};
+        if (!parse_cot_and_lyrics(gen_text, &ace)) {
+            fprintf(stderr, "ERROR: failed to parse Phase 1 output\n");
+            return 1;
+        }
+        if (ace.duration <= 0) ace.duration = 120.0f;
+        if (ace.duration > 600) ace.duration = 600.0f;
+
+        if (output_dir) write_output_dir(output_dir, ace);
+
+        if (!no_codes) {
+            run_phase2(&model, bpe, ace, p1_prompt, temperature, top_p, seed,
+                       cfg_scale, negative_prompt, output_dir);
+        }
+
+        fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
+
+    } else if (system_msg) {
+        // Raw mode (advanced)
+        fprintf(stderr, "[Raw] system: %.60s...\n", system_msg);
 
         std::vector<int> p1_prompt = build_custom_prompt(bpe, system_msg, user_msg);
         fprintf(stderr, "[Phase1] %zu tokens, seed: %d\n", p1_prompt.size(), seed);
@@ -1102,7 +1160,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
 
     } else {
-        // Standard mode
+        // Custom mode (--caption with optional metadata)
         AcePrompt ace = {};
         ace.caption = cli_caption;
         ace.lyrics = cli_lyrics ? cli_lyrics : "";
