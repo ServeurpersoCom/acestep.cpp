@@ -390,7 +390,7 @@ static std::vector<int> build_lm_prompt_uncond_with_cot(BPETokenizer & bpe, cons
     return ids;
 }
 
-// Custom prompt (raw system + user)
+// Build Qwen3 chat prompt: <|im_start|>system\n...<|im_end|>\n<|im_start|>user\n...<|im_end|>\n<|im_start|>assistant\n
 static std::vector<int> build_custom_prompt(BPETokenizer & bpe, const char * sys, const char * user) {
     std::vector<int> ids;
     auto append = [&](const std::string & text) {
@@ -936,10 +936,6 @@ static void usage(const char * prog) {
         "  --timesignature <N>    Time signature (2,3,4,6)\n"
         "  --language <code>      Vocal language (en,fr,zh,...)\n"
         "\n"
-        "Raw mode (advanced):\n"
-        "  --system <text>        Custom system message\n"
-        "  --user <text>          Custom user message\n"
-        "\n"
         "Generation:\n"
         "  --max-tokens <N>       Max new tokens (default: 256)\n"
         "  --max-seq <N>          KV cache size (default: 8192)\n"
@@ -971,8 +967,6 @@ int main(int argc, char ** argv) {
     const char * cli_language = nullptr;
     const char * cli_query = nullptr;
     bool cli_instrumental = false;
-    const char * system_msg = nullptr;
-    const char * user_msg = nullptr;
     int max_tokens = 256;
     int max_seq = 8192;
     float temperature = 0.85f;
@@ -1003,10 +997,6 @@ int main(int argc, char ** argv) {
             cli_timesig = argv[++i];
         else if (!strcmp(argv[i], "--language") && i + 1 < argc)
             cli_language = argv[++i];
-        else if (!strcmp(argv[i], "--system") && i + 1 < argc)
-            system_msg = argv[++i];
-        else if (!strcmp(argv[i], "--user") && i + 1 < argc)
-            user_msg = argv[++i];
         else if (!strcmp(argv[i], "--query") && i + 1 < argc)
             cli_query = argv[++i];
         else if (!strcmp(argv[i], "--instrumental"))
@@ -1051,18 +1041,14 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
-    int n_modes = (cli_query ? 1 : 0) + (cli_caption ? 1 : 0) + (system_msg ? 1 : 0);
+    int n_modes = (cli_query ? 1 : 0) + (cli_caption ? 1 : 0);
     if (n_modes == 0) {
-        fprintf(stderr, "ERROR: provide --query (simple), --caption (custom), or --system + --user (raw)\n");
+        fprintf(stderr, "ERROR: provide --query (simple) or --caption (custom)\n");
         usage(argv[0]);
         return 1;
     }
     if (n_modes > 1) {
-        fprintf(stderr, "ERROR: --query, --caption, and --system are mutually exclusive\n");
-        return 1;
-    }
-    if (system_msg && !user_msg) {
-        fprintf(stderr, "ERROR: --system requires --user\n");
+        fprintf(stderr, "ERROR: --query and --caption are mutually exclusive\n");
         return 1;
     }
 
@@ -1105,38 +1091,6 @@ int main(int argc, char ** argv) {
         fsm.reset();
         std::vector<int> gen_tokens = generate_text(&model, &bpe, p1_prompt, 2048,
                                                      temperature, 1.0f, seed,
-                                                     use_fsm ? &fsm : nullptr);
-        std::string gen_text = bpe_decode(bpe, gen_tokens);
-        fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
-        fprintf(stderr, "[Phase1] output:\n%s\n", gen_text.c_str());
-
-        AcePrompt ace = {};
-        if (!parse_cot_and_lyrics(gen_text, &ace)) {
-            fprintf(stderr, "ERROR: failed to parse Phase 1 output\n");
-            return 1;
-        }
-        if (ace.duration <= 0) ace.duration = 120.0f;
-        if (ace.duration > 600) ace.duration = 600.0f;
-
-        if (output_dir) write_output_dir(output_dir, ace);
-
-        if (!no_codes) {
-            run_phase2(&model, bpe, ace, p1_prompt, temperature, top_p, seed,
-                       cfg_scale, negative_prompt, output_dir);
-        }
-
-        fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
-
-    } else if (system_msg) {
-        // Raw mode (advanced)
-        fprintf(stderr, "[Raw] system: %.60s...\n", system_msg);
-
-        std::vector<int> p1_prompt = build_custom_prompt(bpe, system_msg, user_msg);
-        fprintf(stderr, "[Phase1] %zu tokens, seed: %d\n", p1_prompt.size(), seed);
-
-        fsm.reset();
-        std::vector<int> gen_tokens = generate_text(&model, &bpe, p1_prompt, 2048,
-                                                     temperature, top_p, seed,
                                                      use_fsm ? &fsm : nullptr);
         std::string gen_text = bpe_decode(bpe, gen_tokens);
         fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());

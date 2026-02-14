@@ -86,17 +86,6 @@ partial, the LLM fills in missing fields via CoT first.
 ./generate.sh --caption "Garage rock, distorted guitars, raw energy" --duration 180
 ```
 
-### Raw mode (advanced)
-
-Custom system/user prompts for experimentation:
-
-```bash
-./generate.sh \
-    --system "Format the user's input into a detailed musical description:" \
-    --user "$(printf '# Caption\n%s\n\n# Lyric\n%s' "$CAPTION" "$LYRICS")" \
-    --no-codes
-```
-
 ## Environment variables
 
 | Variable | Default | Description |
@@ -113,7 +102,7 @@ Custom system/user prompts for experimentation:
 ## ace-qwen3 reference
 
 ```
-Usage: ace-qwen3 --model <dir> [options]
+Usage: ./build/ace-qwen3 --model <dir> [options]
 
 Model:
   --model <dir>          Model directory (safetensors + config.json)
@@ -131,10 +120,6 @@ Custom mode:
   --timesignature <N>    Time signature (2,3,4,6)
   --language <code>      Vocal language (en,fr,zh,...)
 
-Raw mode (advanced):
-  --system <text>        Custom system message
-  --user <text>          Custom user message
-
 Generation:
   --max-tokens <N>       Max new tokens (default: 256)
   --max-seq <N>          KV cache size (default: 8192)
@@ -148,6 +133,10 @@ Generation:
 
 Output:
   --output-dir <dir>     Write codes + metadata for dit-vae
+
+Debug:
+  --dump-logits <path>   Dump prefill logits (binary f32)
+  --dump-tokens <path>   Dump prompt token IDs (CSV)
 ```
 
 Three LLM sizes: 0.6B (fast), 1.7B, 4B (best quality).
