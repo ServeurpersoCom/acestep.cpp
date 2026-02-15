@@ -3,6 +3,7 @@
 // ace-qwen3: Qwen3 causal LM for ACE-Step music generation (GGML backend)
 #include "qwen3-lm.h"
 #include "bpe.h"
+#include "request.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -13,7 +14,6 @@
 #include <algorithm>
 #include <random>
 #include <chrono>
-#include <sstream>
 #include <map>
 #include <unordered_map>
 
@@ -554,6 +554,12 @@ struct MetadataFSM {
         value_acc.clear();
     }
 
+    // Force FSM to only allow a specific language value
+    void force_language(BPETokenizer & bpe, const std::string & lang) {
+        language_tree = PrefixTree();
+        build_value_tree(bpe, language_tree, "language:", {lang});
+    }
+
     const std::vector<int> * current_name_tokens() const {
         switch (state) {
             case BPM_NAME:      return &bpm_name;
@@ -696,7 +702,8 @@ static void generate(Qwen3LM * m, BPETokenizer * bpe,
                      double * out_decode_ms = nullptr,
                      bool stop_at_reasoning = false,
                      std::vector<int> * out_generated_tokens = nullptr,
-                     MetadataFSM * fsm = nullptr) {
+                     MetadataFSM * fsm = nullptr,
+                     bool lyrics_mode = false) {
 
     int V = m->cfg.vocab_size;
     int total_tokens = 0;
@@ -746,8 +753,8 @@ static void generate(Qwen3LM * m, BPETokenizer * bpe,
         if (fsm && fsm->enabled && !codes_phase)
             fsm->apply_mask(sample_logits);
 
-        // After </think>: only audio codes + EOS
-        if (codes_phase && !stop_at_reasoning) {
+        // After </think>: only audio codes + EOS (skip in lyrics_mode)
+        if (codes_phase && !stop_at_reasoning && !lyrics_mode) {
             for (int v = 0; v < AUDIO_CODE_BASE; v++)
                 if (v != TOKEN_IM_END) sample_logits[v] = -1e9f;
         }
@@ -810,45 +817,23 @@ static void generate(Qwen3LM * m, BPETokenizer * bpe,
 }
 
 // Text-only generation (Phase 1: no CFG, stops at EOS)
-static std::vector<int> generate_text(Qwen3LM * m, BPETokenizer * bpe,
-                                       const std::vector<int> & prompt_tokens,
-                                       int max_new_tokens, float temperature, float top_p, int seed,
-                                       MetadataFSM * fsm = nullptr) {
-    int V = m->cfg.vocab_size;
-    std::vector<int> generated;
+static std::string codes_to_string(const std::vector<int> & codes);
 
-    qw3lm_reset_kv(m, 0);
-
-    fprintf(stderr, "[Phase1-Prefill] %zu tokens\n", prompt_tokens.size());
-    Timer t_prefill;
-    std::vector<float> logits(V);
-    qw3lm_forward(m, prompt_tokens.data(), (int)prompt_tokens.size(), 0, logits.data());
-    fprintf(stderr, "[Phase1-Prefill] %.0fms\n", t_prefill.ms());
-
-    Timer t_decode;
-    g_rng.seed(seed);
-
-    for (int i = 0; i < max_new_tokens; i++) {
-        if (fsm && fsm->enabled) fsm->apply_mask(logits.data());
-        int next = sample_top_p(logits.data(), V, temperature, top_p);
-        if (fsm && fsm->enabled) fsm->update(next);
-        if (next == TOKEN_IM_END) break;
-        generated.push_back(next);
-        qw3lm_forward(m, &next, 1, 0, logits.data());
+// Convert audio codes vector to comma-separated string (Python-compatible)
+static std::string codes_to_string(const std::vector<int> & codes) {
+    std::string s;
+    for (size_t i = 0; i < codes.size(); i++) {
+        if (i > 0) s += ',';
+        s += std::to_string(codes[i]);
     }
-
-    fprintf(stderr, "[Phase1-Decode] %.0fms (%zu tokens)\n", t_decode.ms(), generated.size());
-    return generated;
+    return s;
 }
 
-static bool write_codes(const char * dir, const std::vector<int> & codes);
-
 // Phase 2: run audio code generation with all metas known
-static void run_phase2(Qwen3LM * m, BPETokenizer & bpe, const AcePrompt & ace,
-                       const std::vector<int> & /* p1_prompt (unused, KV reset) */,
-                       float temperature, float top_p, int seed,
-                       float cfg_scale, const char * negative_prompt,
-                       const char * output_dir) {
+// Returns comma-separated codes string (empty on failure)
+static std::string run_phase2(Qwen3LM * m, BPETokenizer & bpe, const AcePrompt & ace,
+                              float temperature, float top_p, int seed,
+                              float cfg_scale, const char * negative_prompt) {
     std::string cot = build_cot_yaml(ace);
     fprintf(stderr, "[Phase2] CoT:\n%s", cot.c_str());
     std::vector<int> prompt = build_lm_prompt_with_cot(bpe, ace, cot);
@@ -864,52 +849,13 @@ static void run_phase2(Qwen3LM * m, BPETokenizer & bpe, const AcePrompt & ace,
     double prefill_ms = 0, decode_ms = 0;
     std::vector<int> audio_codes;
     generate(m, &bpe, prompt, max_tokens, temperature, top_p, seed,
-             output_dir ? &audio_codes : nullptr,
+             &audio_codes,
              cfg_scale, uncond.empty() ? nullptr : &uncond,
              true, &prefill_ms, &decode_ms);
 
-    if (output_dir && !audio_codes.empty())
-        write_codes(output_dir, audio_codes);
-
-    fprintf(stderr, "[Phase2] Prefill %.0f | Decode %.0fms\n", prefill_ms, decode_ms);
-}
-
-//
-// Write helpers
-//
-
-// Write audio codes as CSV (compatible with dit-vae --input-dir)
-static bool write_codes(const char * dir, const std::vector<int> & codes) {
-    std::string path = std::string(dir) + "/codes";
-    FILE * f = fopen(path.c_str(), "w");
-    if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", path.c_str()); return false; }
-    for (size_t i = 0; i < codes.size(); i++) {
-        if (i > 0) fprintf(f, ",");
-        fprintf(f, "%d", codes[i]);
-    }
-    fprintf(f, "\n");
-    fclose(f);
-    fprintf(stderr, "[Output] %s (%zu audio codes)\n", path.c_str(), codes.size());
-    return true;
-}
-
-static void write_output_dir(const char * dir, const AcePrompt & ace) {
-    std::string d(dir);
-    auto write_file = [&](const char * name, const std::string & content) {
-        std::string path = d + "/" + name;
-        FILE * f = fopen(path.c_str(), "w");
-        if (!f) { fprintf(stderr, "ERROR: cannot write %s\n", path.c_str()); return; }
-        fwrite(content.data(), 1, content.size(), f);
-        fclose(f);
-    };
-    write_file("caption", ace.caption);
-    write_file("lyrics", ace.lyrics);
-    if (ace.bpm > 0) write_file("bpm", std::to_string(ace.bpm));
-    if (ace.duration > 0) write_file("duration", std::to_string((int)ace.duration));
-    if (!ace.keyscale.empty()) write_file("keyscale", ace.keyscale);
-    if (!ace.timesignature.empty()) write_file("timesig", ace.timesignature);
-    if (!ace.vocal_language.empty()) write_file("language", ace.vocal_language);
-    fprintf(stderr, "[Output] metadata -> %s/\n", dir);
+    fprintf(stderr, "[Phase2] Prefill %.0f | Decode %.0fms | %zu codes\n",
+            prefill_ms, decode_ms, audio_codes.size());
+    return codes_to_string(audio_codes);
 }
 
 //
@@ -918,37 +864,16 @@ static void write_output_dir(const char * dir, const AcePrompt & ace) {
 
 static void usage(const char * prog) {
     fprintf(stderr,
-        "Usage: %s --model <dir> [options]\n"
+        "Usage: %s --model <dir> --request <json> [options]\n"
         "\n"
-        "Model:\n"
+        "Required:\n"
         "  --model <dir>          Model directory (safetensors + config.json)\n"
+        "  --request <json>       Request JSON (read, enriched, overwritten)\n"
         "\n"
-        "Simple mode (inspiration):\n"
-        "  --query <text>         Natural language music description\n"
-        "  --instrumental         Generate instrumental (no vocals)\n"
-        "\n"
-        "Custom mode:\n"
-        "  --caption <text>       Music description\n"
-        "  --lyrics <text>        Lyrics (default: empty)\n"
-        "  --bpm <N>              BPM (0=LLM decides)\n"
-        "  --duration <N>         Duration in seconds (0=LLM decides)\n"
-        "  --keyscale <text>      Key/scale (e.g. 'C major')\n"
-        "  --timesignature <N>    Time signature (2,3,4,6)\n"
-        "  --language <code>      Vocal language (en,fr,zh,...)\n"
-        "\n"
-        "Generation:\n"
+        "Infra:\n"
         "  --max-tokens <N>       Max new tokens (default: 256)\n"
         "  --max-seq <N>          KV cache size (default: 8192)\n"
-        "  --temperature <f>      Sampling temperature (default: 0.85)\n"
-        "  --top-p <f>            Top-p sampling (default: 0.9, 1.0=disabled)\n"
-        "  --seed <N>             RNG seed (default: random)\n"
-        "  --cfg-scale <f>        CFG scale for Phase 2 (default: 2.0, 1.0=disabled)\n"
-        "  --negative-prompt <t>  Negative prompt for CFG\n"
         "  --no-fsm               Disable FSM constrained decoding\n"
-        "  --no-codes             Phase 1 only (no audio codes)\n"
-        "\n"
-        "Output:\n"
-        "  --output-dir <dir>     Write codes + metadata for dit-vae\n"
         "\n"
         "Debug:\n"
         "  --dump-logits <path>   Dump prefill logits (binary f32)\n"
@@ -957,70 +882,30 @@ static void usage(const char * prog) {
 }
 
 int main(int argc, char ** argv) {
-    const char * model_dir = nullptr;
-    const char * cli_caption = nullptr;
-    const char * cli_lyrics = nullptr;
-    int cli_bpm = 0;
-    float cli_duration = 0;
-    const char * cli_keyscale = nullptr;
-    const char * cli_timesig = nullptr;
-    const char * cli_language = nullptr;
-    const char * cli_query = nullptr;
-    bool cli_instrumental = false;
-    int max_tokens = 256;
-    int max_seq = 8192;
-    float temperature = 0.85f;
-    float top_p = 0.9f;
-    int seed = -1;
-    float cfg_scale = 2.0f;
-    const char * negative_prompt = nullptr;
-    bool use_fsm = true;
-    bool no_codes = false;
-    const char * output_dir = nullptr;
-    const char * dump_logits = nullptr;
-    const char * dump_tokens = nullptr;
+    const char * model_dir    = nullptr;
+    const char * request_path = nullptr;
+    int max_tokens  = 256;
+    int max_seq     = 8192;
+    bool use_fsm    = true;
+    const char * dump_logits  = nullptr;
+    const char * dump_tokens  = nullptr;
+
+    if (argc < 2) {
+        usage(argv[0]);
+        return 1;
+    }
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc)
             model_dir = argv[++i];
-        else if (!strcmp(argv[i], "--caption") && i + 1 < argc)
-            cli_caption = argv[++i];
-        else if (!strcmp(argv[i], "--lyrics") && i + 1 < argc)
-            cli_lyrics = argv[++i];
-        else if (!strcmp(argv[i], "--bpm") && i + 1 < argc)
-            cli_bpm = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--duration") && i + 1 < argc)
-            cli_duration = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--keyscale") && i + 1 < argc)
-            cli_keyscale = argv[++i];
-        else if (!strcmp(argv[i], "--timesignature") && i + 1 < argc)
-            cli_timesig = argv[++i];
-        else if (!strcmp(argv[i], "--language") && i + 1 < argc)
-            cli_language = argv[++i];
-        else if (!strcmp(argv[i], "--query") && i + 1 < argc)
-            cli_query = argv[++i];
-        else if (!strcmp(argv[i], "--instrumental"))
-            cli_instrumental = true;
+        else if (!strcmp(argv[i], "--request") && i + 1 < argc)
+            request_path = argv[++i];
         else if (!strcmp(argv[i], "--max-tokens") && i + 1 < argc)
             max_tokens = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc)
             max_seq = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--temperature") && i + 1 < argc)
-            temperature = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--top-p") && i + 1 < argc)
-            top_p = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--seed") && i + 1 < argc)
-            seed = atoi(argv[++i]);
-        else if (!strcmp(argv[i], "--cfg-scale") && i + 1 < argc)
-            cfg_scale = (float)atof(argv[++i]);
-        else if (!strcmp(argv[i], "--negative-prompt") && i + 1 < argc)
-            negative_prompt = argv[++i];
         else if (!strcmp(argv[i], "--no-fsm"))
             use_fsm = false;
-        else if (!strcmp(argv[i], "--no-codes"))
-            no_codes = true;
-        else if (!strcmp(argv[i], "--output-dir") && i + 1 < argc)
-            output_dir = argv[++i];
         else if (!strcmp(argv[i], "--dump-logits") && i + 1 < argc)
             dump_logits = argv[++i];
         else if (!strcmp(argv[i], "--dump-tokens") && i + 1 < argc)
@@ -1038,24 +923,36 @@ int main(int argc, char ** argv) {
 
     if (!model_dir) {
         fprintf(stderr, "ERROR: --model required\n");
-        usage(argv[0]);
-        return 1;
+        usage(argv[0]); return 1;
     }
-    int n_modes = (cli_query ? 1 : 0) + (cli_caption ? 1 : 0);
-    if (n_modes == 0) {
-        fprintf(stderr, "ERROR: provide --query (simple) or --caption (custom)\n");
-        usage(argv[0]);
-        return 1;
+    if (!request_path) {
+        fprintf(stderr, "ERROR: --request required\n");
+        usage(argv[0]); return 1;
     }
-    if (n_modes > 1) {
-        fprintf(stderr, "ERROR: --query and --caption are mutually exclusive\n");
+
+    // Read request JSON
+    AceRequest req;
+    if (!request_parse(&req, request_path)) return 1;
+    request_dump(&req, stderr);
+
+    if (req.caption.empty()) {
+        fprintf(stderr, "ERROR: caption is empty in %s\n", request_path);
         return 1;
     }
 
+    // Resolve seed
+    int seed = req.seed;
     if (seed < 0) {
         std::random_device rd;
         seed = (int)(rd() & 0x7FFFFFFF);
     }
+    req.seed = seed;
+
+    // Generation params from request
+    float temperature      = req.lm_temperature;
+    float top_p            = req.lm_top_p;
+    float cfg_scale        = req.lm_cfg_scale;
+    const char * neg_prompt = req.lm_negative_prompt.c_str();
 
     Timer t_total;
 
@@ -1074,171 +971,177 @@ int main(int argc, char ** argv) {
     MetadataFSM fsm;
     if (use_fsm) fsm.init(bpe, model.cfg.vocab_size);
 
-    if (cli_query) {
-        // Simple/Inspiration mode: query -> metadata + lyrics -> codes
-        fprintf(stderr, "[Simple] query: %s, instrumental: %s\n",
-                cli_query, cli_instrumental ? "true" : "false");
+    // Copy request -> AcePrompt (internal LLM struct)
+    AcePrompt ace = {};
+    ace.caption        = req.caption;
+    ace.lyrics         = req.lyrics;
+    ace.duration       = req.duration;
+    ace.bpm            = req.bpm;
+    ace.keyscale       = req.keyscale;
+    ace.timesignature  = req.timesignature;
+    ace.vocal_language = req.vocal_language;
 
-        // Build inspiration prompt (matches Python create_sample_from_query)
-        std::string instr_user = std::string(cli_query) + "\n\ninstrumental: "
-                               + (cli_instrumental ? "true" : "false");
-        std::vector<int> p1_prompt = build_custom_prompt(bpe,
-            "# Instruction\nExpand the user's input into a more detailed and specific musical description:\n",
-            instr_user.c_str());
-        fprintf(stderr, "[Phase1] %zu tokens, seed: %d\n", p1_prompt.size(), seed);
+    bool user_has_codes = !req.audio_codes.empty();
+    bool need_lm_codes  = req.thinking && !user_has_codes;
 
-        // Phase 1: inspiration (no CFG, top_p disabled, matches Python)
+    bool is_simple = ace.lyrics.empty() &&
+                     ace.bpm <= 0 && ace.duration <= 0 &&
+                     ace.keyscale.empty() && ace.timesignature.empty();
+
+    std::vector<int> prompt;
+
+    // Preprocessor: simple mode generates lyrics + metas from caption
+    if (is_simple) {
+        fprintf(stderr, "[Simple] Inspiration\n");
+
+        const char * sys =
+            "# Instruction\n"
+            "Expand the user's input into a more detailed"
+            " and specific musical description:\n";
+        std::string user_msg = ace.caption + "\n\ninstrumental: "
+            + std::string(req.instrumental ? "true" : "false");
+        prompt = build_custom_prompt(bpe, sys, user_msg.c_str());
+
+        fprintf(stderr, "[Simple] %zu tokens, no CFG, seed: %d\n",
+                prompt.size(), seed);
+
+        std::vector<int> gen_tokens;
+        double p1_prefill = 0, p1_decode = 0;
         fsm.reset();
-        std::vector<int> gen_tokens = generate_text(&model, &bpe, p1_prompt, 2048,
-                                                     temperature, 1.0f, seed,
-                                                     use_fsm ? &fsm : nullptr);
+        if (use_fsm && ace.vocal_language != "unknown" && !ace.vocal_language.empty())
+            fsm.force_language(bpe, ace.vocal_language);
+        generate(&model, &bpe, prompt, 2048, temperature, 1.0f, seed,
+                 nullptr, 1.0f, nullptr,
+                 false, &p1_prefill, &p1_decode,
+                 false, &gen_tokens, use_fsm ? &fsm : nullptr, true);
+
+        std::string gen_text = bpe_decode(bpe, gen_tokens);
+        fprintf(stderr, "[Simple] %zu tokens decoded\n", gen_tokens.size());
+        fprintf(stderr, "[Simple] CoT + lyrics:\n%s\n", gen_text.c_str());
+
+        AcePrompt parsed = {};
+        parse_cot_and_lyrics(gen_text, &parsed);
+
+        // Merge, preserving user values
+        if (parsed.bpm > 0 && ace.bpm <= 0) ace.bpm = parsed.bpm;
+        if (parsed.duration > 0 && ace.duration <= 0) ace.duration = parsed.duration;
+        if (!parsed.keyscale.empty() && ace.keyscale.empty()) ace.keyscale = parsed.keyscale;
+        if (!parsed.timesignature.empty() && ace.timesignature.empty()) ace.timesignature = parsed.timesignature;
+        if (!parsed.vocal_language.empty() && ace.vocal_language == "unknown") ace.vocal_language = parsed.vocal_language;
+        if (!parsed.caption.empty()) ace.caption = parsed.caption;
+        if (!parsed.lyrics.empty()) ace.lyrics = parsed.lyrics;
+
+        qw3lm_reset_kv(&model, 0);
+    }
+
+    // Re-evaluate after possible enrichment
+    bool has_all_metas = (ace.bpm > 0 && ace.duration > 0 &&
+                          !ace.keyscale.empty() && !ace.timesignature.empty());
+
+    if (has_all_metas) {
+        if (need_lm_codes) {
+            fprintf(stderr, "[All-metas] thinking=true, generating codes\n");
+
+            // Debug: dump tokens/logits before generation
+            if (dump_logits || dump_tokens) {
+                std::string cot = build_cot_yaml(ace);
+                auto dbg_prompt = build_lm_prompt_with_cot(bpe, ace, cot);
+
+                if (dump_tokens) {
+                    FILE * f = fopen(dump_tokens, "w");
+                    if (f) {
+                        for (size_t j = 0; j < dbg_prompt.size(); j++)
+                            fprintf(f, "%s%d", j ? "," : "", dbg_prompt[j]);
+                        fprintf(f, "\n");
+                        fclose(f);
+                        fprintf(stderr, "[Debug] Tokens -> %s (%zu)\n",
+                                dump_tokens, dbg_prompt.size());
+                    }
+                }
+                if (dump_logits) {
+                    std::vector<float> dbg_logits(model.cfg.vocab_size);
+                    qw3lm_forward(&model, dbg_prompt.data(), (int)dbg_prompt.size(), 0, dbg_logits.data());
+                    FILE * f = fopen(dump_logits, "wb");
+                    if (f) {
+                        fwrite(dbg_logits.data(), sizeof(float), model.cfg.vocab_size, f);
+                        fclose(f);
+                        fprintf(stderr, "[Debug] Logits -> %s (%d floats, argmax=%d)\n",
+                                dump_logits, model.cfg.vocab_size,
+                                (int)(std::max_element(dbg_logits.begin(), dbg_logits.end()) - dbg_logits.begin()));
+                    }
+                    qw3lm_reset_kv(&model, 0);
+                }
+            }
+
+            req.audio_codes = run_phase2(&model, bpe, ace,
+                                         temperature, top_p, seed, cfg_scale, neg_prompt);
+        } else {
+            fprintf(stderr, "[All-metas] %s, skipping LLM code generation\n",
+                    user_has_codes ? "user codes present" : "thinking=false");
+        }
+
+    } else {
+        // Partial metas: Phase 1 CoT to complete metadata
+        fprintf(stderr, "[Partial-metas] Phase 1 CoT\n");
+
+        prompt = build_lm_prompt(bpe, ace);
+        std::vector<int> uncond;
+        if (cfg_scale > 1.0f)
+            uncond = build_lm_prompt_uncond(bpe, ace, neg_prompt);
+
+        fprintf(stderr, "[Phase1] %zu tokens, CFG: %.2f, seed: %d\n",
+                prompt.size(), cfg_scale, seed);
+
+        std::vector<int> gen_tokens;
+        double p1_prefill = 0, p1_decode = 0;
+        fsm.reset();
+        generate(&model, &bpe, prompt, 2048, temperature, top_p, seed,
+                 nullptr, cfg_scale, uncond.empty() ? nullptr : &uncond,
+                 false, &p1_prefill, &p1_decode,
+                 true, &gen_tokens, use_fsm ? &fsm : nullptr);
+
         std::string gen_text = bpe_decode(bpe, gen_tokens);
         fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
-        fprintf(stderr, "[Phase1] output:\n%s\n", gen_text.c_str());
+        fprintf(stderr, "[Partial-metas] CoT:\n%s\n", gen_text.c_str());
 
-        AcePrompt ace = {};
-        if (!parse_cot_and_lyrics(gen_text, &ace)) {
-            fprintf(stderr, "ERROR: failed to parse Phase 1 output\n");
-            return 1;
+        AcePrompt parsed = ace;
+        if (!parse_cot_and_lyrics(gen_text, &parsed)) {
+            fprintf(stderr, "WARNING: CoT parse incomplete, using available fields\n");
         }
+        if (parsed.bpm > 0) ace.bpm = parsed.bpm;
+        if (parsed.duration > 0) ace.duration = parsed.duration;
+        if (!parsed.keyscale.empty()) ace.keyscale = parsed.keyscale;
+        if (!parsed.timesignature.empty()) ace.timesignature = parsed.timesignature;
+        if (!parsed.vocal_language.empty()) ace.vocal_language = parsed.vocal_language;
+        if (!parsed.caption.empty()) ace.caption = parsed.caption;
+
         if (ace.duration <= 0) ace.duration = 120.0f;
         if (ace.duration > 600) ace.duration = 600.0f;
 
-        if (output_dir) write_output_dir(output_dir, ace);
-
-        if (!no_codes) {
-            run_phase2(&model, bpe, ace, p1_prompt, temperature, top_p, seed,
-                       cfg_scale, negative_prompt, output_dir);
-        }
-
-        fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
-
-    } else {
-        // Custom mode (--caption with optional metadata)
-        AcePrompt ace = {};
-        ace.caption = cli_caption;
-        ace.lyrics = cli_lyrics ? cli_lyrics : "";
-        ace.duration = cli_duration;
-        ace.bpm = cli_bpm;
-        ace.keyscale = cli_keyscale ? cli_keyscale : "";
-        ace.timesignature = cli_timesig ? cli_timesig : "";
-        ace.vocal_language = cli_language ? cli_language : "";
-
-        bool has_all_metas = (ace.bpm > 0 && ace.duration > 0 &&
-                              !ace.keyscale.empty() && !ace.timesignature.empty());
-
-        std::vector<int> prompt;
-
-        if (no_codes && has_all_metas) {
-            if (output_dir) write_output_dir(output_dir, ace);
-            fprintf(stderr, "[All-metas] No codes requested, metadata written\n");
-            fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
-
-        } else if (has_all_metas) {
-            // All metas known: inject CoT, generate codes directly
-            std::string cot = build_cot_yaml(ace);
-            fprintf(stderr, "[All-metas] CoT:\n%s", cot.c_str());
-            prompt = build_lm_prompt_with_cot(bpe, ace, cot);
-            std::vector<int> uncond;
-            if (cfg_scale > 1.0f)
-                uncond = build_lm_prompt_uncond_with_cot(bpe, ace, negative_prompt);
-            if (max_tokens == 256) max_tokens = (int)(ace.duration * 5) + 100;
-
-            fprintf(stderr, "[All-metas] %zu tokens, max: %d, CFG: %.2f, seed: %d\n",
-                    prompt.size(), max_tokens, cfg_scale, seed);
-
-            // Debug: dump tokens for Python comparison
-            if (dump_tokens) {
-                FILE * f = fopen(dump_tokens, "w");
-                if (f) {
-                    for (size_t i = 0; i < prompt.size(); i++) {
-                        if (i > 0) fprintf(f, ",");
-                        fprintf(f, "%d", prompt[i]);
-                    }
-                    fprintf(f, "\n");
-                    fclose(f);
-                    fprintf(stderr, "[Debug] Tokens -> %s (%zu tokens)\n", dump_tokens, prompt.size());
-                }
-            }
-
-            // Debug: dump prefill logits for comparison
-            if (dump_logits) {
-                qw3lm_reset_kv(&model, 0);
-                std::vector<float> dbg_logits(model.cfg.vocab_size);
-                qw3lm_forward(&model, prompt.data(), (int)prompt.size(), 0, dbg_logits.data());
-                FILE * f = fopen(dump_logits, "wb");
-                if (f) {
-                    fwrite(dbg_logits.data(), sizeof(float), model.cfg.vocab_size, f);
-                    fclose(f);
-                    fprintf(stderr, "[Debug] Logits -> %s (%d floats, argmax=%d)\n",
-                            dump_logits, model.cfg.vocab_size,
-                            (int)(std::max_element(dbg_logits.begin(), dbg_logits.end()) - dbg_logits.begin()));
-                }
-                qw3lm_reset_kv(&model, 0);
-            }
-
-            double prefill_ms = 0, decode_ms = 0;
-            std::vector<int> audio_codes;
-            generate(&model, &bpe, prompt, max_tokens, temperature, top_p, seed,
-                     output_dir ? &audio_codes : nullptr,
-                     cfg_scale, uncond.empty() ? nullptr : &uncond,
-                     true, &prefill_ms, &decode_ms);
-
-            if (output_dir && !audio_codes.empty())
-                write_codes(output_dir, audio_codes);
-            if (output_dir) write_output_dir(output_dir, ace);
-
-            fprintf(stderr, "[Ace-Qwen3] Load %.0f | Prefill %.0f | Decode %.0f | Total %.0fms\n",
-                    load_ms, prefill_ms, decode_ms, t_total.ms());
-
-        } else {
-            // Partial metas: two-phase generation
-            fprintf(stderr, "[Partial-metas] Two-phase generation\n");
-
-            prompt = build_lm_prompt(bpe, ace);
-            std::vector<int> uncond;
-            if (cfg_scale > 1.0f)
-                uncond = build_lm_prompt_uncond(bpe, ace, negative_prompt);
-
-            fprintf(stderr, "[Phase1] %zu tokens, CFG: %.2f, seed: %d\n",
-                    prompt.size(), cfg_scale, seed);
-
-            std::vector<int> gen_tokens;
-            double p1_prefill = 0, p1_decode = 0;
-            fsm.reset();
-            generate(&model, &bpe, prompt, 2048, temperature, top_p, seed,
-                     nullptr, cfg_scale, uncond.empty() ? nullptr : &uncond,
-                     false, &p1_prefill, &p1_decode,
-                     true, &gen_tokens, use_fsm ? &fsm : nullptr);
-
-            std::string gen_text = bpe_decode(bpe, gen_tokens);
-            fprintf(stderr, "[Phase1] %zu tokens decoded, %zuB text\n", gen_tokens.size(), gen_text.size());
-            fprintf(stderr, "[Partial-metas] CoT:\n%s\n", gen_text.c_str());
-
-            AcePrompt parsed = ace;
-            if (!parse_cot_and_lyrics(gen_text, &parsed)) {
-                fprintf(stderr, "WARNING: CoT parse incomplete, using available fields\n");
-            }
-            if (parsed.bpm > 0) ace.bpm = parsed.bpm;
-            if (parsed.duration > 0) ace.duration = parsed.duration;
-            if (!parsed.keyscale.empty()) ace.keyscale = parsed.keyscale;
-            if (!parsed.timesignature.empty()) ace.timesignature = parsed.timesignature;
-            if (!parsed.vocal_language.empty()) ace.vocal_language = parsed.vocal_language;
-            if (!parsed.caption.empty()) ace.caption = parsed.caption;
-
-            if (ace.duration <= 0) ace.duration = 120.0f;
-            if (ace.duration > 600) ace.duration = 600.0f;
-
-            if (output_dir) write_output_dir(output_dir, ace);
-
-            if (!no_codes) {
-                run_phase2(&model, bpe, ace, prompt, temperature, top_p, seed,
-                           cfg_scale, negative_prompt, output_dir);
-            }
-
-            fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms\n", load_ms, t_total.ms());
+        if (need_lm_codes) {
+            req.audio_codes = run_phase2(&model, bpe, ace,
+                                         temperature, top_p, seed, cfg_scale, neg_prompt);
         }
     }
+
+    // Clamp duration (once, after all enrichment)
+    if (ace.duration <= 0) ace.duration = 120.0f;
+    if (ace.duration > 600) ace.duration = 600.0f;
+
+    // Copy enriched AcePrompt back to request
+    req.caption        = ace.caption;
+    req.lyrics         = ace.lyrics;
+    req.bpm            = ace.bpm;
+    req.duration       = ace.duration;
+    req.keyscale       = ace.keyscale;
+    req.timesignature  = ace.timesignature;
+    req.vocal_language = ace.vocal_language;
+
+    // Write enriched request back to JSON
+    request_write(&req, request_path);
+
+    fprintf(stderr, "[Ace-Qwen3] Load %.0f | Total %.0fms | seed=%d\n",
+            load_ms, t_total.ms(), seed);
 
     qw3lm_free(&model);
     return 0;

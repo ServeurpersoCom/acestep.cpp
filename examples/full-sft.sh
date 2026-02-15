@@ -1,0 +1,12 @@
+#!/bin/bash
+
+set -eu
+
+cp full-sft.json /tmp/request.json
+
+../build/ace-qwen3 --request /tmp/request.json --model ../checkpoints/acestep-5Hz-lm-4B
+
+../build/dit-vae   --request /tmp/request.json --output full-sft.wav \
+    --dit ../checkpoints/acestep-v15-sft \
+    --text-encoder ../checkpoints/Qwen3-Embedding-0.6B \
+    --vae ../checkpoints/vae

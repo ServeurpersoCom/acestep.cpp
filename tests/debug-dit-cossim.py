@@ -140,12 +140,21 @@ def log_spectral_cos(a, b, n_bands=80):
 
 # metadata helpers
 
-def write_metadata(dump_dir, caption, lyrics, bpm, duration):
-    os.makedirs(dump_dir, exist_ok=True)
-    for name, val in [("caption", caption), ("lyrics", lyrics),
-                      ("bpm", str(bpm)), ("duration", str(duration))]:
-        with open(os.path.join(dump_dir, name), "w") as f:
-            f.write(val)
+def write_request(path, caption, lyrics, bpm, duration, seed, cfg):
+    import json
+    req = {
+        "caption": caption,
+        "lyrics": lyrics,
+        "bpm": bpm,
+        "duration": duration,
+        "seed": seed,
+        "inference_steps": cfg["steps"],
+        "guidance_scale": cfg["guidance"],
+        "shift": cfg["shift"],
+        "thinking": False,
+    }
+    with open(path, "w") as f:
+        json.dump(req, f, indent=4)
 
 # GGML runner
 
@@ -154,21 +163,15 @@ def run_ggml(dump_dir, caption, lyrics, bpm, duration, seed, cfg, noise_file=Non
         print(f"[GGML] binary not found: {GGML_BIN}")
         return False
     os.makedirs(dump_dir, exist_ok=True)
-    write_metadata(dump_dir, caption, lyrics, bpm, duration)
+    request_json = os.path.join(dump_dir, "request.json")
+    write_request(request_json, caption, lyrics, bpm, duration, seed, cfg)
     cmd = [
         GGML_BIN,
         "--dit", cfg["ckpt_dir"], "--vae", VAE_DIR, "--text-encoder", QWEN_DIR,
-        "--input-dir", dump_dir,
-        "--seed", str(seed),
+        "--request", request_json,
         "--dump", dump_dir,
         "--output", os.path.join(dump_dir, "output.wav"),
     ]
-    if cfg["shift"] != 3.0:  # non-default
-        cmd += ["--shift", str(cfg["shift"])]
-    if cfg["steps"] != 8:    # non-default
-        cmd += ["--steps", str(cfg["steps"])]
-    if cfg["guidance"] > 0:
-        cmd += ["--guidance-scale", str(cfg["guidance"])]
     if noise_file:
         cmd += ["--noise-file", noise_file]
     print(f"[GGML] Running {cfg['config_path']}...")

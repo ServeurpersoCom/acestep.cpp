@@ -206,25 +206,6 @@ static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
     return T_25Hz;
 }
 
-// Load audio codes from file (comma or whitespace separated integers)
-static std::vector<int> load_audio_codes(const char * path) {
-    std::vector<int> codes;
-    FILE * f = fopen(path, "r");
-    if (!f) return codes;
-    char buf[65536];
-    while (fgets(buf, sizeof(buf), f)) {
-        char * p = buf;
-        while (*p) {
-            while (*p && (*p == ',' || *p == ' ' || *p == '\t' || *p == '\n')) p++;
-            if (!*p) break;
-            codes.push_back(atoi(p));
-            while (*p && *p != ',' && *p != ' ' && *p != '\t' && *p != '\n') p++;
-        }
-    }
-    fclose(f);
-    return codes;
-}
-
 // Free
 static void detok_ggml_free(DetokGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);

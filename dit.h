@@ -12,6 +12,7 @@
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
 #include "safetensors.h"
+#include "backend.h"
 
 #include "debug.h"
 
@@ -29,8 +30,8 @@ struct DiTGGMLConfig {
     int n_kv_heads         = 8;
     int head_dim           = 128;
     int n_layers           = 24;
-    int in_channels        = 192;   // after context concat
-    int out_channels       = 64;    // audio_acoustic_hidden_dim
+    int in_channels        = 192;           // after context concat
+    int out_channels       = 64;            // audio_acoustic_hidden_dim
     int patch_size         = 2;
     int sliding_window     = 128;
     float rope_theta       = 1000000.0f;
@@ -39,12 +40,12 @@ struct DiTGGMLConfig {
 
 // Layer weights
 struct DiTGGMLTembWeights {
-    struct ggml_tensor * linear_1_w;    // [256, hidden]
-    struct ggml_tensor * linear_1_b;    // [hidden]
-    struct ggml_tensor * linear_2_w;    // [hidden, hidden]
-    struct ggml_tensor * linear_2_b;    // [hidden]
-    struct ggml_tensor * time_proj_w;   // [hidden, 6*hidden]
-    struct ggml_tensor * time_proj_b;   // [6*hidden]
+    struct ggml_tensor * linear_1_w;        // [256, hidden]
+    struct ggml_tensor * linear_1_b;        // [hidden]
+    struct ggml_tensor * linear_2_w;        // [hidden, hidden]
+    struct ggml_tensor * linear_2_b;        // [hidden]
+    struct ggml_tensor * time_proj_w;       // [hidden, 6*hidden]
+    struct ggml_tensor * time_proj_b;       // [6*hidden]
 };
 
 struct DiTGGMLLayer {
@@ -89,21 +90,21 @@ struct DiTGGML {
     DiTGGMLTembWeights time_embed_r;
 
     // proj_in: Conv1d(in_channels, hidden, kernel=2, stride=2)
-    struct ggml_tensor * proj_in_w;     // [in_ch, hidden, patch_size] raw, or ggml conv1d format
-    struct ggml_tensor * proj_in_b;     // [hidden]
+    struct ggml_tensor * proj_in_w;          // [in_ch, hidden, patch_size] raw, or ggml conv1d format
+    struct ggml_tensor * proj_in_b;          // [hidden]
 
     // condition_embedder: Linear(hidden, hidden)
-    struct ggml_tensor * cond_emb_w;    // [hidden, hidden]
-    struct ggml_tensor * cond_emb_b;    // [hidden]
+    struct ggml_tensor * cond_emb_w;         // [hidden, hidden]
+    struct ggml_tensor * cond_emb_b;         // [hidden]
 
     // Layers
     DiTGGMLLayer layers[DIT_GGML_MAX_LAYERS];
 
     // Output
-    struct ggml_tensor * norm_out;          // [hidden]
-    struct ggml_tensor * out_scale_shift;   // [hidden, 2] in ggml layout
-    struct ggml_tensor * proj_out_w;        // conv_transpose_1d weight
-    struct ggml_tensor * proj_out_b;        // [out_channels]
+    struct ggml_tensor * norm_out;           // [hidden]
+    struct ggml_tensor * out_scale_shift;    // [hidden, 2] in ggml layout
+    struct ggml_tensor * proj_out_w;         // conv_transpose_1d weight
+    struct ggml_tensor * proj_out_b;         // [out_channels]
 
     // CFG (classifier-free guidance, used by base/sft models)
     struct ggml_tensor * null_condition_emb; // [hidden] or NULL if not present
@@ -218,20 +219,10 @@ static bool dit_ggml_load(DiTGGML * m, const char * model_path, DiTGGMLConfig cf
 
 // Backend init
 static void dit_ggml_init_backend(DiTGGML * m) {
-    // Load all available backends (CUDA, Metal, Vulkan...)
-    ggml_backend_load_all();
-
-    // Pick the best available backend
-    m->backend = ggml_backend_init_best();
-    m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-
-    fprintf(stderr, "[Load] DiT backend: %s\n", ggml_backend_name(m->backend));
-
-    // Scheduler: prefer GPU, fallback CPU
-    ggml_backend_t backends[2] = { m->backend, m->cpu_backend };
-    int n_backends = (m->backend == m->cpu_backend) ? 1 : 2;
-    m->sched = ggml_backend_sched_new(backends, NULL, n_backends,
-                                       8192, false, true);
+    BackendPair bp = backend_init("DiT");
+    m->backend = bp.backend;
+    m->cpu_backend = bp.cpu_backend;
+    m->sched = backend_sched_new(bp, 8192);
 }
 
 // Graph builder: single DiT layer (self-attention block)
@@ -288,9 +279,9 @@ static struct ggml_tensor * dit_ggml_adaln(
         struct ggml_tensor * norm,
         struct ggml_tensor * scale,
         struct ggml_tensor * shift) {
-    struct ggml_tensor * scaled = ggml_mul(ctx, norm, scale);   // norm * scale
-    struct ggml_tensor * out    = ggml_add(ctx, norm, scaled);  // norm + norm*scale = norm*(1+scale)
-    return ggml_add(ctx, out, shift);                           // + shift
+    struct ggml_tensor * scaled = ggml_mul(ctx, norm, scale);  // norm * scale
+    struct ggml_tensor * out    = ggml_add(ctx, norm, scaled); // norm + norm*scale = norm*(1+scale)
+    return ggml_add(ctx, out, shift);                          // + shift
 }
 
 // Helper: Gated residual
@@ -302,7 +293,7 @@ static struct ggml_tensor * dit_ggml_gated_add(
         struct ggml_tensor * residual,
         struct ggml_tensor * x,
         struct ggml_tensor * gate) {
-    struct ggml_tensor * gated = ggml_mul(ctx, x, gate);  // broadcast [H] over [H,S]
+    struct ggml_tensor * gated = ggml_mul(ctx, x, gate); // broadcast [H] over [H,S]
     return ggml_add(ctx, residual, gated);
 }
 
@@ -388,7 +379,7 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     k = ggml_mul(ctx, k, dit_ggml_f32(ctx, ly->sa_k_norm));
 
     // 5) RoPE (bidirectional, sequential positions)
-    //    Input [D, Nh, S]: ne[2]=S must match positions ne[0]=S. 
+    //    Input [D, Nh, S]: ne[2]=S must match positions ne[0]=S.
     q = ggml_rope_ext(ctx, q, positions, NULL,
                        D, 2 /*mode=NEOX*/, 0 /*n_ctx_orig*/,
                        c.rope_theta, 1.0f /*freq_scale*/,

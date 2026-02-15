@@ -1,0 +1,9 @@
+{
+    "caption": "Hard-hitting hip hop track with deep 808 bass, crisp trap hi-hats, heavy snare rolls, dark piano melody, and confident aggressive vocal delivery",
+    "lyrics": "[Intro]\nYeah... c'est comme ca...\n\n[Verse 1]\nJe marche dans la ville quand le soleil se couche\nLes lumieres s'allument j'ai les mots dans la bouche\nOn m'a dit fais attention le monde est pas facile\nJ'ai repondu tranquille j'ai grandi dans la ville\nLes murs ont des oreilles les rues ont des histoires\nChaque coin chaque angle chaque bout de trottoir\nJ'ai vu des gens tomber j'ai vu des gens se lever\nMoi je reste debout j'ai pas le temps de plier\n\n[Chorus]\nOn avance on recule pas\nLa vie nous teste a chaque pas\nOn avance on recule pas\nRegarde devant oublie tout ca\n\n[Verse 2]\nLe reveil sonne tot le cafe brule les levres\nLe metro le boulot la routine la fievre\nMais le soir dans ma chambre je reprends mon stylo\nJe pose sur le papier tout ce que j'ai sur le dos\nMes reves sont plus grands que les murs de ma chambre\nPlus chauds que juillet plus forts que decembre\nOn m'a dit sois realiste range tes illusions\nJ'ai repondu ma vie c'est pas de la fiction\n\n[Chorus]\nOn avance on recule pas\nLa vie nous teste a chaque pas\nOn avance on recule pas\nRegarde devant oublie tout ca\n\n[Outro]\nYeah... on lache rien... jamais...",
+    "duration": 200,
+    "vocal_language": "fr",
+    "inference_steps": 8,
+    "guidance_scale": 1.0,
+    "shift": 3.0
+}

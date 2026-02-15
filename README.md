@@ -40,99 +40,137 @@ BLAS accelerates CPU matrix multiplications. On macOS, Accelerate is
 enabled by default. On Linux, install `libopenblas-dev` and pass
 `-DGGML_BLAS=ON`.
 
-Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
+Builds four binaries: `ace-qwen3` (LLM), `dit-vae` (DiT + VAE),
+`compare` (tensor debug), and `pt2bin` (checkpoint converter).
+
+## Checkpoints
+
+```bash
+./checkpoints.sh          # core models (turbo + 4B LM)
+./checkpoints.sh --all    # all variants (SFT, shift1/3, 0.6B/1.7B LM)
+```
+
+Downloads from HuggingFace:
+
+- Qwen3-Embedding-0.6B (text encoder, 1.1GB)
+- acestep-v15-turbo (DiT 24L + CondEncoder, 3GB)
+- vae (AutoencoderOobleck, 322MB)
+- acestep-5Hz-lm-0.6B / 1.7B / 4B (autoregressive LLM)
+
+The script also converts `silence_latent.pt` to `.bin` for each DiT
+model using `build/pt2bin` (must build first).
 
 ## Quick start
 
+Both binaries communicate through a shared JSON request file.
+`ace-qwen3` reads the request, enriches it (CoT metadata + audio codes),
+and overwrites it. `dit-vae` reads the enriched request and produces audio.
+
 ```bash
-./checkpoints.sh                    # download models from HuggingFace
-./generate.sh --query "A smooth RnB track with soulful vocals and warm keys"
+# Write a request
+cat > /tmp/request.json << 'EOF'
+{
+    "caption": "Upbeat pop rock with driving guitars and catchy hooks",
+    "inference_steps": 8,
+    "guidance_scale": 1.0,
+    "shift": 3.0,
+    "vocal_language": "fr"
+}
+EOF
+
+# LLM: enrich metadata + generate audio codes
+./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-4B \
+                  --request /tmp/request.json
+
+# DiT + VAE: generate audio
+./build/dit-vae --request /tmp/request.json \
+                --dit checkpoints/acestep-v15-turbo \
+                --text-encoder checkpoints/Qwen3-Embedding-0.6B \
+                --vae checkpoints/vae \
+                --output output.wav
 ```
 
-The unified `generate.sh` script chains both binaries automatically.
-Model paths default to `checkpoints/` and can be overridden via environment
-variables (`ACE_LM`, `ACE_DIT`, `ACE_TE`, `ACE_VAE`).
+Ready-made examples in `examples/`:
+
+```bash
+cd examples && bash simple.sh     # caption only, LLM fills everything
+cd examples && bash partial.sh    # caption + lyrics + duration
+cd examples && bash full.sh       # all metadata provided
+cd examples && bash dit-only.sh   # skip LLM, DiT from noise
+cd examples && bash all.sh        # run all examples
+```
+
+Each example has a `-sft` variant (SFT model, 50 steps, CFG 7.0)
+alongside the turbo default (8 steps, no CFG).
 
 ## Generation modes
 
-Three modes match the original ACE-Step WebUI, with sane defaults
-(temperature 0.85, CFG 2.0, FSM constrained decoding on by default).
+The LLM behavior depends on which fields are present in the JSON:
 
-### Simple mode (WebUI "Simple" tab)
+**Simple** (caption only): the LLM generates all metadata (bpm, key,
+time signature, duration, lyrics) via chain-of-thought, then produces
+audio codes. See `examples/simple.json`.
 
-Natural language in, music out. The LLM generates metadata, lyrics, and
-audio codes from a free-form description:
+**Partial** (caption + some metadata): the LLM fills missing fields
+via CoT, then generates audio codes. Provide any combination of lyrics,
+duration, bpm, keyscale, timesignature. See `examples/partial.json`.
 
-```bash
-./generate.sh --query "Indie rock with jangly guitars and nostalgic vocals"
-./generate.sh --query "ambient piano meditation" --instrumental
+**Full** (all metadata provided): the LLM skips CoT and generates
+audio codes directly. Requires caption, lyrics, bpm, duration, keyscale,
+and timesignature. See `examples/full.json`.
+
+**DiT-only** (skip LLM entirely): provide all metadata in the JSON
+and run `dit-vae` alone. Audio is generated from noise without LLM
+codes. See `examples/dit-only.json`.
+
+## Request JSON reference
+
+All fields with defaults. Only `caption` is required.
+
+```json
+{
+    "caption":            "",
+    "lyrics":             "",
+    "instrumental":       false,
+    "bpm":                0,
+    "duration":           -1,
+    "keyscale":           "",
+    "timesignature":      "",
+    "vocal_language":     "unknown",
+    "task_type":          "text2music",
+    "seed":               -1,
+    "thinking":           true,
+    "lm_temperature":     0.85,
+    "lm_cfg_scale":       2.0,
+    "lm_top_p":           0.9,
+    "lm_negative_prompt": "NO USER INPUT",
+    "audio_codes":        "",
+    "inference_steps":    8,
+    "guidance_scale":     7.0,
+    "shift":              1.0
+}
 ```
 
-### Custom mode (WebUI "Custom" tab)
+Key fields: `seed` -1 means random. `thinking` false skips CoT (for SFT
+models or when all metadata is provided). `audio_codes` is populated by
+ace-qwen3 and consumed by dit-vae (comma-separated FSQ token IDs).
 
-Provide caption, lyrics, and optionally metadata. When all metadata is
-present (bpm, duration, keyscale, timesignature), the LLM skips
-chain-of-thought and generates audio codes directly. When metadata is
-partial, the LLM fills in missing fields via CoT first.
-
-```bash
-# All metadata provided: direct code generation
-./generate.sh \
-    --caption "90s RnB slow jam, silky vocals, Rhodes piano, 808 bass" \
-    --lyrics "[Verse 1]\nI've been thinking about you all night long..." \
-    --bpm 85 --duration 200 --keyscale "Eb major" --timesignature 4 --language en
-
-# Partial metadata: LLM fills bpm, key, timesig via CoT
-./generate.sh --caption "Garage rock, distorted guitars, raw energy" --duration 180
-```
-
-## Environment variables
-
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `ACE_LM` | `checkpoints/acestep-5Hz-lm-4B` | LLM model directory |
-| `ACE_DIT` | `checkpoints/acestep-v15-turbo` | DiT model directory |
-| `ACE_TE` | `checkpoints/Qwen3-Embedding-0.6B` | Text encoder directory |
-| `ACE_VAE` | `checkpoints/vae` | VAE directory |
-| `SEED` | random | RNG seed (`-1` = random) |
-| `OUT` | `output.wav` | Output WAV path |
-| `TMP` | `/tmp/ace` | Exchange directory |
-| `BIN` | `./build` | Binary directory |
+Turbo preset: `inference_steps=8, guidance_scale=1.0, shift=3.0`.
+SFT preset: `inference_steps=50, guidance_scale=7.0, shift=1.0, thinking=false`.
 
 ## ace-qwen3 reference
 
 ```
-Usage: ./build/ace-qwen3 --model <dir> [options]
+Usage: ace-qwen3 --model <dir> --request <json> [options]
 
-Model:
+Required:
   --model <dir>          Model directory (safetensors + config.json)
+  --request <json>       Request JSON (read, enriched, overwritten)
 
-Simple mode (inspiration):
-  --query <text>         Natural language music description
-  --instrumental         Generate instrumental (no vocals)
-
-Custom mode:
-  --caption <text>       Music description
-  --lyrics <text>        Lyrics (default: empty)
-  --bpm <N>              BPM (0=LLM decides)
-  --duration <N>         Duration in seconds (0=LLM decides)
-  --keyscale <text>      Key/scale (e.g. 'C major')
-  --timesignature <N>    Time signature (2,3,4,6)
-  --language <code>      Vocal language (en,fr,zh,...)
-
-Generation:
+Infra:
   --max-tokens <N>       Max new tokens (default: 256)
   --max-seq <N>          KV cache size (default: 8192)
-  --temperature <f>      Sampling temperature (default: 0.85)
-  --top-p <f>            Top-p sampling (default: 0.9, 1.0=disabled)
-  --seed <N>             RNG seed (default: random)
-  --cfg-scale <f>        CFG scale for Phase 2 (default: 2.0, 1.0=disabled)
-  --negative-prompt <t>  Negative prompt for CFG
   --no-fsm               Disable FSM constrained decoding
-  --no-codes             Phase 1 only (no audio codes)
-
-Output:
-  --output-dir <dir>     Write codes + metadata for dit-vae
 
 Debug:
   --dump-logits <path>   Dump prefill logits (binary f32)
@@ -144,65 +182,25 @@ Three LLM sizes: 0.6B (fast), 1.7B, 4B (best quality).
 ## dit-vae reference
 
 ```
-Usage: dit-vae --input-dir <dir> [options]
+Usage: dit-vae --request <json> --dit <dir> --text-encoder <dir> --vae <dir> [options]
 
-Input (from ace-qwen3 --output-dir):
-  --input-dir <dir>       Directory with codes, caption, lyrics, etc.
-
-Models (required):
+Required:
+  --request <json>        Request JSON (from ace-qwen3 --request)
   --text-encoder <dir>    Qwen3-Embedding-0.6B directory
   --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)
   --vae <dir>             VAE directory
 
 Audio:
-  --seed <n>              Random seed (default: random)
   --noise-file <path>     Load noise from bf16 file (Philox RNG dump)
-  --shift <f>             Timestep shift (default: 3.0)
-  --steps <n>             Euler steps (default: 8)
   --output <path>         Output WAV (default: output.wav)
+
+VAE tiling (memory control):
+  --vae-chunk <n>         Latent frames per tile (default: 256)
+  --vae-overlap <n>       Overlap frames per side (default: 64)
 
 Debug:
   --dump <dir>            Dump intermediate tensors
 ```
-
-## Exchange directory
-
-The two binaries communicate through a directory of plain text files.
-One file per field, no extensions.
-
-```
-<dir>/
-  caption       Music description (required, may be multiline)
-  lyrics        Lyrics with [Section] markers (default: empty)
-  codes         LLM audio tokens, CSV integers 0-63999 (absent = generate from noise)
-  bpm           Integer, e.g. "124" (default: N/A)
-  duration      Integer seconds, e.g. "220" (default: 120)
-  keyscale      Key and scale, e.g. "F# minor" (default: N/A)
-  timesig       Time signature numerator, e.g. "4" (default: N/A)
-  language      Vocal language code, e.g. "fr" (default: en)
-```
-
-dit-vae only reads files, so you can write them yourself to run it standalone:
-
-```bash
-mkdir -p /tmp/ace
-echo -n "Hip hop, jazzy piano, vinyl crackle" > /tmp/ace/caption
-echo -n "[Instrumental]" > /tmp/ace/lyrics
-echo -n "90"             > /tmp/ace/bpm
-echo -n "60"             > /tmp/ace/duration
-echo -n "Bb minor"       > /tmp/ace/keyscale
-echo -n "4"              > /tmp/ace/timesig
-
-./build/dit-vae --input-dir /tmp/ace \
-    --text-encoder checkpoints/Qwen3-Embedding-0.6B \
-    --dit checkpoints/acestep-v15-turbo \
-    --vae checkpoints/vae \
-    --output output.wav
-```
-
-Without `codes`, dit-vae generates from noise only.
-With `codes` (audio tokens from ace-qwen3), dit-vae decodes them into
-source latents for the DiT (higher quality, LLM-guided generation).
 
 ## Pipeline
 
@@ -217,8 +215,8 @@ dit-vae
   -> Qwen3-Embedding (28L text encoder)
   -> CondEncoder (lyric 8L + timbre 4L + text_proj)
   -> FSQ detokenizer (audio codes -> source latents, if provided)
-  -> DiT (24L flow matching, 8 Euler steps)
-  -> VAE (AutoencoderOobleck)
+  -> DiT (24L flow matching, Euler steps)
+  -> VAE (AutoencoderOobleck, tiled decode)
   -> WAV stereo 48kHz
 ```
 
@@ -254,19 +252,6 @@ Cosine similarity between GGML and Python intermediate tensors (1.0 = identical)
 | vae_audio (log spectral) | 0.9770 |
 
 Residual drift is FP32 (GGML) vs BF16 (PyTorch) accumulation over 8 Euler steps.
-
-## Checkpoints
-
-```
-./checkpoints.sh
-```
-
-Downloads from HuggingFace:
-
-- Qwen3-Embedding-0.6B (text encoder, 1.1GB),
-- acestep-v15-turbo (DiT 24L + CondEncoder, 3GB),
-- vae (AutoencoderOobleck, 322MB),
-- acestep-5Hz-lm-0.6B / 1.7B / 4B (autoregressive LLM).
 
 ## Known issues
 

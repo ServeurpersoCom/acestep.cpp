@@ -1,0 +1,12 @@
+{
+    "caption": "Ambient electronic soundscape with warm analog pads",
+    "lyrics": "[Instrumental]",
+    "bpm": 90,
+    "duration": 180,
+    "keyscale": "C minor",
+    "timesignature": "4",
+    "vocal_language": "en",
+    "inference_steps": 50,
+    "guidance_scale": 7.0,
+    "shift": 1.0
+}

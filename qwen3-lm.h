@@ -96,17 +96,17 @@ static bool qw3lm_json_bool(const char * json, const char * key, bool fb) {
 static Qwen3LMConfig qw3lm_load_config(const char * model_dir) {
     // 0.6B defaults
     Qwen3LMConfig c = {
-        .vocab_size       = 217204,
-        .hidden_size      = 1024,
+        .vocab_size        = 217204,
+        .hidden_size       = 1024,
         .intermediate_size = 3072,
-        .n_heads          = 16,
-        .n_kv_heads       = 8,
-        .head_dim         = 128,
-        .n_layers         = 28,
-        .rope_theta       = 1000000.0f,
-        .rms_norm_eps     = 1e-6f,
-        .tie_embeddings   = true,
-        .max_seq_len      = 8192,
+        .n_heads           = 16,
+        .n_kv_heads        = 8,
+        .head_dim          = 128,
+        .n_layers          = 28,
+        .rope_theta        = 1000000.0f,
+        .rms_norm_eps      = 1e-6f,
+        .tie_embeddings    = true,
+        .max_seq_len       = 8192,
     };
 
     char path[512];
@@ -144,14 +144,10 @@ static Qwen3LMConfig qw3lm_load_config(const char * model_dir) {
 
 // Init backend (same pattern as qwen3.h)
 static void qw3lm_init_backend(Qwen3LM * m) {
-    ggml_backend_load_all();
-    m->backend = ggml_backend_init_best();
-    m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-    fprintf(stderr, "[LM-Load] Backend: %s\n", ggml_backend_name(m->backend));
-
-    ggml_backend_t backends[2] = { m->backend, m->cpu_backend };
-    int n_backends = (m->backend == m->cpu_backend) ? 1 : 2;
-    m->sched = ggml_backend_sched_new(backends, NULL, n_backends, 8192, false, true);
+    BackendPair bp = backend_init("LM");
+    m->backend = bp.backend;
+    m->cpu_backend = bp.cpu_backend;
+    m->sched = backend_sched_new(bp, 8192);
 }
 
 // Allocate KV cache

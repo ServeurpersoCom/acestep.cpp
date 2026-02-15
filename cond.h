@@ -74,14 +74,10 @@ struct CondGGML {
 
 // Init
 static void cond_ggml_init_backend(CondGGML * m) {
-    ggml_backend_load_all();
-    m->backend = ggml_backend_init_best();
-    m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-    fprintf(stderr, "[Load] CondEncoder backend: %s\n", ggml_backend_name(m->backend));
-
-    ggml_backend_t backends[2] = { m->backend, m->cpu_backend };
-    int n_backends = (m->backend == m->cpu_backend) ? 1 : 2;
-    m->sched = ggml_backend_sched_new(backends, NULL, n_backends, 8192, false, true);
+    BackendPair bp = backend_init("CondEncoder");
+    m->backend = bp.backend;
+    m->cpu_backend = bp.cpu_backend;
+    m->sched = backend_sched_new(bp, 8192);
 }
 
 // Load from ACEStep model safetensors

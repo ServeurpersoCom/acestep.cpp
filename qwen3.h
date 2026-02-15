@@ -13,6 +13,7 @@
 #pragma once
 #include "ggml.h"
 #include "ggml-backend.h"
+#include "backend.h"
 #include "safetensors.h"
 #include <cmath>
 #include <cstdio>
@@ -223,14 +224,10 @@ static void qwen3_load_layer(SFWeightCtx * wctx, const SafeTensors & st,
 
 // Backend init
 static void qwen3_init_backend(Qwen3GGML * m) {
-    ggml_backend_load_all();
-    m->backend = ggml_backend_init_best();
-    m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-    fprintf(stderr, "[Load] Qwen3 backend: %s\n", ggml_backend_name(m->backend));
-
-    ggml_backend_t backends[2] = { m->backend, m->cpu_backend };
-    int n_backends = (m->backend == m->cpu_backend) ? 1 : 2;
-    m->sched = ggml_backend_sched_new(backends, NULL, n_backends, 4096, false, true);
+    BackendPair bp = backend_init("TextEncoder");
+    m->backend = bp.backend;
+    m->cpu_backend = bp.cpu_backend;
+    m->sched = backend_sched_new(bp, 4096);
 }
 
 // Load standalone text encoder (Qwen3-Embedding)

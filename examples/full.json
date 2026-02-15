@@ -1,0 +1,12 @@
+{
+    "caption": "Vibrant French house meets tech-house fusion track featuring filtered disco samples, driving funky basslines, and classic four-on-the-floor beats with signature Bob Sinclar vocal chops. Analytical yet euphoric mood blending advanced AI technical vocabulary with dancefloor energy. Instruments include talkbox lead vocals, analog Moog bass synths, glitchy arpeggiated sequencers, punchy TR-808 drum machine, and shimmering high-hat rolls.",
+    "lyrics": "[Intro - Filtered Disco Sample & Synth Arp]\n\n[Verse 1]\nOptimisation des poids synaptiques en temps réel\nRéseaux neuronaux convolutifs, profondeur idéale\nBackpropagation stochastique, gradient ajusté\nModèles GAN génératifs, data-set finalisé\n\n[Pre-Chorus]\nLatence zéro, flux continu\nL'IA évolue, circuit virtuel\n\n[Chorus - Talkbox Vocals]\nC'est l'ère de l'intelligence artificielle\nAlgorithmes de backpropagation dansent sur le beat\nDeep learning en action, réseau fully connected\nProcessing en temps réel, le futur est lancé !\n\n[Bridge - Synth Pad Build-Up]\nStochastic gradient descent, optimise le modèle\nEarly stopping activé, le réseau se stabilise\n\n[Outro - Vinyl Crackles & Fade Out]\nIA... Intelligence Artificielle...\nRéseaux neuronaux... dansent... forever...",
+    "bpm": 124,
+    "duration": 220,
+    "keyscale": "F# minor",
+    "timesignature": "4",
+    "vocal_language": "fr",
+    "inference_steps": 8,
+    "guidance_scale": 1.0,
+    "shift": 3.0
+}

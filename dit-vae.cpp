@@ -20,6 +20,7 @@
 #include "cond.h"
 #include "bpe.h"
 #include "debug.h"
+#include "request.h"
 
 struct Timer {
     std::chrono::steady_clock::time_point t;
@@ -67,69 +68,56 @@ static bool write_wav(const char * path, const float * audio, int T_audio, int s
 }
 
 static void print_usage(const char * prog) {
-    fprintf(stderr, "Usage: %s --input-dir <dir> [options]\n\n", prog);
-    fprintf(stderr, "Input (from ace-qwen3 --output-dir):\n");
-    fprintf(stderr, "  --input-dir <dir>       Directory with codes, caption, lyrics, etc.\n\n");
-    fprintf(stderr, "Models (required):\n");
+    fprintf(stderr, "Usage: %s --request <json> --dit <dir> --text-encoder <dir> --vae <dir> [options]\n\n", prog);
+    fprintf(stderr, "Required:\n");
+    fprintf(stderr, "  --request <json>        Request JSON (from ace-qwen3 --request)\n");
     fprintf(stderr, "  --text-encoder <dir>    Qwen3-Embedding-0.6B directory\n");
     fprintf(stderr, "  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)\n");
     fprintf(stderr, "  --vae <dir>             VAE directory\n\n");
     fprintf(stderr, "Audio:\n");
-    fprintf(stderr, "  --seed <n>              Random seed (default: random)\n");
     fprintf(stderr, "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n");
-    fprintf(stderr, "  --shift <f>             Timestep shift (default: 3.0)\n");
-    fprintf(stderr, "  --steps <n>             Euler steps (default: 8)\n");
-    fprintf(stderr, "  --guidance-scale <f>    DiT CFG guidance (default: 1.0=off, 7.0 for base/sft)\n");
     fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
     fprintf(stderr, "VAE tiling (memory control):\n");
-    fprintf(stderr, "  --vae-chunk <n>         Latent frames per tile (default: 256, matches Python)\n");
+    fprintf(stderr, "  --vae-chunk <n>         Latent frames per tile (default: 256)\n");
     fprintf(stderr, "  --vae-overlap <n>       Overlap frames per side (default: 64)\n\n");
     fprintf(stderr, "Debug:\n");
     fprintf(stderr, "  --dump <dir>            Dump intermediate tensors\n");
 }
 
-// Read file to string, empty if missing
-static std::string read_file_str(const std::string & path) {
-    FILE * f = fopen(path.c_str(), "r");
-    if (!f) return "";
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    std::string s(len, '\0');
-    fread(&s[0], 1, len, f);
-    fclose(f);
-    while (!s.empty() && (s.back() == '\n' || s.back() == '\r')) s.pop_back();
-    return s;
+// Parse comma-separated codes string into vector
+static std::vector<int> parse_codes_string(const std::string & s) {
+    std::vector<int> codes;
+    if (s.empty()) return codes;
+    const char * p = s.c_str();
+    while (*p) {
+        while (*p == ',' || *p == ' ') p++;
+        if (!*p) break;
+        codes.push_back(atoi(p));
+        while (*p && *p != ',') p++;
+    }
+    return codes;
 }
 
 int main(int argc, char ** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
 
-    const char * input_dir    = NULL;
+    const char * request_path = NULL;
     const char * text_enc_dir = NULL;
     const char * dit_dir      = NULL;
     const char * vae_dir      = NULL;
     const char * wav_path     = "output.wav";
     const char * dump_dir     = NULL;
     const char * noise_file   = NULL;
-    float shift               = 3.0f;
-    int num_steps             = 8;
-    int seed                  = -1;
-    float guidance_scale      = 1.0f;
     int vae_chunk             = 256;
     int vae_overlap           = 64;
 
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--input-dir") == 0 && i+1 < argc) input_dir = argv[++i];
+        if (strcmp(argv[i], "--request") == 0 && i+1 < argc) request_path = argv[++i];
         else if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_dir = argv[++i];
         else if (strcmp(argv[i], "--dit") == 0 && i+1 < argc) dit_dir = argv[++i];
         else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_dir = argv[++i];
         else if (strcmp(argv[i], "--noise-file") == 0 && i+1 < argc) noise_file = argv[++i];
         else if (strcmp(argv[i], "--dump") == 0 && i+1 < argc) dump_dir = argv[++i];
-        else if (strcmp(argv[i], "--seed") == 0 && i+1 < argc) seed = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--shift") == 0 && i+1 < argc) shift = atof(argv[++i]);
-        else if (strcmp(argv[i], "--steps") == 0 && i+1 < argc) num_steps = atoi(argv[++i]);
-        else if (strcmp(argv[i], "--guidance-scale") == 0 && i+1 < argc) guidance_scale = atof(argv[++i]);
         else if (strcmp(argv[i], "--output") == 0 && i+1 < argc) wav_path = argv[++i];
         else if (strcmp(argv[i], "--vae-chunk") == 0 && i+1 < argc) vae_chunk = atoi(argv[++i]);
         else if (strcmp(argv[i], "--vae-overlap") == 0 && i+1 < argc) vae_overlap = atoi(argv[++i]);
@@ -141,12 +129,12 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (!dit_dir) {
-        fprintf(stderr, "ERROR: --dit required\n");
+    if (!request_path) {
+        fprintf(stderr, "ERROR: --request required\n");
         print_usage(argv[0]); return 1;
     }
-    if (!input_dir) {
-        fprintf(stderr, "ERROR: --input-dir required\n");
+    if (!dit_dir) {
+        fprintf(stderr, "ERROR: --dit required\n");
         print_usage(argv[0]); return 1;
     }
     if (!text_enc_dir) {
@@ -154,42 +142,39 @@ int main(int argc, char ** argv) {
         print_usage(argv[0]); return 1;
     }
 
-    // Read prompt from input-dir (proc-style: missing file = default)
-    std::string d(input_dir);
-    std::string caption_s = read_file_str(d + "/caption");
-    std::string lyrics_s  = read_file_str(d + "/lyrics");
-    std::string bpm_s     = read_file_str(d + "/bpm");
-    std::string ks_s      = read_file_str(d + "/keyscale");
-    std::string ts_s      = read_file_str(d + "/timesig");
-    std::string lang_s    = read_file_str(d + "/language");
-    std::string dur_s     = read_file_str(d + "/duration");
+    // Read request JSON
+    AceRequest req;
+    if (!request_parse(&req, request_path)) return 1;
+    request_dump(&req, stderr);
 
-    if (input_dir && caption_s.empty()) {
-        fprintf(stderr, "ERROR: %s/caption missing or empty\n", input_dir);
+    int num_steps        = req.inference_steps;
+    float shift          = req.shift;
+    float guidance_scale = req.guidance_scale;
+
+    if (req.caption.empty()) {
+        fprintf(stderr, "ERROR: caption is empty in %s\n", request_path);
         return 1;
     }
 
-    const char * caption  = caption_s.empty() ? NULL : caption_s.c_str();
-    const char * lyrics   = lyrics_s.empty() ? "[Instrumental]" : lyrics_s.c_str();
-    const char * bpm      = bpm_s.empty() ? "N/A" : bpm_s.c_str();
-    const char * keyscale = ks_s.empty() ? "N/A" : ks_s.c_str();
-    const char * timesig  = ts_s.empty() ? "N/A" : ts_s.c_str();
-    const char * language = lang_s.empty() ? "en" : lang_s.c_str();
-    float duration        = dur_s.empty() ? 120.0f : (float)atof(dur_s.c_str());
+    // Extract params from request
+    const char * caption  = req.caption.c_str();
+    const char * lyrics   = req.lyrics.empty() ? "[Instrumental]" : req.lyrics.c_str();
+    char bpm_str[16] = "N/A";
+    if (req.bpm > 0) snprintf(bpm_str, sizeof(bpm_str), "%d", req.bpm);
+    const char * bpm = bpm_str;
+    const char * keyscale = req.keyscale.empty() ? "N/A" : req.keyscale.c_str();
+    const char * timesig  = req.timesignature.empty() ? "N/A" : req.timesignature.c_str();
+    const char * language = req.vocal_language.empty() ? "en" : req.vocal_language.c_str();
+    float duration        = req.duration > 0 ? req.duration : 120.0f;
+    int seed              = req.seed;
 
-    // Load audio codes (optional: absent = text-to-music from noise)
-    std::string codes_path_s = d + "/codes";
-    const char * codes_path = input_dir ? codes_path_s.c_str() : NULL;
-    std::vector<int> codes_vec;
-    if (codes_path) {
-        codes_vec = load_audio_codes(codes_path);
-        if (!codes_vec.empty())
-            fprintf(stderr, "[Pipeline] %zu audio codes from %s (%.1fs @ 5Hz)\n",
-                    codes_vec.size(), codes_path, codes_vec.size() / 5.0f);
-        else
-            fprintf(stderr, "[Pipeline] No codes, text-to-music from noise\n");
-        if (codes_vec.empty()) codes_path = NULL;
-    }
+    // Parse audio codes from request
+    std::vector<int> codes_vec = parse_codes_string(req.audio_codes);
+    if (!codes_vec.empty())
+        fprintf(stderr, "[Pipeline] %zu audio codes from request (%.1fs @ 5Hz)\n",
+                codes_vec.size(), codes_vec.size() / 5.0f);
+    else
+        fprintf(stderr, "[Pipeline] No codes, text-to-music from noise\n");
 
     int T = 0;
 
@@ -406,6 +391,7 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Context] Detokenizer decode: %.1f ms\n", timer.ms());
 
             decoded_T = T_25Hz_codes < T ? T_25Hz_codes : T;
+            debug_dump_2d(&dbg, "detok_output", decoded_latents.data(), T_25Hz_codes, Oc);
             detok_ggml_free(&detok);
         }
 

@@ -63,7 +63,7 @@ static bool is_letter(int cp) {
     if (cp >= 0x3040 && cp <= 0x9FFF) return true;  // CJK
     if (cp >= 0xAC00 && cp <= 0xD7AF) return true;  // Korean
     if (cp >= 0xF900 && cp <= 0xFAFF) return true;  // CJK compatibility
-    if (cp >= 0x10000) return true;  // SMP, mostly letters/symbols
+    if (cp >= 0x10000) return true;                 // SMP, mostly letters/symbols
     return false;
 }
 
@@ -263,12 +263,12 @@ static std::vector<std::string> gpt2_pre_tokenize(const std::string &text) {
 
 // BPE tokenizer struct
 struct BPETokenizer {
-    std::unordered_map<std::string, int> vocab;   // token_str -> id
-    std::unordered_map<std::string, int> merges;  // "a b" -> rank
-    std::string byte2str[256];                     // byte -> GPT-2 UTF-8 string
-    int eos_id;                                    // <|endoftext|> = 151643
+    std::unordered_map<std::string, int> vocab;  // token_str -> id
+    std::unordered_map<std::string, int> merges; // "a b" -> rank
+    std::string byte2str[256];                   // byte -> GPT-2 UTF-8 string
+    int eos_id;                                  // <|endoftext|> = 151643
     int n_vocab;
-    std::vector<std::string> id_to_str;            // id -> token_str (reverse vocab)
+    std::vector<std::string> id_to_str;          // id -> token_str (reverse vocab)
 };
 
 // Minimal JSON parser for vocab.json ({"str": int, ...})

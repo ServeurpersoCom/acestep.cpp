@@ -10,6 +10,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "safetensors.h"
+#include "backend.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -40,6 +41,7 @@ struct VAEGGML {
 
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
+    ggml_backend_sched_t sched;
     ggml_backend_buffer_t buf;
     struct ggml_context * weight_ctx;  // holds weight tensor metadata
 };
@@ -147,12 +149,10 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, 128, 2);
 
     // Phase 2: allocate backend buffer on GPU (im2col grid Y fix enables long-sequence conv1d)
-    m->cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
-    m->backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_GPU, NULL);
-    if (!m->backend) {
-        fprintf(stderr, "[VAE] GPU unavailable, falling back to CPU\n");
-        m->backend = m->cpu_backend;
-    }
+    BackendPair bp = backend_init("VAE");
+    m->backend = bp.backend;
+    m->cpu_backend = bp.cpu_backend;
+    m->sched = backend_sched_new(bp, 8192);
     m->buf = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
     fprintf(stderr, "[VAE] Backend: %s, Weight buffer: %.1f MB\n",
             ggml_backend_name(m->backend),
@@ -332,17 +332,9 @@ static int vae_ggml_decode(
     fprintf(stderr, "[VAE] Graph: %d nodes, output ne=[%lld, %lld]\n",
             ggml_graph_n_nodes(gf), (long long)output->ne[0], (long long)output->ne[1]);
 
-    // Allocate compute buffers (scheduler needs CPU as last backend for fallback)
-    int n_backends = 1;
-    ggml_backend_t backends[2] = { m->backend, NULL };
-    if (m->backend != m->cpu_backend) {
-        backends[1] = m->cpu_backend;
-        n_backends = 2;
-    }
-    ggml_backend_sched_t sched = ggml_backend_sched_new(backends, NULL, n_backends, 8192, false, false);
-    if (!ggml_backend_sched_alloc_graph(sched, gf)) {
+    // Allocate compute graph on persistent scheduler
+    if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
         fprintf(stderr, "[VAE] FATAL: graph alloc failed\n");
-        ggml_backend_sched_free(sched);
         ggml_free(ctx);
         return -1;
     }
@@ -358,7 +350,7 @@ static int vae_ggml_decode(
                             transposed.data(), 0, transposed.size() * sizeof(float));
 
     // Compute
-    ggml_backend_sched_graph_compute(sched, gf);
+    ggml_backend_sched_graph_compute(m->sched, gf);
 
     // Read output: ggml [T_audio, 2] ne[0]=T_audio -> element (t,c) = data[c*T_audio + t]
     // Target: [2, T_audio] flat = channel 0 then channel 1
@@ -371,7 +363,7 @@ static int vae_ggml_decode(
     fprintf(stderr, "[VAE] Decoded: T_latent=%d -> T_audio=%d (%.2fs @ 48kHz)\n",
             T_latent, T_out, (float)T_out / 48000.0f);
 
-    ggml_backend_sched_free(sched);
+    ggml_backend_sched_reset(m->sched);
     ggml_free(ctx);
     return T_out;
 }
@@ -488,6 +480,7 @@ static int vae_ggml_decode_tiled(
 
 // Free
 static void vae_ggml_free(VAEGGML * m) {
+    if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->buf) ggml_backend_buffer_free(m->buf);
     if (m->weight_ctx) ggml_free(m->weight_ctx);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
