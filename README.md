@@ -72,7 +72,7 @@ cat > /tmp/request.json << 'EOF'
 {
     "caption": "Upbeat pop rock with driving guitars and catchy hooks",
     "inference_steps": 8,
-    "guidance_scale": 1.0,
+    "guidance_scale": 7.0,
     "shift": 3.0,
     "vocal_language": "fr"
 }
@@ -147,7 +147,7 @@ All fields with defaults. Only `caption` is required.
     "audio_codes":        "",
     "inference_steps":    8,
     "guidance_scale":     7.0,
-    "shift":              1.0
+    "shift":              3.0
 }
 ```
 
@@ -155,8 +155,8 @@ Key fields: `seed` -1 means random. `thinking` false skips CoT (for SFT
 models or when all metadata is provided). `audio_codes` is populated by
 ace-qwen3 and consumed by dit-vae (comma-separated FSQ token IDs).
 
-Turbo preset: `inference_steps=8, guidance_scale=1.0, shift=3.0`.
-SFT preset: `inference_steps=50, guidance_scale=7.0, shift=1.0, thinking=false`.
+Turbo preset: `inference_steps=8, guidance_scale=7.0, shift=3.0`.
+SFT preset: `inference_steps=32, guidance_scale=7.0, shift=3.0, thinking=false`.
 
 ## ace-qwen3 reference
 

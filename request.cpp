@@ -30,7 +30,7 @@ void request_init(AceRequest * r) {
     r->audio_codes        = "";
     r->inference_steps    = 8;
     r->guidance_scale     = 7.0f;
-    r->shift              = 1.0f;
+    r->shift              = 3.0f;
 }
 
 // JSON string escape / unescape
