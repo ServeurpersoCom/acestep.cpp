@@ -1,16 +1,12 @@
 # Binaries
 dit-vae
 ace-qwen3
-test-bpe
 pt2bin
 
 # Generated
+build/
 *.wav
+*.bf16
 
 # Data
 checkpoints/
-*.bf16
-
-# ggml (cloned dependency)
-ggml/
-build/
