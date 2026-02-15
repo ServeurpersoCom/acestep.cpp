@@ -96,17 +96,17 @@ static bool qw3lm_json_bool(const char * json, const char * key, bool fb) {
 static Qwen3LMConfig qw3lm_load_config(const char * model_dir) {
     // 0.6B defaults
     Qwen3LMConfig c = {
-        .vocab_size        = 217204,
-        .hidden_size       = 1024,
-        .intermediate_size = 3072,
-        .n_heads           = 16,
-        .n_kv_heads        = 8,
-        .head_dim          = 128,
-        .n_layers          = 28,
-        .rope_theta        = 1000000.0f,
-        .rms_norm_eps      = 1e-6f,
-        .tie_embeddings    = true,
-        .max_seq_len       = 8192,
+        /*vocab_size*/        217204,
+        /*hidden_size*/       1024,
+        /*intermediate_size*/ 3072,
+        /*n_heads*/           16,
+        /*n_kv_heads*/        8,
+        /*head_dim*/          128,
+        /*n_layers*/          28,
+        /*rope_theta*/        1000000.0f,
+        /*rms_norm_eps*/      1e-6f,
+        /*tie_embeddings*/    true,
+        /*max_seq_len*/       8192,
     };
 
     char path[512];
@@ -198,7 +198,7 @@ static void qw3lm_reset_kv(Qwen3LM * m, int kv_set) {
 
 // Load model weights from safetensors
 static bool qw3lm_load(Qwen3LM * m, const char * model_dir, int max_seq_len, int n_kv_sets) {
-    memset(m, 0, sizeof(*m));
+    *m = {};
 
     m->cfg = qw3lm_load_config(model_dir);
     if (max_seq_len > 0) m->cfg.max_seq_len = max_seq_len;
@@ -443,5 +443,5 @@ static void qw3lm_free(Qwen3LM * m) {
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
     sf_weight_ctx_free(&m->wctx);
-    memset(m, 0, sizeof(*m));
+    *m = {};
 }

@@ -17,29 +17,29 @@
 // Lyric/Timbre encoder configs
 static Qwen3Config qwen3_lyric_config() {
     return {
-        .hidden_size       = 2048,
-        .intermediate_size = 6144,
-        .n_heads           = 16,
-        .n_kv_heads        = 8,
-        .head_dim          = 128,
-        .n_layers          = 8,
-        .rope_theta        = 1000000.0f,
-        .rms_norm_eps      = 1e-6f,
-        .is_causal         = false,
+        /*hidden_size*/       2048,
+        /*intermediate_size*/ 6144,
+        /*n_heads*/           16,
+        /*n_kv_heads*/        8,
+        /*head_dim*/          128,
+        /*n_layers*/          8,
+        /*rope_theta*/        1000000.0f,
+        /*rms_norm_eps*/      1e-6f,
+        /*is_causal*/         false,
     };
 }
 
 static Qwen3Config qwen3_timbre_config() {
     return {
-        .hidden_size       = 2048,
-        .intermediate_size = 6144,
-        .n_heads           = 16,
-        .n_kv_heads        = 8,
-        .head_dim          = 128,
-        .n_layers          = 4,
-        .rope_theta        = 1000000.0f,
-        .rms_norm_eps      = 1e-6f,
-        .is_causal         = false,
+        /*hidden_size*/       2048,
+        /*intermediate_size*/ 6144,
+        /*n_heads*/           16,
+        /*n_kv_heads*/        8,
+        /*head_dim*/          128,
+        /*n_layers*/          4,
+        /*rope_theta*/        1000000.0f,
+        /*rms_norm_eps*/      1e-6f,
+        /*is_causal*/         false,
     };
 }
 
@@ -285,5 +285,5 @@ static void cond_ggml_free(CondGGML * m) {
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
     sf_weight_ctx_free(&m->wctx);
-    memset(m, 0, sizeof(*m));
+    *m = {};
 }

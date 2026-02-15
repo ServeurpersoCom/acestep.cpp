@@ -34,9 +34,9 @@ static void build_byte_encoder(std::string byte2str[256]) {
         int cp = cs[i];
         char buf[4];
         int len;
-        if (cp < 0x80) { buf[0] = cp; len = 1; }
-        else if (cp < 0x800) { buf[0] = 0xC0 | (cp >> 6); buf[1] = 0x80 | (cp & 0x3F); len = 2; }
-        else { buf[0] = 0xE0 | (cp >> 12); buf[1] = 0x80 | ((cp >> 6) & 0x3F); buf[2] = 0x80 | (cp & 0x3F); len = 3; }
+        if (cp < 0x80) { buf[0] = (char)cp; len = 1; }
+        else if (cp < 0x800) { buf[0] = (char)(0xC0 | (cp >> 6)); buf[1] = (char)(0x80 | (cp & 0x3F)); len = 2; }
+        else { buf[0] = (char)(0xE0 | (cp >> 12)); buf[1] = (char)(0x80 | ((cp >> 6) & 0x3F)); buf[2] = (char)(0x80 | (cp & 0x3F)); len = 3; }
         byte2str[bs[i]] = std::string(buf, len);
     }
 }
@@ -358,7 +358,7 @@ static bool load_merges(const std::string &path, std::unordered_map<std::string,
     // Skip header line (#version: 0.2)
     if (fgets(line, sizeof(line), f) == nullptr) { fclose(f); return false; }
     while (fgets(line, sizeof(line), f)) {
-        int len = strlen(line);
+        int len = (int)strlen(line);
         while (len > 0 && (line[len-1] == '\n' || line[len-1] == '\r')) line[--len] = '\0';
         if (len == 0) continue;
         merges[std::string(line)] = rank++;

@@ -168,7 +168,6 @@ Required:
   --request <json>       Request JSON (read, enriched, overwritten)
 
 Infra:
-  --max-tokens <N>       Max new tokens (default: 256)
   --max-seq <N>          KV cache size (default: 8192)
   --no-fsm               Disable FSM constrained decoding
 

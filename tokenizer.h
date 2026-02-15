@@ -31,15 +31,15 @@ static void fsq_decode_index(int index, float * out) {
 // Detokenizer config: same Qwen3 arch as lyric/timbre encoders, 2 layers
 static Qwen3Config detok_config() {
     return {
-        .hidden_size       = 2048,
-        .intermediate_size = 6144,
-        .n_heads           = 16,
-        .n_kv_heads        = 8,
-        .head_dim          = 128,
-        .n_layers          = 2,
-        .rope_theta        = 1000000.0f,
-        .rms_norm_eps      = 1e-6f,
-        .is_causal         = false,
+        /*hidden_size*/       2048,
+        /*intermediate_size*/ 6144,
+        /*n_heads*/           16,
+        /*n_kv_heads*/        8,
+        /*head_dim*/          128,
+        /*n_layers*/          2,
+        /*rope_theta*/        1000000.0f,
+        /*rms_norm_eps*/      1e-6f,
+        /*is_causal*/         false,
     };
 }
 
@@ -210,5 +210,5 @@ static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
 static void detok_ggml_free(DetokGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     sf_weight_ctx_free(&m->wctx);
-    memset(m, 0, sizeof(*m));
+    *m = {};
 }

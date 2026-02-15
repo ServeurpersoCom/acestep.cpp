@@ -164,14 +164,14 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
 
     for (int i = 0; i < 5; i++) {
         VAEBlock & b = m->blk[i];
-        std::string bp = "decoder.block." + std::to_string(i);
-        vae_load_snake(b.sa, st, bp + ".snake1.alpha");
-        vae_load_snake(b.sb, st, bp + ".snake1.beta");
-        vae_fuse_wn(b.ctw, st, bp + ".conv_t1");
-        vae_load_bias(b.ctb, st, bp + ".conv_t1.bias");
+        std::string blk_pfx = "decoder.block." + std::to_string(i);
+        vae_load_snake(b.sa, st, blk_pfx + ".snake1.alpha");
+        vae_load_snake(b.sb, st, blk_pfx + ".snake1.beta");
+        vae_fuse_wn(b.ctw, st, blk_pfx + ".conv_t1");
+        vae_load_bias(b.ctb, st, blk_pfx + ".conv_t1.bias");
         for (int r = 0; r < 3; r++) {
             VAEResUnit & ru = b.ru[r];
-            std::string rp = bp + ".res_unit" + std::to_string(r + 1);
+            std::string rp = blk_pfx + ".res_unit" + std::to_string(r + 1);
             vae_load_snake(ru.s1a, st, rp + ".snake1.alpha");
             vae_load_snake(ru.s1b, st, rp + ".snake1.beta");
             vae_fuse_wn(ru.c1w, st, rp + ".conv1");
@@ -443,9 +443,9 @@ static int vae_ggml_decode_tiled(
 
         // Compute trim in audio samples (matches Python int(round(...)))
         int added_start = core_start - win_start;
-        int trim_start = (int)roundf(added_start * upsample_factor);
+        int trim_start = (int)roundf((float)added_start * upsample_factor);
         int added_end = win_end - core_end;
-        int trim_end = (int)roundf(added_end * upsample_factor);
+        int trim_end = (int)roundf((float)added_end * upsample_factor);
 
         int end_idx = (trim_end > 0) ? (tile_T - trim_end) : tile_T;
         int core_len = end_idx - trim_start;
@@ -485,5 +485,5 @@ static void vae_ggml_free(VAEGGML * m) {
     if (m->weight_ctx) ggml_free(m->weight_ctx);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
-    memset(m, 0, sizeof(*m));
+    *m = {};
 }

@@ -48,11 +48,11 @@ static bool write_wav(const char * path, const float * audio, int T_audio, int s
     fwrite("fmt ", 1, 4, f);
     int fmt_size = 16; fwrite(&fmt_size, 4, 1, f);
     short audio_fmt = 1; fwrite(&audio_fmt, 2, 1, f);
-    short nc = n_channels; fwrite(&nc, 2, 1, f);
+    short nc = (short)n_channels; fwrite(&nc, 2, 1, f);
     fwrite(&sr, 4, 1, f);
     fwrite(&byte_rate, 4, 1, f);
-    short ba = block_align; fwrite(&ba, 2, 1, f);
-    short bp = bits; fwrite(&bp, 2, 1, f);
+    short ba = (short)block_align; fwrite(&ba, 2, 1, f);
+    short bp = (short)bits; fwrite(&bp, 2, 1, f);
     fwrite("data", 1, 4, f);
     fwrite(&data_size, 4, 1, f);
     for (int t = 0; t < T_audio; t++) {
@@ -172,7 +172,7 @@ int main(int argc, char ** argv) {
     std::vector<int> codes_vec = parse_codes_string(req.audio_codes);
     if (!codes_vec.empty())
         fprintf(stderr, "[Pipeline] %zu audio codes from request (%.1fs @ 5Hz)\n",
-                codes_vec.size(), codes_vec.size() / 5.0f);
+                codes_vec.size(), (float)codes_vec.size() / 5.0f);
     else
         fprintf(stderr, "[Pipeline] No codes, text-to-music from noise\n");
 
@@ -210,7 +210,7 @@ int main(int argc, char ** argv) {
     // Build schedule: t_i = shift * t / (1 + (shift-1)*t) where t = 1 - i/steps
     std::vector<float> schedule(num_steps);
     for (int i = 0; i < num_steps; i++) {
-        float t = 1.0f - (float)i / num_steps;
+        float t = 1.0f - (float)i / (float)num_steps;
         schedule[i] = shift * t / (1.0f + (shift - 1.0f) * t);
     }
     fprintf(stderr, "[Pipeline] shift=%.1f steps=%d: ", shift, num_steps);
@@ -471,8 +471,8 @@ int main(int argc, char ** argv) {
             sum += output[i];
             sum_sq += output[i] * output[i];
         }
-        float mean = sum / n_output;
-        float var = sum_sq / n_output - mean * mean;
+        float mean = sum / (float)n_output;
+        float var = sum_sq / (float)n_output - mean * mean;
         fprintf(stderr, "[Output] mean=%.6f, std=%.6f\n", mean, sqrtf(var > 0 ? var : 0));
 
         debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);

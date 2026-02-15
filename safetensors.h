@@ -15,11 +15,18 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+#include <filesystem>
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
 #include <unistd.h>
-#include <dirent.h>
+#endif
 
 // Safetensors mmap parser (no ggml deps)
 enum SafeDType { SF_BF16 = 0, SF_F16 = 1, SF_F32 = 2 };
@@ -32,7 +39,12 @@ struct SafeTensor {
 };
 
 struct SafeFile {
+#ifdef _WIN32
+    HANDLE file_handle;
+    HANDLE mapping_handle;
+#else
     int fd;
+#endif
     void *mapping;
     size_t file_size;
 };
@@ -43,8 +55,14 @@ struct SafeTensors {
 
     ~SafeTensors() {
         for (auto &f : files) {
+#ifdef _WIN32
+            if (f.mapping) UnmapViewOfFile(f.mapping);
+            if (f.mapping_handle) CloseHandle(f.mapping_handle);
+            if (f.file_handle != INVALID_HANDLE_VALUE) CloseHandle(f.file_handle);
+#else
             if (f.mapping) munmap(f.mapping, f.file_size);
             if (f.fd >= 0) close(f.fd);
+#endif
         }
     }
 };
@@ -106,6 +124,23 @@ static inline SafeDType parse_dtype(const char *entry) {
 
 // Load a single .safetensors file
 static bool safe_load_file(SafeTensors &st, const char *path) {
+#ifdef _WIN32
+    HANDLE fh = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh == INVALID_HANDLE_VALUE) { fprintf(stderr, "Cannot open %s\n", path); return false; }
+
+    LARGE_INTEGER li;
+    GetFileSizeEx(fh, &li);
+    size_t file_size = (size_t)li.QuadPart;
+
+    HANDLE mh = CreateFileMappingA(fh, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mh) { CloseHandle(fh); fprintf(stderr, "CreateFileMapping failed %s\n", path); return false; }
+
+    void *mapping = MapViewOfFile(mh, FILE_MAP_READ, 0, 0, 0);
+    if (!mapping) { CloseHandle(mh); CloseHandle(fh); fprintf(stderr, "MapViewOfFile failed %s\n", path); return false; }
+
+    st.files.push_back({fh, mh, mapping, file_size});
+#else
     int fd = open(path, O_RDONLY);
     if (fd < 0) { fprintf(stderr, "Cannot open %s\n", path); return false; }
 
@@ -117,6 +152,7 @@ static bool safe_load_file(SafeTensors &st, const char *path) {
     if (mapping == MAP_FAILED) { close(fd); fprintf(stderr, "mmap failed %s\n", path); return false; }
 
     st.files.push_back({fd, mapping, file_size});
+#endif
 
     const uint8_t *base = (const uint8_t *)mapping;
     uint64_t header_len = *(const uint64_t *)base;
@@ -162,25 +198,23 @@ static bool safe_load_file(SafeTensors &st, const char *path) {
 
 // Load model directory (handles single file or sharded model-0000X-of-0000Y.safetensors)
 static bool safe_load(SafeTensors &st, const char *dir_or_file) {
-    struct stat sb;
-    if (stat(dir_or_file, &sb) != 0) return false;
+    namespace fs = std::filesystem;
+    fs::path p(dir_or_file);
 
-    if (S_ISREG(sb.st_mode)) {
+    if (!fs::exists(p)) return false;
+
+    if (fs::is_regular_file(p)) {
         return safe_load_file(st, dir_or_file);
     }
 
     // Directory: load all .safetensors files sorted
     std::vector<std::string> files;
-    DIR *d = opendir(dir_or_file);
-    if (!d) return false;
-    struct dirent *ent;
-    while ((ent = readdir(d))) {
-        std::string name = ent->d_name;
+    for (auto &entry : fs::directory_iterator(p)) {
+        std::string name = entry.path().filename().string();
         if (name.size() > 12 && name.substr(name.size() - 12) == ".safetensors") {
-            files.push_back(std::string(dir_or_file) + "/" + name);
+            files.push_back(entry.path().string());
         }
     }
-    closedir(d);
     std::sort(files.begin(), files.end());
 
     for (auto &f : files) {

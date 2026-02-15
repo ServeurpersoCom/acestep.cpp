@@ -732,7 +732,7 @@ static void generate(Qwen3LM * m, BPETokenizer * bpe,
     size_t total_prefill = prompt_tokens.size() + (use_cfg ? uncond_tokens->size() : 0);
     double prefill_ms = t_prefill.ms();
     fprintf(stderr, "[Prefill] %.0fms (%.1f tok/s, %zu tokens)\n",
-            prefill_ms, total_prefill / (prefill_ms / 1000.0), total_prefill);
+            prefill_ms, (double)total_prefill / (prefill_ms / 1000.0), total_prefill);
     if (out_prefill_ms) *out_prefill_ms = prefill_ms;
 
     // Decode loop
@@ -871,7 +871,6 @@ static void usage(const char * prog) {
         "  --request <json>       Request JSON (read, enriched, overwritten)\n"
         "\n"
         "Infra:\n"
-        "  --max-tokens <N>       Max new tokens (default: 256)\n"
         "  --max-seq <N>          KV cache size (default: 8192)\n"
         "  --no-fsm               Disable FSM constrained decoding\n"
         "\n"
@@ -884,7 +883,6 @@ static void usage(const char * prog) {
 int main(int argc, char ** argv) {
     const char * model_dir    = nullptr;
     const char * request_path = nullptr;
-    int max_tokens  = 256;
     int max_seq     = 8192;
     bool use_fsm    = true;
     const char * dump_logits  = nullptr;
@@ -900,8 +898,6 @@ int main(int argc, char ** argv) {
             model_dir = argv[++i];
         else if (!strcmp(argv[i], "--request") && i + 1 < argc)
             request_path = argv[++i];
-        else if (!strcmp(argv[i], "--max-tokens") && i + 1 < argc)
-            max_tokens = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc)
             max_seq = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--no-fsm"))

@@ -234,15 +234,15 @@ static void qwen3_init_backend(Qwen3GGML * m) {
 // model_dir: directory containing model.safetensors + tokenizer files
 static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * model_dir) {
     m->cfg = {
-        .hidden_size       = 1024,
-        .intermediate_size = 3072,
-        .n_heads           = 16,
-        .n_kv_heads        = 8,
-        .head_dim          = 128,
-        .n_layers          = 28,
-        .rope_theta        = 1000000.0f,
-        .rms_norm_eps      = 1e-6f,
-        .is_causal         = true,
+        /*hidden_size*/       1024,
+        /*intermediate_size*/ 3072,
+        /*n_heads*/           16,
+        /*n_kv_heads*/        8,
+        /*head_dim*/          128,
+        /*n_layers*/          28,
+        /*rope_theta*/        1000000.0f,
+        /*rms_norm_eps*/      1e-6f,
+        /*is_causal*/         true,
     };
 
     SafeTensors st;
@@ -376,5 +376,5 @@ static void qwen3_free(Qwen3GGML * m) {
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
     sf_weight_ctx_free(&m->wctx);
-    memset(m, 0, sizeof(*m));
+    *m = {};
 }

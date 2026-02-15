@@ -4,15 +4,28 @@ project(acestep-ggml LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Suppress MSVC fopen/sprintf deprecation warnings
+if(MSVC)
+    add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
+endif()
+
 # ggml as subdirectory, inherits GGML_CUDA, GGML_METAL, etc. from cmake flags
 add_subdirectory(ggml)
 
-# Macro: link ggml backends to a target (avoids repeating per-executable)
+# Macro: link ggml backends + strict warnings (scoped to our targets, not ggml)
 macro(link_ggml_backends target)
     target_include_directories(${target} PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}
+    )
+    target_include_directories(${target} SYSTEM PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
     )
+    if(MSVC)
+        target_compile_options(${target} PRIVATE /W4 /wd4100 /wd4505)
+    else()
+        target_compile_options(${target} PRIVATE -Wall -Wextra -Wshadow -Wconversion
+                              -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
+    endif()
     target_link_libraries(${target} PRIVATE ggml ggml-base ggml-cpu)
     foreach(backend blas cuda metal vulkan)
         if(TARGET ggml-${backend})
