@@ -31,9 +31,5 @@ link_ggml_backends(dit-vae)
 add_executable(ace-qwen3 ace-qwen3.cpp request.cpp)
 link_ggml_backends(ace-qwen3)
 
-# compare: cosine similarity between tensor dumps (debug tool)
-add_executable(compare compare.cpp)
-target_include_directories(compare PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
-
 # pt2bin: convert silence_latent.pt -> .bin (raw float32)
 add_executable(pt2bin pt2bin.cpp)
