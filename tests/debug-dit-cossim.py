@@ -34,8 +34,8 @@ MODE_CONFIG = {
 }
 
 # Defaults
-CAPTION  = "Ambient electronic soundscape with warm analog pads"
-LYRICS   = "[Instrumental]"
+CAPTION  = "Upbeat pop rock anthem with driving electric guitars, punchy drums, catchy vocal hooks, and a singalong chorus"
+LYRICS   = "[verse]\nWe ride the lightning through the night\nChasing echoes burning bright\n[chorus]\nWe are the fire we are the flame\nNothing will ever be the same"
 BPM      = 120
 DURATION = 120
 SEED     = 42
@@ -151,6 +151,7 @@ def write_request(path, caption, lyrics, bpm, duration, seed, cfg):
         "inference_steps": cfg["steps"],
         "guidance_scale": cfg["guidance"],
         "shift": cfg["shift"],
+        "vocal_language": "en",
         "thinking": False,
     }
     with open(path, "w") as f:
@@ -305,7 +306,19 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         use_random_seed=False, batch_size=1,
         inference_steps=cfg["steps"], shift=cfg["shift"],
         infer_method="ode", vocal_language="en",
+        # Match GGML instruction (production always uses "Generate...")
+        instruction="Generate audio semantic tokens based on the given conditions:",
     )
+
+    # "Generate..." instruction triggers is_cover=True in Python even without codes,
+    # which round-trips silence through FSQ and changes src_latents.
+    # GGML uses raw silence_latent.bin directly. Patch to match.
+    orig_build = handler._build_chunk_masks_and_src_latents
+    def _patched_build(*a, **kw):
+        import torch
+        chunk_masks, spans, is_covers, src_latents = orig_build(*a, **kw)
+        return chunk_masks, spans, torch.zeros_like(is_covers), src_latents
+    handler._build_chunk_masks_and_src_latents = _patched_build
     if has_cfg:
         gen_kwargs["guidance_scale"] = cfg["guidance"]
 
@@ -329,6 +342,21 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
     audios = result.get("audios", [])
     if audios and "tensor" in audios[0]:
         _dumps["vae_audio"] = audios[0]["tensor"].squeeze(0)
+        # Save Python WAV for listening comparison
+        audio_np = audios[0]["tensor"].squeeze(0).cpu().numpy()  # [2, N]
+        wav_path = os.path.join(dump_dir, "output.wav")
+        import wave
+        n_samples = audio_np.shape[1]
+        interleaved = np.empty(2 * n_samples, dtype=np.float32)
+        interleaved[0::2] = audio_np[0]
+        interleaved[1::2] = audio_np[1]
+        pcm = (np.clip(interleaved, -1, 1) * 32767).astype(np.int16)
+        with wave.open(wav_path, 'w') as wf:
+            wf.setnchannels(2)
+            wf.setsampwidth(2)
+            wf.setframerate(48000)
+            wf.writeframes(pcm.tobytes())
+        print(f"[Python] Wrote {wav_path}: {n_samples} samples ({n_samples/48000:.2f}s @ 48kHz stereo)")
 
     for name, tensor in sorted(_dumps.items()):
         save_dump(os.path.join(dump_dir, f"{name}.bin"), tensor)

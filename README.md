@@ -155,7 +155,7 @@ Key fields: `seed` -1 means random. `thinking` false skips CoT (for SFT
 models or when all metadata is provided). `audio_codes` is populated by
 ace-qwen3 and consumed by dit-vae (comma-separated FSQ token IDs).
 
-Turbo preset: `inference_steps=8, guidance_scale=7.0, shift=3.0`.
+Turbo preset: `inference_steps=8, shift=3.0` (no guidance_scale, turbo models don't use CFG).
 SFT preset: `inference_steps=32, guidance_scale=7.0, shift=3.0, thinking=false`.
 
 ## ace-qwen3 reference
@@ -221,36 +221,10 @@ dit-vae
 
 ## Accuracy
 
-LLM logits (prefill, 0.6B, `tests/debug-lm-logits.py`):
+Full test log (turbo + SFT, seed 42, Philox noise):
+[`tests/accuracy.log`](https://github.com/ServeurpersoCom/acestep.cpp/blob/master/tests/accuracy.log)
 
-```
-GGML<>PyTorch cosine similarity: 0.999980
-Top-5 argmax: identical
-```
-
-DiT+VAE pipeline (`tests/debug-cos-sim.py`, seed 42, Philox noise).
-Cosine similarity between GGML and Python intermediate tensors (1.0 = identical):
-
-| Stage | GGML <-> Python |
-|---|---:|
-| text_hidden | 0.9998 |
-| lyric_embed | 1.0000 |
-| enc_hidden | 0.9998 |
-| context | 1.0000 |
-| noise | 1.0000 |
-| dit_step0_vt | 0.9970 |
-| dit_step1_vt | 0.9994 |
-| dit_step2_vt | 0.9989 |
-| dit_step3_vt | 0.9980 |
-| dit_step4_vt | 0.9966 |
-| dit_step5_vt | 0.9950 |
-| dit_step6_vt | 0.9949 |
-| dit_step7_vt | 0.9904 |
-| dit_x0 | 0.9951 |
-| vae_audio | 0.9897 |
-| vae_audio (log spectral) | 0.9770 |
-
-Residual drift is FP32 (GGML) vs BF16 (PyTorch) accumulation over 8 Euler steps.
+Run `python3 tests/debug-dit-cossim.py` to reproduce.
 
 ## Known issues
 
