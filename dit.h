@@ -1,6 +1,6 @@
 #pragma once
 // dit.h: ACE-Step DiT (Diffusion Transformer) via ggml compute graph
-// Ported from Python ACE-Step-1.5 reference. Same weights, same safetensors.
+// Ported from Python ACE-Step-1.5 reference. Same weights, loaded from GGUF.
 //
 // Architecture: 24-layer transformer with AdaLN, GQA self-attn + cross-attn, SwiGLU MLP.
 // Flow matching: 8 Euler steps (turbo schedule).
@@ -11,7 +11,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "ggml-alloc.h"
-#include "safetensors.h"
+#include "gguf_weights.h"
 #include "backend.h"
 
 #include "debug.h"
@@ -115,48 +115,46 @@ struct DiTGGML {
     ggml_backend_sched_t sched;
 
     // Weight storage
-    SFWeightCtx wctx;
+    WeightCtx wctx;
 };
 
 // Load timestep embedding weights
-static void dit_ggml_load_temb(DiTGGMLTembWeights * w, SFWeightCtx * wctx,
-                                const SafeTensors & st, const std::string & prefix) {
-    w->linear_1_w  = sf_load_tensor(wctx, st, prefix + ".linear_1.weight");
-    w->linear_1_b  = sf_load_tensor(wctx, st, prefix + ".linear_1.bias");
-    w->linear_2_w  = sf_load_tensor(wctx, st, prefix + ".linear_2.weight");
-    w->linear_2_b  = sf_load_tensor(wctx, st, prefix + ".linear_2.bias");
-    w->time_proj_w = sf_load_tensor(wctx, st, prefix + ".time_proj.weight");
-    w->time_proj_b = sf_load_tensor(wctx, st, prefix + ".time_proj.bias");
+static void dit_ggml_load_temb(DiTGGMLTembWeights * w, WeightCtx * wctx,
+                                const GGUFModel & gf, const std::string & prefix) {
+    w->linear_1_w  = gf_load_tensor(wctx, gf, prefix + ".linear_1.weight");
+    w->linear_1_b  = gf_load_tensor(wctx, gf, prefix + ".linear_1.bias");
+    w->linear_2_w  = gf_load_tensor(wctx, gf, prefix + ".linear_2.weight");
+    w->linear_2_b  = gf_load_tensor(wctx, gf, prefix + ".linear_2.bias");
+    w->time_proj_w = gf_load_tensor(wctx, gf, prefix + ".time_proj.weight");
+    w->time_proj_b = gf_load_tensor(wctx, gf, prefix + ".time_proj.bias");
 }
 
-// Load full DiT model
-static bool dit_ggml_load(DiTGGML * m, const char * model_path, DiTGGMLConfig cfg) {
+// Load full DiT model from GGUF
+static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg) {
     m->cfg = cfg;
 
-    // Load safetensors
-    SafeTensors st;
-    if (!safe_load(st, model_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load safetensors from %s\n", model_path);
+    GGUFModel gf;
+    if (!gf_load(&gf, gguf_path)) {
+        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
-    fprintf(stderr, "[Load] DiT safetensors: %zu tensors\n", st.tensors.size());
 
     // Count tensors: temb(6*2) + proj_in(2) + cond_emb(2) + layers(19*24) + output(4) + null_cond(1) = 475
     int n_tensors = 6 * 2 + 2 + 2 + 19 * cfg.n_layers + 4 + 1;
-    sf_weight_ctx_init(&m->wctx, n_tensors);
+    wctx_init(&m->wctx, n_tensors);
 
     // Timestep embeddings
-    dit_ggml_load_temb(&m->time_embed,   &m->wctx, st, "decoder.time_embed");
-    dit_ggml_load_temb(&m->time_embed_r, &m->wctx, st, "decoder.time_embed_r");
+    dit_ggml_load_temb(&m->time_embed,   &m->wctx, gf, "decoder.time_embed");
+    dit_ggml_load_temb(&m->time_embed_r, &m->wctx, gf, "decoder.time_embed_r");
 
     // proj_in: Conv1d weight [hidden, in_ch, patch_size]
     // In ggml conv_1d format: ne[0]=patch_size, ne[1]=in_ch, ne[2]=hidden
-    m->proj_in_w = sf_load_tensor(&m->wctx, st, "decoder.proj_in.1.weight");
-    m->proj_in_b = sf_load_tensor(&m->wctx, st, "decoder.proj_in.1.bias");
+    m->proj_in_w = gf_load_tensor(&m->wctx, gf, "decoder.proj_in.1.weight");
+    m->proj_in_b = gf_load_tensor(&m->wctx, gf, "decoder.proj_in.1.bias");
 
     // condition_embedder
-    m->cond_emb_w = sf_load_tensor(&m->wctx, st, "decoder.condition_embedder.weight");
-    m->cond_emb_b = sf_load_tensor(&m->wctx, st, "decoder.condition_embedder.bias");
+    m->cond_emb_w = gf_load_tensor(&m->wctx, gf, "decoder.condition_embedder.weight");
+    m->cond_emb_b = gf_load_tensor(&m->wctx, gf, "decoder.condition_embedder.bias");
 
     // Layers
     for (int i = 0; i < cfg.n_layers; i++) {
@@ -166,51 +164,53 @@ static bool dit_ggml_load(DiTGGML * m, const char * model_path, DiTGGMLConfig cf
         DiTGGMLLayer & ly = m->layers[i];
 
         // Self-attention
-        ly.self_attn_norm = sf_load_tensor(&m->wctx, st, p + ".self_attn_norm.weight");
-        ly.sa_q_proj      = sf_load_tensor(&m->wctx, st, p + ".self_attn.q_proj.weight");
-        ly.sa_k_proj      = sf_load_tensor(&m->wctx, st, p + ".self_attn.k_proj.weight");
-        ly.sa_v_proj      = sf_load_tensor(&m->wctx, st, p + ".self_attn.v_proj.weight");
-        ly.sa_q_norm      = sf_load_tensor(&m->wctx, st, p + ".self_attn.q_norm.weight");
-        ly.sa_k_norm      = sf_load_tensor(&m->wctx, st, p + ".self_attn.k_norm.weight");
-        ly.sa_o_proj      = sf_load_tensor(&m->wctx, st, p + ".self_attn.o_proj.weight");
+        ly.self_attn_norm = gf_load_tensor(&m->wctx, gf, p + ".self_attn_norm.weight");
+        ly.sa_q_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_proj.weight");
+        ly.sa_k_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_proj.weight");
+        ly.sa_v_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
+        ly.sa_q_norm      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_norm.weight");
+        ly.sa_k_norm      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_norm.weight");
+        ly.sa_o_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.o_proj.weight");
 
         // Cross-attention
-        ly.cross_attn_norm = sf_load_tensor(&m->wctx, st, p + ".cross_attn_norm.weight");
-        ly.ca_q_proj       = sf_load_tensor(&m->wctx, st, p + ".cross_attn.q_proj.weight");
-        ly.ca_k_proj       = sf_load_tensor(&m->wctx, st, p + ".cross_attn.k_proj.weight");
-        ly.ca_v_proj       = sf_load_tensor(&m->wctx, st, p + ".cross_attn.v_proj.weight");
-        ly.ca_q_norm       = sf_load_tensor(&m->wctx, st, p + ".cross_attn.q_norm.weight");
-        ly.ca_k_norm       = sf_load_tensor(&m->wctx, st, p + ".cross_attn.k_norm.weight");
-        ly.ca_o_proj       = sf_load_tensor(&m->wctx, st, p + ".cross_attn.o_proj.weight");
+        ly.cross_attn_norm = gf_load_tensor(&m->wctx, gf, p + ".cross_attn_norm.weight");
+        ly.ca_q_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_proj.weight");
+        ly.ca_k_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_proj.weight");
+        ly.ca_v_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.v_proj.weight");
+        ly.ca_q_norm       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_norm.weight");
+        ly.ca_k_norm       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_norm.weight");
+        ly.ca_o_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.o_proj.weight");
 
         // MLP
-        ly.mlp_norm  = sf_load_tensor(&m->wctx, st, p + ".mlp_norm.weight");
-        ly.gate_proj = sf_load_tensor(&m->wctx, st, p + ".mlp.gate_proj.weight");
-        ly.up_proj   = sf_load_tensor(&m->wctx, st, p + ".mlp.up_proj.weight");
-        ly.down_proj = sf_load_tensor(&m->wctx, st, p + ".mlp.down_proj.weight");
+        ly.mlp_norm  = gf_load_tensor(&m->wctx, gf, p + ".mlp_norm.weight");
+        ly.gate_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.gate_proj.weight");
+        ly.up_proj   = gf_load_tensor(&m->wctx, gf, p + ".mlp.up_proj.weight");
+        ly.down_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.down_proj.weight");
 
-        // AdaLN scale_shift_table [1, 6, hidden] in safetensors
-        ly.scale_shift_table = sf_load_tensor(&m->wctx, st, p + ".scale_shift_table");
+        // AdaLN scale_shift_table [1, 6, hidden] in GGUF
+        ly.scale_shift_table = gf_load_tensor(&m->wctx, gf, p + ".scale_shift_table");
 
         ly.layer_type = (i % 2 == 0) ? 0 : 1;  // 0=sliding, 1=full
     }
 
     // Output
-    m->norm_out        = sf_load_tensor(&m->wctx, st, "decoder.norm_out.weight");
-    m->out_scale_shift = sf_load_tensor(&m->wctx, st, "decoder.scale_shift_table");
-    m->proj_out_w      = sf_load_tensor(&m->wctx, st, "decoder.proj_out.1.weight");
-    m->proj_out_b      = sf_load_tensor(&m->wctx, st, "decoder.proj_out.1.bias");
+    m->norm_out        = gf_load_tensor(&m->wctx, gf, "decoder.norm_out.weight");
+    m->out_scale_shift = gf_load_tensor(&m->wctx, gf, "decoder.scale_shift_table");
+    m->proj_out_w      = gf_load_tensor(&m->wctx, gf, "decoder.proj_out.1.weight");
+    m->proj_out_b      = gf_load_tensor(&m->wctx, gf, "decoder.proj_out.1.bias");
 
     // Null condition embedding for CFG (base/sft models; turbo has it but unused at inference)
-    m->null_condition_emb = sf_try_load_tensor(&m->wctx, st, "null_condition_emb");
+    m->null_condition_emb = gf_try_load_tensor(&m->wctx, gf, "null_condition_emb");
     if (m->null_condition_emb) {
         fprintf(stderr, "[Load] null_condition_emb found (CFG available)\n");
     }
 
     // Allocate backend buffer and copy weights
-    if (!sf_weight_ctx_alloc(&m->wctx, m->backend)) {
+    if (!wctx_alloc(&m->wctx, m->backend)) {
+        gf_close(&gf);
         return false;
     }
+    gf_close(&gf);
 
     fprintf(stderr, "[Load] DiT: %d layers, H=%d, Nh=%d/%d, D=%d\n",
             cfg.n_layers, cfg.hidden_size, cfg.n_heads, cfg.n_kv_heads, cfg.head_dim);
@@ -678,7 +678,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(
     ggml_set_output(input);
     struct ggml_tensor * patched = ggml_reshape_2d(ctx, input, c.in_channels * P, S);
 
-    // Weight from safetensors [H, in_ch, P] -> ggml [P, in_ch, H]
+    // Weight from GGUF [H, in_ch, P] -> ggml [P, in_ch, H]
     // Patched data is p-major: [frame0_all_ch, frame1_all_ch, ...]
     // Must permute weight to match: [P, in_ch, H] -> [in_ch, P, H] -> flatten -> [in_ch*P, H]
     struct ggml_tensor * proj_w_perm = ggml_permute(ctx, m->proj_in_w, 1, 0, 2, 3);
@@ -724,7 +724,7 @@ static struct ggml_cgraph * dit_ggml_build_graph(
     norm_out = dit_ggml_adaln(ctx, norm_out, out_scale, out_shift);
 
     // proj_out: ConvTranspose1d(hidden, out_ch, k=P, s=P)
-    // Weight from safetensors [H, out_ch, P] -> ggml [P, out_ch, H]
+    // Weight from GGUF [H, out_ch, P] -> ggml [P, out_ch, H]
     // Permute to [out_ch, P, H] -> flatten -> [out_ch*P, H] -> transpose -> [H, out_ch*P]
     // This gives p-major output matching reshape_2d(output, out_ch, T) unpatchify
     struct ggml_tensor * proj_out_perm = ggml_permute(ctx, m->proj_out_w, 1, 0, 2, 3);
@@ -947,7 +947,7 @@ static void dit_ggml_generate(
             do_cfg = false;
         } else {
             // Read null_condition_emb from backend (bf16) and convert to f32
-            // safetensors shape [1, 1, 2048] -> ggml ne[0]=2048
+            // GGUF shape [1, 1, 2048] -> ggml ne[0]=2048
             int emb_n = (int)ggml_nelements(model->null_condition_emb);
             std::vector<float> null_emb(emb_n);
 
@@ -1174,6 +1174,6 @@ static void dit_ggml_free(DiTGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
-    sf_weight_ctx_free(&m->wctx);
+    wctx_free(&m->wctx);
     *m = {};
 }

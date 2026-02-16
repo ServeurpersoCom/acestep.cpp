@@ -864,11 +864,11 @@ static std::string run_phase2(Qwen3LM * m, BPETokenizer & bpe, const AcePrompt &
 
 static void usage(const char * prog) {
     fprintf(stderr,
-        "Usage: %s --model <dir> --request <json> [options]\n"
+        "Usage: %s --request <json> --model <gguf> [options]\n"
         "\n"
         "Required:\n"
-        "  --model <dir>          Model directory (safetensors + config.json)\n"
         "  --request <json>       Request JSON (read, enriched, overwritten)\n"
+        "  --model <gguf>         Model GGUF file (from convert.py)\n"
         "\n"
         "Infra:\n"
         "  --max-seq <N>          KV cache size (default: 8192)\n"
@@ -881,7 +881,7 @@ static void usage(const char * prog) {
 }
 
 int main(int argc, char ** argv) {
-    const char * model_dir    = nullptr;
+    const char * model_path   = nullptr;
     const char * request_path = nullptr;
     int max_seq     = 8192;
     bool use_fsm    = true;
@@ -895,7 +895,7 @@ int main(int argc, char ** argv) {
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--model") && i + 1 < argc)
-            model_dir = argv[++i];
+            model_path = argv[++i];
         else if (!strcmp(argv[i], "--request") && i + 1 < argc)
             request_path = argv[++i];
         else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc)
@@ -917,7 +917,7 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (!model_dir) {
+    if (!model_path) {
         fprintf(stderr, "ERROR: --model required\n");
         usage(argv[0]); return 1;
     }
@@ -952,15 +952,15 @@ int main(int argc, char ** argv) {
 
     Timer t_total;
 
-    // Load BPE tokenizer
+    // Load BPE tokenizer from model GGUF
     BPETokenizer bpe;
-    if (!load_bpe_tokenizer(&bpe, model_dir)) return 1;
+    if (!load_bpe_from_gguf(&bpe, model_path)) return 1;
 
     // Load model
     int n_kv_sets = (cfg_scale > 1.0f) ? 2 : 1;
     Timer t_load;
     Qwen3LM model;
-    if (!qw3lm_load(&model, model_dir, max_seq, n_kv_sets)) return 1;
+    if (!qw3lm_load(&model, model_path, max_seq, n_kv_sets)) return 1;
     double load_ms = t_load.ms();
 
     // FSM

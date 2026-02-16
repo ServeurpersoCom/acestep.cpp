@@ -69,7 +69,7 @@ struct CondGGML {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     ggml_backend_sched_t sched;
-    SFWeightCtx wctx;
+    WeightCtx wctx;
 };
 
 // Init
@@ -80,16 +80,16 @@ static void cond_ggml_init_backend(CondGGML * m) {
     m->sched = backend_sched_new(bp, 8192);
 }
 
-// Load from ACEStep model safetensors
-// model_path: checkpoints/acestep-v15-turbo/model.safetensors
+// Load from ACEStep DiT GGUF
+// gguf_path: path to the DiT .gguf file
 // Tensors have prefix "encoder." for lyric/timbre, and "null_condition_emb"
-static bool cond_ggml_load(CondGGML * m, const char * model_path) {
+static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
     m->lyric_cfg  = qwen3_lyric_config();
     m->timbre_cfg = qwen3_timbre_config();
 
-    SafeTensors st;
-    if (!safe_load(st, model_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", model_path);
+    GGUFModel gf;
+    if (!gf_load(&gf, gguf_path)) {
+        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
 
@@ -99,33 +99,37 @@ static bool cond_ggml_load(CondGGML * m, const char * model_path) {
     // text_proj(1) + null_cond(1) = 2
     // Total: 140
     int n_tensors = 91 + 47 + 2;
-    sf_weight_ctx_init(&m->wctx, n_tensors);
+    wctx_init(&m->wctx, n_tensors);
 
     // Lyric encoder
-    m->lyric_embed_w = sf_load_tensor(&m->wctx, st, "encoder.lyric_encoder.embed_tokens.weight");
-    m->lyric_embed_b = sf_load_tensor(&m->wctx, st, "encoder.lyric_encoder.embed_tokens.bias");
-    m->lyric_norm    = sf_load_tensor(&m->wctx, st, "encoder.lyric_encoder.norm.weight");
+    m->lyric_embed_w = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.weight");
+    m->lyric_embed_b = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.bias");
+    m->lyric_norm    = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.norm.weight");
     for (int i = 0; i < m->lyric_cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "encoder.lyric_encoder.layers.%d", i);
-        qwen3_load_layer(&m->wctx, st, &m->lyric_layers[i], prefix);
+        qwen3_load_layer(&m->wctx, gf, &m->lyric_layers[i], prefix);
     }
 
     // Timbre encoder
-    m->timbre_embed_w = sf_load_tensor(&m->wctx, st, "encoder.timbre_encoder.embed_tokens.weight");
-    m->timbre_embed_b = sf_load_tensor(&m->wctx, st, "encoder.timbre_encoder.embed_tokens.bias");
-    m->timbre_norm    = sf_load_tensor(&m->wctx, st, "encoder.timbre_encoder.norm.weight");
+    m->timbre_embed_w = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.weight");
+    m->timbre_embed_b = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.bias");
+    m->timbre_norm    = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.norm.weight");
     for (int i = 0; i < m->timbre_cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "encoder.timbre_encoder.layers.%d", i);
-        qwen3_load_layer(&m->wctx, st, &m->timbre_layers[i], prefix);
+        qwen3_load_layer(&m->wctx, gf, &m->timbre_layers[i], prefix);
     }
 
     // Text projector + null condition
-    m->text_proj_w   = sf_load_tensor(&m->wctx, st, "encoder.text_projector.weight");
-    m->null_cond_emb = sf_load_tensor(&m->wctx, st, "null_condition_emb");
+    m->text_proj_w   = gf_load_tensor(&m->wctx, gf, "encoder.text_projector.weight");
+    m->null_cond_emb = gf_load_tensor(&m->wctx, gf, "null_condition_emb");
 
-    if (!sf_weight_ctx_alloc(&m->wctx, m->backend)) return false;
+    if (!wctx_alloc(&m->wctx, m->backend)) {
+        gf_close(&gf);
+        return false;
+    }
+    gf_close(&gf);
 
     fprintf(stderr, "[Load] CondEncoder: lyric(%dL), timbre(%dL), text_proj, null_cond\n",
             m->lyric_cfg.n_layers, m->timbre_cfg.n_layers);
@@ -284,6 +288,6 @@ static void cond_ggml_free(CondGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
-    sf_weight_ctx_free(&m->wctx);
+    wctx_free(&m->wctx);
     *m = {};
 }

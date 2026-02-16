@@ -54,21 +54,6 @@ if [ "${1:-}" = "--all" ]; then
     dl_repo "acestep-v15-base" "ACE-Step/acestep-v15-base"
 fi
 
-# Convert silence_latent.pt -> .bin (raw float32, [T, 64]) for all models
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-PT2BIN="$SCRIPT_DIR/build/pt2bin"
-if [ ! -x "$PT2BIN" ]; then
-    echo "[WARN] pt2bin not built (run ./build.sh first), skipping .pt conversion"
-else
-    for pt in "$DIR"/*/silence_latent.pt; do
-        [ -f "$pt" ] || continue
-        bin="${pt%.pt}.bin"
-        if [ ! -f "$bin" ]; then
-            echo "[Convert] $pt -> .bin"
-            "$PT2BIN" "$pt" "$bin"
-        fi
-    done
-fi
-
 find "$DIR" -name '.cache' -type d -exec rm -rf {} + 2>/dev/null
 echo "[Done] Checkpoints ready in $DIR"
+echo "[Done] Run: python3 convert.py"

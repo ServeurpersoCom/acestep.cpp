@@ -1,12 +1,8 @@
-# Binaries
-dit-vae
-ace-qwen3
-pt2bin
-
-# Generated
 build/
 *.wav
 *.bf16
 
-# Data
+tests/*/
+
 checkpoints/
+models/

@@ -5,7 +5,7 @@
 //   -> detokenizer (per token): embed + special_tokens broadcast + 2L encoder + proj_out
 //   -> [T_25Hz, 64] context_latents (T_25Hz = T_5Hz * 5)
 //
-// Weights live in the DiT model safetensors (prefix "tokenizer." and "detokenizer.")
+// Weights live in the DiT GGUF (prefix "tokenizer." and "detokenizer.")
 // Detokenizer reuses Qwen3 encoder infrastructure from qwen3.h
 
 #pragma once
@@ -61,44 +61,48 @@ struct DetokGGML {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     ggml_backend_sched_t sched;
-    SFWeightCtx wctx;
+    WeightCtx wctx;
 };
 
-// Load from DiT model safetensors
-static bool detok_ggml_load(DetokGGML * m, const char * model_path,
+// Load from DiT GGUF
+static bool detok_ggml_load(DetokGGML * m, const char * gguf_path,
                              ggml_backend_t backend, ggml_backend_t cpu_backend) {
     m->cfg = detok_config();
     m->backend = backend;
     m->cpu_backend = cpu_backend;
 
-    SafeTensors st;
-    if (!safe_load(st, model_path)) {
-        fprintf(stderr, "[Load] FATAL: cannot load %s\n", model_path);
+    GGUFModel gf;
+    if (!gf_load(&gf, gguf_path)) {
+        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
 
     // FSQ(2) + embed(2) + special(1) + 2 layers x 11(22) + norm(1) + proj(2) = 30
-    sf_weight_ctx_init(&m->wctx, 30);
+    wctx_init(&m->wctx, 30);
 
-    m->fsq_proj_w = sf_load_tensor(&m->wctx, st, "tokenizer.quantizer.project_out.weight");
-    m->fsq_proj_b = sf_load_tensor(&m->wctx, st, "tokenizer.quantizer.project_out.bias");
+    m->fsq_proj_w = gf_load_tensor(&m->wctx, gf, "tokenizer.quantizer.project_out.weight");
+    m->fsq_proj_b = gf_load_tensor(&m->wctx, gf, "tokenizer.quantizer.project_out.bias");
 
-    m->embed_w = sf_load_tensor(&m->wctx, st, "detokenizer.embed_tokens.weight");
-    m->embed_b = sf_load_tensor(&m->wctx, st, "detokenizer.embed_tokens.bias");
-    m->norm    = sf_load_tensor(&m->wctx, st, "detokenizer.norm.weight");
-    m->proj_out_w = sf_load_tensor(&m->wctx, st, "detokenizer.proj_out.weight");
-    m->proj_out_b = sf_load_tensor(&m->wctx, st, "detokenizer.proj_out.bias");
+    m->embed_w = gf_load_tensor(&m->wctx, gf, "detokenizer.embed_tokens.weight");
+    m->embed_b = gf_load_tensor(&m->wctx, gf, "detokenizer.embed_tokens.bias");
+    m->norm    = gf_load_tensor(&m->wctx, gf, "detokenizer.norm.weight");
+    m->proj_out_w = gf_load_tensor(&m->wctx, gf, "detokenizer.proj_out.weight");
+    m->proj_out_b = gf_load_tensor(&m->wctx, gf, "detokenizer.proj_out.bias");
 
-    // special_tokens: safetensors [1, 5, 2048] -> ggml [2048, 5, 1], reshape to [2048, 5]
-    m->special_tok = sf_load_tensor(&m->wctx, st, "detokenizer.special_tokens");
+    // special_tokens: GGUF [2048, 5, 1] (ggml order), reshape to [2048, 5]
+    m->special_tok = gf_load_tensor(&m->wctx, gf, "detokenizer.special_tokens");
 
     for (int i = 0; i < m->cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "detokenizer.layers.%d", i);
-        qwen3_load_layer(&m->wctx, st, &m->layers[i], prefix);
+        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix);
     }
 
-    if (!sf_weight_ctx_alloc(&m->wctx, backend)) return false;
+    if (!wctx_alloc(&m->wctx, backend)) {
+        gf_close(&gf);
+        return false;
+    }
+    gf_close(&gf);
 
     // Scheduler
     ggml_backend_t backends[2] = { backend, cpu_backend };
@@ -209,6 +213,6 @@ static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
 // Free
 static void detok_ggml_free(DetokGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
-    sf_weight_ctx_free(&m->wctx);
+    wctx_free(&m->wctx);
     *m = {};
 }

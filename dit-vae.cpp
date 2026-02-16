@@ -68,20 +68,21 @@ static bool write_wav(const char * path, const float * audio, int T_audio, int s
 }
 
 static void print_usage(const char * prog) {
-    fprintf(stderr, "Usage: %s --request <json> --dit <dir> --text-encoder <dir> --vae <dir> [options]\n\n", prog);
-    fprintf(stderr, "Required:\n");
-    fprintf(stderr, "  --request <json>        Request JSON (from ace-qwen3 --request)\n");
-    fprintf(stderr, "  --text-encoder <dir>    Qwen3-Embedding-0.6B directory\n");
-    fprintf(stderr, "  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)\n");
-    fprintf(stderr, "  --vae <dir>             VAE directory\n\n");
-    fprintf(stderr, "Audio:\n");
-    fprintf(stderr, "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n");
-    fprintf(stderr, "  --output <path>         Output WAV (default: output.wav)\n\n");
-    fprintf(stderr, "VAE tiling (memory control):\n");
-    fprintf(stderr, "  --vae-chunk <n>         Latent frames per tile (default: 256)\n");
-    fprintf(stderr, "  --vae-overlap <n>       Overlap frames per side (default: 64)\n\n");
-    fprintf(stderr, "Debug:\n");
-    fprintf(stderr, "  --dump <dir>            Dump intermediate tensors\n");
+    fprintf(stderr,
+        "Usage: %s --request <json> --text-encoder <gguf> --dit <gguf> --vae <gguf> [options]\n\n"
+        "Required:\n"
+        "  --request <json>        Request JSON (from ace-qwen3 --request)\n"
+        "  --text-encoder <gguf>   Text encoder GGUF file\n"
+        "  --dit <gguf>            DiT GGUF file (from convert.py)\n"
+        "  --vae <gguf>            VAE GGUF file\n\n"
+        "Audio:\n"
+        "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)\n"
+        "  --output <path>         Output WAV (default: output.wav)\n\n"
+        "VAE tiling (memory control):\n"
+        "  --vae-chunk <n>         Latent frames per tile (default: 256)\n"
+        "  --vae-overlap <n>       Overlap frames per side (default: 64)\n\n"
+        "Debug:\n"
+        "  --dump <dir>            Dump intermediate tensors\n", prog);
 }
 
 // Parse comma-separated codes string into vector
@@ -101,21 +102,21 @@ static std::vector<int> parse_codes_string(const std::string & s) {
 int main(int argc, char ** argv) {
     if (argc < 2) { print_usage(argv[0]); return 1; }
 
-    const char * request_path = NULL;
-    const char * text_enc_dir = NULL;
-    const char * dit_dir      = NULL;
-    const char * vae_dir      = NULL;
-    const char * wav_path     = "output.wav";
-    const char * dump_dir     = NULL;
-    const char * noise_file   = NULL;
-    int vae_chunk             = 256;
-    int vae_overlap           = 64;
+    const char * request_path  = NULL;
+    const char * text_enc_gguf = NULL;
+    const char * dit_gguf      = NULL;
+    const char * vae_gguf       = NULL;
+    const char * wav_path      = "output.wav";
+    const char * dump_dir      = NULL;
+    const char * noise_file    = NULL;
+    int vae_chunk              = 256;
+    int vae_overlap            = 64;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--request") == 0 && i+1 < argc) request_path = argv[++i];
-        else if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_dir = argv[++i];
-        else if (strcmp(argv[i], "--dit") == 0 && i+1 < argc) dit_dir = argv[++i];
-        else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_dir = argv[++i];
+        else if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_gguf = argv[++i];
+        else if (strcmp(argv[i], "--dit") == 0 && i+1 < argc) dit_gguf = argv[++i];
+        else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_gguf = argv[++i];
         else if (strcmp(argv[i], "--noise-file") == 0 && i+1 < argc) noise_file = argv[++i];
         else if (strcmp(argv[i], "--dump") == 0 && i+1 < argc) dump_dir = argv[++i];
         else if (strcmp(argv[i], "--output") == 0 && i+1 < argc) wav_path = argv[++i];
@@ -133,11 +134,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "ERROR: --request required\n");
         print_usage(argv[0]); return 1;
     }
-    if (!dit_dir) {
+    if (!dit_gguf) {
         fprintf(stderr, "ERROR: --dit required\n");
         print_usage(argv[0]); return 1;
     }
-    if (!text_enc_dir) {
+    if (!text_enc_gguf) {
         fprintf(stderr, "ERROR: --text-encoder required\n");
         print_usage(argv[0]); return 1;
     }
@@ -197,27 +198,37 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[Load] Backend init: %.1f ms\n", timer.ms());
 
     timer.reset();
-    if (!dit_ggml_load(&model, dit_dir, cfg)) {
+    if (!dit_ggml_load(&model, dit_gguf, cfg)) {
         fprintf(stderr, "FATAL: failed to load DiT model\n");
         return 1;
     }
     fprintf(stderr, "[Load] DiT weight load: %.1f ms\n", timer.ms());
 
-    // Detect turbo model from config.json (turbo models don't use CFG)
+    // Read DiT GGUF metadata + silence_latent tensor
+    std::vector<float> silence_full;  // [15000, 64] f32
     {
-        std::string cfg_path = std::string(dit_dir) + "/config.json";
-        FILE * fc = fopen(cfg_path.c_str(), "r");
-        if (fc) {
-            char buf[4096];
-            size_t n = fread(buf, 1, sizeof(buf) - 1, fc);
-            buf[n] = 0;
-            fclose(fc);
-            bool is_turbo = strstr(buf, "\"is_turbo\": true") || strstr(buf, "\"is_turbo\":true");
+        GGUFModel gf = {};
+        if (gf_load(&gf, dit_gguf)) {
+            bool is_turbo = gf_get_bool(gf, "acestep.is_turbo");
             if (is_turbo && guidance_scale > 1.0f) {
                 fprintf(stderr, "[Pipeline] WARNING: turbo model detected, forcing guidance_scale=1.0 (was %.1f)\n",
                         guidance_scale);
                 guidance_scale = 1.0f;
             }
+            const void * sl_data = gf_get_data(gf, "silence_latent");
+            if (sl_data) {
+                silence_full.resize(15000 * 64);
+                memcpy(silence_full.data(), sl_data, 15000 * 64 * sizeof(float));
+                fprintf(stderr, "[Load] silence_latent: [15000, 64] from GGUF\n");
+            } else {
+                fprintf(stderr, "FATAL: silence_latent tensor not found in %s\n", dit_gguf);
+                gf_close(&gf);
+                return 1;
+            }
+            gf_close(&gf);
+        } else {
+            fprintf(stderr, "FATAL: cannot reopen %s for metadata\n", dit_gguf);
+            return 1;
         }
     }
 
@@ -240,18 +251,18 @@ int main(int argc, char ** argv) {
     std::vector<float> enc_hidden;
 
     // Full pipeline (text -> cond -> DiT -> VAE -> WAV)
-    if (text_enc_dir) {
+    if (text_enc_gguf) {
         T = (int)(duration * FRAMES_PER_SECOND);
         // Round up to patch_size multiple
         T = ((T + cfg.patch_size - 1) / cfg.patch_size) * cfg.patch_size;
         S = T / cfg.patch_size;
         fprintf(stderr, "[Pipeline] duration=%.1fs, T=%d, S=%d\n", duration, T, S);
 
-        // 1. Load BPE tokenizer
+        // 1. Load BPE tokenizer from text encoder GGUF
         timer.reset();
         BPETokenizer tok;
-        if (!load_bpe_tokenizer(&tok, text_enc_dir)) {
-            fprintf(stderr, "FATAL: failed to load tokenizer from %s\n", text_enc_dir);
+        if (!load_bpe_from_gguf(&tok, text_enc_gguf)) {
+            fprintf(stderr, "FATAL: failed to load tokenizer from %s\n", text_enc_gguf);
             return 1;
         }
         fprintf(stderr, "[Load] BPE tokenizer: %.1f ms\n", timer.ms());
@@ -283,7 +294,7 @@ int main(int argc, char ** argv) {
         timer.reset();
         Qwen3GGML text_enc = {};
         qwen3_init_backend(&text_enc);
-        if (!qwen3_load_text_encoder(&text_enc, text_enc_dir)) {
+        if (!qwen3_load_text_encoder(&text_enc, text_enc_gguf)) {
             fprintf(stderr, "FATAL: failed to load text encoder\n");
             return 1;
         }
@@ -302,23 +313,25 @@ int main(int argc, char ** argv) {
         timer.reset();
         std::vector<float> lyric_embed(H_text * S_lyric);
 
-        // Get embed_tokens data pointer from text encoder's safetensors
+        // Get embed_tokens data pointer from text encoder GGUF (mmapped bf16)
         // The embed table is bf16 [vocab, 1024] in PyTorch layout (1024 contiguous per token)
         {
-            SafeTensors st_te;
-            if (!safe_load(st_te, text_enc_dir)) {
-                fprintf(stderr, "FATAL: cannot reload text encoder safetensors for lyric embed\n");
+            GGUFModel gf_te = {};
+            if (!gf_load(&gf_te, text_enc_gguf)) {
+                fprintf(stderr, "FATAL: cannot reopen text encoder GGUF for lyric embed\n");
                 return 1;
             }
-            auto it = st_te.tensors.find("embed_tokens.weight");
-            if (it == st_te.tensors.end()) {
-                fprintf(stderr, "FATAL: embed_tokens.weight not found\n");
+            const void * embed_data = gf_get_data(gf_te, "embed_tokens.weight");
+            if (!embed_data) {
+                fprintf(stderr, "FATAL: embed_tokens.weight not found in text encoder GGUF\n");
+                gf_close(&gf_te);
                 return 1;
             }
-            qwen3_cpu_embed_lookup(it->second.data, H_text,
+            qwen3_cpu_embed_lookup(embed_data, H_text,
                                     lyric_ids.data(), S_lyric,
                                     lyric_embed.data());
-            // st_te goes out of scope, munmap happens. lyric_embed is on CPU, so OK.
+            // gf_te goes out of scope after close, lyric_embed is on CPU, so OK.
+            gf_close(&gf_te);
         }
         fprintf(stderr, "[Encode] Lyric vocab lookup (%d tokens): %.1f ms\n", S_lyric, timer.ms());
         debug_dump_2d(&dbg, "lyric_embed", lyric_embed.data(), S_lyric, H_text);
@@ -327,25 +340,16 @@ int main(int argc, char ** argv) {
         timer.reset();
         CondGGML cond = {};
         cond_ggml_init_backend(&cond);
-        if (!cond_ggml_load(&cond, dit_dir)) {
+        if (!cond_ggml_load(&cond, dit_gguf)) {
             fprintf(stderr, "FATAL: failed to load condition encoder\n");
             return 1;
         }
         fprintf(stderr, "[Load] ConditionEncoder: %.1f ms\n", timer.ms());
 
-        // Load silence_latent.bin as timbre input (same as Python reference)
-        // Format: raw f32 [15000, 64], we use first 750 frames (30s @ 25Hz)
+        // Silence latent for timbre input: first 750 frames (30s @ 25Hz)
         const int S_ref = 750;
         std::vector<float> silence_feats(S_ref * 64);
-        {
-            std::string path = std::string(dit_dir) + "/silence_latent.bin";
-            FILE * f = fopen(path.c_str(), "rb");
-            if (!f) { fprintf(stderr, "FATAL: cannot open %s\n", path.c_str()); return 1; }
-            if (fread(silence_feats.data(), sizeof(float), S_ref * 64, f) != (size_t)(S_ref * 64)) {
-                fprintf(stderr, "FATAL: silence_latent.bin too short\n"); fclose(f); return 1;
-            }
-            fclose(f);
-        }
+        memcpy(silence_feats.data(), silence_full.data(), S_ref * 64 * sizeof(float));
 
         timer.reset();
         cond_ggml_forward(&cond, text_hidden.data(), S_text,
@@ -368,24 +372,14 @@ int main(int argc, char ** argv) {
         context.resize(ctx_ch * T);
         noise.resize(Oc * T);
 
-        // Load silence_latent.bin [15000, 64] f32 (always needed for padding)
+        // Silence latent [T, 64] for context padding (from GGUF, already loaded)
         std::vector<float> silence(Oc * T);
-        {
-            std::string slp = std::string(dit_dir) + "/silence_latent.bin";
-            FILE * f = fopen(slp.c_str(), "rb");
-            if (!f) { fprintf(stderr, "FATAL: cannot open %s\n", slp.c_str()); return 1; }
-            fseek(f, 0, SEEK_END);
-            int silence_T = (int)(ftell(f) / (Oc * sizeof(float)));
-            fseek(f, 0, SEEK_SET);
-            if (silence_T < T) {
-                fprintf(stderr, "FATAL: silence_latent too short: %d < %d\n", silence_T, T);
-                fclose(f); return 1;
-            }
-            fread(silence.data(), sizeof(float), Oc * T, f);
-            fclose(f);
-            fprintf(stderr, "[Context] loaded silence_latent: [%d, %d] (using first %d frames)\n",
-                    silence_T, Oc, T);
+        if (T > 15000) {
+            fprintf(stderr, "FATAL: silence_latent too short: 15000 < %d\n", T);
+            return 1;
         }
+        memcpy(silence.data(), silence_full.data(), (size_t)(Oc * T) * sizeof(float));
+        fprintf(stderr, "[Context] silence_latent: [15000, %d] (using first %d frames)\n", Oc, T);
 
         // Decode audio codes if provided, otherwise use silence for all frames
         int decoded_T = 0;
@@ -394,7 +388,7 @@ int main(int argc, char ** argv) {
         if (!codes_vec.empty()) {
             timer.reset();
             DetokGGML detok = {};
-            if (!detok_ggml_load(&detok, dit_dir, model.backend, model.cpu_backend)) {
+            if (!detok_ggml_load(&detok, dit_gguf, model.backend, model.cpu_backend)) {
                 fprintf(stderr, "FATAL: failed to load detokenizer\n"); return 1;
             }
             fprintf(stderr, "[Load] Detokenizer: %.1f ms\n", timer.ms());
@@ -497,12 +491,12 @@ int main(int argc, char ** argv) {
     }
 
     // VAE Decode
-    if (vae_dir) {
+    if (vae_gguf) {
         fprintf(stderr, "[VAE] Decoding...\n");
         VAEGGML vae = {};
 
         timer.reset();
-        vae_ggml_load(&vae, vae_dir);
+        vae_ggml_load(&vae, vae_gguf);
         fprintf(stderr, "[Load] VAE weights: %.1f ms\n", timer.ms());
 
         int T_latent = T;

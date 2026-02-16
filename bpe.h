@@ -12,6 +12,8 @@
 #include <cassert>
 #include <climits>
 
+#include "gguf.h"
+
 // GPT-2 byte-level encoding table
 // Maps byte [0..255] -> Unicode char for BPE vocab keys.
 // Printable ASCII stays as-is, control/space bytes get remapped.
@@ -367,7 +369,7 @@ static bool load_merges(const std::string &path, std::unordered_map<std::string,
     return true;
 }
 
-// Load tokenizer
+// Load tokenizer from directory (vocab.json + merges.txt)
 static bool load_bpe_tokenizer(BPETokenizer *tok, const char *dir) {
     build_byte_encoder(tok->byte2str);
 
@@ -394,6 +396,53 @@ static bool load_bpe_tokenizer(BPETokenizer *tok, const char *dir) {
     }
 
     fprintf(stderr, "[BPE] Loaded: %d vocab, %d merges\n", tok->n_vocab, (int)tok->merges.size());
+    return true;
+}
+
+// Load tokenizer from GGUF KV (tokenizer.ggml.tokens + tokenizer.ggml.merges)
+static bool load_bpe_from_gguf(BPETokenizer *tok, const char *gguf_path) {
+    build_byte_encoder(tok->byte2str);
+
+    struct gguf_init_params gp = { true, NULL };
+    struct gguf_context * ctx = gguf_init_from_file(gguf_path, gp);
+    if (!ctx) {
+        fprintf(stderr, "[BPE] failed to open %s\n", gguf_path);
+        return false;
+    }
+
+    int64_t tok_key = gguf_find_key(ctx, "tokenizer.ggml.tokens");
+    int64_t mrg_key = gguf_find_key(ctx, "tokenizer.ggml.merges");
+    if (tok_key < 0 || mrg_key < 0) {
+        fprintf(stderr, "[BPE] tokenizer not found in %s\n", gguf_path);
+        gguf_free(ctx);
+        return false;
+    }
+
+    int n_tokens = (int)gguf_get_arr_n(ctx, tok_key);
+    int n_merges = (int)gguf_get_arr_n(ctx, mrg_key);
+
+    for (int i = 0; i < n_tokens; i++) {
+        const char * s = gguf_get_arr_str(ctx, tok_key, (size_t)i);
+        tok->vocab[std::string(s)] = i;
+    }
+
+    for (int i = 0; i < n_merges; i++) {
+        const char * s = gguf_get_arr_str(ctx, mrg_key, (size_t)i);
+        tok->merges[std::string(s)] = i;
+    }
+
+    gguf_free(ctx);
+
+    tok->n_vocab = (int)tok->vocab.size();
+    tok->eos_id = 151643;
+
+    tok->id_to_str.resize(tok->n_vocab);
+    for (auto &kv : tok->vocab) {
+        if (kv.second >= 0 && kv.second < tok->n_vocab)
+            tok->id_to_str[kv.second] = kv.first;
+    }
+
+    fprintf(stderr, "[BPE] Loaded from GGUF: %d vocab, %d merges\n", tok->n_vocab, n_merges);
     return true;
 }
 

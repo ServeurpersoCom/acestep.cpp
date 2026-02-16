@@ -9,6 +9,9 @@ if(MSVC)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 endif()
 
+# DiT tensor names can exceed default GGML_MAX_NAME of 64
+add_compile_definitions(GGML_MAX_NAME=128)
+
 # ggml as subdirectory, inherits GGML_CUDA, GGML_METAL, etc. from cmake flags
 add_subdirectory(ggml)
 
@@ -43,6 +46,3 @@ link_ggml_backends(dit-vae)
 # ace-qwen3: LLM inference (CoT + audio codes)
 add_executable(ace-qwen3 ace-qwen3.cpp request.cpp)
 link_ggml_backends(ace-qwen3)
-
-# pt2bin: convert silence_latent.pt -> .bin (raw float32)
-add_executable(pt2bin pt2bin.cpp)

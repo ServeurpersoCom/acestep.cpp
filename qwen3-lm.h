@@ -1,6 +1,6 @@
 // qwen3-lm.h : Qwen3 causal LM with KV cache (GGML)
 // Autoregressive text + audio code generation for ACE-Step
-// Loads safetensors, supports prefill + decode, tied lm_head
+// Loads from GGUF, supports prefill + decode, tied lm_head
 #pragma once
 
 #include "qwen3.h"    // Qwen3Layer, Qwen3Config, layer build helpers
@@ -41,7 +41,7 @@ struct Qwen3LM {
     // lm_head = embed_tokens when tie_embeddings
     Qwen3Layer layers[QW3LM_MAX_LAYERS];
 
-    SFWeightCtx wctx;
+    WeightCtx wctx;
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     ggml_backend_sched_t sched;
@@ -92,8 +92,8 @@ static bool qw3lm_json_bool(const char * json, const char * key, bool fb) {
     return (strncmp(p, "true", 4) == 0);
 }
 
-// Load config from model_dir/config.json
-static Qwen3LMConfig qw3lm_load_config(const char * model_dir) {
+// Load config from GGUF KV metadata (acestep.config_json)
+static Qwen3LMConfig qw3lm_load_config(const GGUFModel & gf) {
     // 0.6B defaults
     Qwen3LMConfig c = {
         /*vocab_size*/        217204,
@@ -109,21 +109,11 @@ static Qwen3LMConfig qw3lm_load_config(const char * model_dir) {
         /*max_seq_len*/       8192,
     };
 
-    char path[512];
-    snprintf(path, sizeof(path), "%s/config.json", model_dir);
-    FILE * f = fopen(path, "r");
-    if (!f) {
-        fprintf(stderr, "[LM-Config] No config.json, using 0.6B defaults\n");
+    const char * j = gf_get_str(gf, "acestep.config_json");
+    if (!j || !j[0]) {
+        fprintf(stderr, "[LM-Config] No acestep.config_json, using 0.6B defaults\n");
         return c;
     }
-    fseek(f, 0, SEEK_END);
-    long len = ftell(f);
-    fseek(f, 0, SEEK_SET);
-    std::vector<char> buf(len + 1);
-    fread(buf.data(), 1, len, f);
-    buf[len] = 0;
-    fclose(f);
-    const char * j = buf.data();
 
     c.vocab_size        = qw3lm_json_int(j, "vocab_size", c.vocab_size);
     c.hidden_size       = qw3lm_json_int(j, "hidden_size", c.hidden_size);
@@ -196,42 +186,43 @@ static void qw3lm_reset_kv(Qwen3LM * m, int kv_set) {
     // No need to zero memory: kv_pos tracks valid range
 }
 
-// Load model weights from safetensors
-static bool qw3lm_load(Qwen3LM * m, const char * model_dir, int max_seq_len, int n_kv_sets) {
+// Load model weights from GGUF
+static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int n_kv_sets) {
     *m = {};
 
-    m->cfg = qw3lm_load_config(model_dir);
+    qw3lm_init_backend(m);
+
+    GGUFModel gf;
+    if (!gf_load(&gf, gguf_path)) {
+        fprintf(stderr, "[LM-Load] FATAL: cannot load %s\n", gguf_path);
+        return false;
+    }
+
+    m->cfg = qw3lm_load_config(gf);
     if (max_seq_len > 0) m->cfg.max_seq_len = max_seq_len;
     const Qwen3LMConfig & c = m->cfg;
 
     if (c.n_layers > QW3LM_MAX_LAYERS) {
         fprintf(stderr, "[LM-Load] FATAL: %d layers > max %d\n", c.n_layers, QW3LM_MAX_LAYERS);
+        gf_close(&gf);
         return false;
     }
-
-    qw3lm_init_backend(m);
-
-    SafeTensors st;
-    if (!safe_load(st, model_dir)) {
-        fprintf(stderr, "[LM-Load] FATAL: cannot load safetensors from %s\n", model_dir);
-        return false;
-    }
-    fprintf(stderr, "[LM-Load] Safetensors: %zu tensors\n", st.tensors.size());
 
     // embed(1) + layers * 11 + final_norm(1) = 2 + n_layers * 11
     int n_tensors = 2 + c.n_layers * 11;
-    sf_weight_ctx_init(&m->wctx, n_tensors);
+    wctx_init(&m->wctx, n_tensors);
 
-    m->embed_tokens = sf_load_tensor(&m->wctx, st, "model.embed_tokens.weight");
-    m->final_norm   = sf_load_tensor(&m->wctx, st, "model.norm.weight");
+    m->embed_tokens = gf_load_tensor(&m->wctx, gf, "model.embed_tokens.weight");
+    m->final_norm   = gf_load_tensor(&m->wctx, gf, "model.norm.weight");
 
     for (int i = 0; i < c.n_layers; i++) {
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "model.layers.%d", i);
-        qwen3_load_layer(&m->wctx, st, &m->layers[i], prefix);
+        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix);
     }
 
-    sf_weight_ctx_alloc(&m->wctx, m->backend);
+    wctx_alloc(&m->wctx, m->backend);
+    gf_close(&gf);
 
     // KV cache
     qw3lm_alloc_kv_cache(m, n_kv_sets > 0 ? n_kv_sets : 1);
@@ -442,6 +433,6 @@ static void qw3lm_free(Qwen3LM * m) {
     if (m->kv_ctx) ggml_free(m->kv_ctx);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
-    sf_weight_ctx_free(&m->wctx);
+    wctx_free(&m->wctx);
     *m = {};
 }

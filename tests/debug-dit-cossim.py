@@ -16,18 +16,18 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT       = os.path.dirname(SCRIPT_DIR)
 GGML_BIN   = os.path.join(ROOT, "build", "dit-vae")
-VAE_DIR    = os.path.join(ROOT, "checkpoints", "vae")
-QWEN_DIR   = os.path.join(ROOT, "checkpoints", "Qwen3-Embedding-0.6B")
+VAE_GGUF   = os.path.join(ROOT, "models", "vae-bf16.gguf")
+QWEN_GGUF  = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-bf16.gguf")
 
 # Per-mode config
 MODE_CONFIG = {
     "turbo": {
-        "ckpt_dir": os.path.join(ROOT, "checkpoints", "acestep-v15-turbo"),
+        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-turbo-bf16.gguf"),
         "config_path": "acestep-v15-turbo",
         "steps": 8, "shift": 3.0, "guidance": 0.0,
     },
     "sft": {
-        "ckpt_dir": os.path.join(ROOT, "checkpoints", "acestep-v15-sft"),
+        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-sft-bf16.gguf"),
         "config_path": "acestep-v15-sft",
         "steps": 50, "shift": 1.0, "guidance": 7.0,
     },
@@ -168,7 +168,9 @@ def run_ggml(dump_dir, caption, lyrics, bpm, duration, seed, cfg, noise_file=Non
     write_request(request_json, caption, lyrics, bpm, duration, seed, cfg)
     cmd = [
         GGML_BIN,
-        "--dit", cfg["ckpt_dir"], "--vae", VAE_DIR, "--text-encoder", QWEN_DIR,
+        "--dit", cfg["gguf_path"],
+        "--text-encoder", QWEN_GGUF,
+        "--vae", VAE_GGUF,
         "--request", request_json,
         "--dump", dump_dir,
         "--output", os.path.join(dump_dir, "output.wav"),

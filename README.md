@@ -40,25 +40,41 @@ BLAS accelerates CPU matrix multiplications. On macOS, Accelerate is
 enabled by default. On Linux, install `libopenblas-dev` and pass
 `-DGGML_BLAS=ON`.
 
-Builds three binaries: `ace-qwen3` (LLM), `dit-vae` (DiT + VAE),
-and `pt2bin` (checkpoint converter).
+Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 
 ## Checkpoints
 
 ```bash
+pip install gguf
 ./checkpoints.sh          # core models (turbo + 4B LM)
 ./checkpoints.sh --all    # all variants (SFT, shift1/3, 0.6B/1.7B LM)
+python3 convert.py        # convert all checkpoints to GGUF (models/)
 ```
 
-Downloads from HuggingFace:
+`checkpoints.sh` downloads raw HuggingFace checkpoints (safetensors,
+config.json, tokenizer files) into `checkpoints/`. These are the source
+material for GGUF conversion, not used at runtime.
 
-- Qwen3-Embedding-0.6B (text encoder, 1.1GB)
-- acestep-v15-turbo (DiT 24L + CondEncoder, 3GB)
-- vae (AutoencoderOobleck, 322MB)
-- acestep-5Hz-lm-0.6B / 1.7B / 4B (autoregressive LLM)
+`convert.py` packs everything into self-contained GGUF files in `models/`.
+Each GGUF bundles model weights with all dependent files so that no external
+file is needed at runtime:
 
-The script also converts `silence_latent.pt` to `.bin` for each DiT
-model using `build/pt2bin` (must build first).
+- BPE tokenizer (from `vocab.json` + `merges.txt`) in LM and text encoder
+- silence_latent (from `silence_latent.pt`, transposed to [15000, 64] f32) in DiT
+- full config.json as KV metadata in all models
+
+Output models:
+
+| GGUF | Arch | Size |
+|------|------|------|
+| Qwen3-Embedding-0.6B-bf16.gguf | text encoder (28L, H=1024) | 1.1 GB |
+| acestep-5Hz-lm-{0.6B,1.7B,4B}-bf16.gguf | Qwen3 causal LM | 1.3 / 3.5 / 8.0 GB |
+| acestep-v15-{turbo,sft,base,...}-bf16.gguf | DiT + CondEncoder (24L, H=2048) | 4.5 GB |
+| vae-bf16.gguf | AutoencoderOobleck | 322 MB |
+
+A direct GGUF downloader (skipping the safetensors intermediate) is planned
+once `convert.py` supports quantized DiT exports (Q4_K, Q5_K, Q8_0).
+VAE will stay in BF16 (small, bandwidth-bound, quality-critical).
 
 ## Quick start
 
@@ -67,37 +83,36 @@ Both binaries communicate through a shared JSON request file.
 and overwrites it. `dit-vae` reads the enriched request and produces audio.
 
 ```bash
-# Write a request
 cat > /tmp/request.json << 'EOF'
 {
     "caption": "Upbeat pop rock with driving guitars and catchy hooks",
     "inference_steps": 8,
-    "guidance_scale": 7.0,
     "shift": 3.0,
     "vocal_language": "fr"
 }
 EOF
 
-# LLM: enrich metadata + generate audio codes
-./build/ace-qwen3 --model checkpoints/acestep-5Hz-lm-4B \
-                  --request /tmp/request.json
+./build/ace-qwen3 \
+    --request /tmp/request.json \
+    --model models/acestep-5Hz-lm-4B-bf16.gguf
 
-# DiT + VAE: generate audio
-./build/dit-vae --request /tmp/request.json \
-                --dit checkpoints/acestep-v15-turbo \
-                --text-encoder checkpoints/Qwen3-Embedding-0.6B \
-                --vae checkpoints/vae \
-                --output output.wav
+./build/dit-vae \
+    --request /tmp/request.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-bf16.gguf \
+    --dit models/acestep-v15-turbo-bf16.gguf \
+    --vae models/vae-bf16.gguf \
+    --output output.wav
 ```
 
 Ready-made examples in `examples/`:
 
 ```bash
-cd examples && bash simple.sh     # caption only, LLM fills everything
-cd examples && bash partial.sh    # caption + lyrics + duration
-cd examples && bash full.sh       # all metadata provided
-cd examples && bash dit-only.sh   # skip LLM, DiT from noise
-cd examples && bash all.sh        # run all examples
+cd examples
+./simple.sh           # caption only, LLM fills everything
+./partial.sh          # caption + lyrics + duration
+./full.sh             # all metadata provided
+./dit-only.sh         # skip LLM, DiT from noise
+./all.sh              # run all examples
 ```
 
 Each example has a `-sft` variant (SFT model, 50 steps, CFG 7.0)
@@ -161,11 +176,11 @@ SFT preset: `inference_steps=32, guidance_scale=7.0, shift=3.0, thinking=false`.
 ## ace-qwen3 reference
 
 ```
-Usage: ace-qwen3 --model <dir> --request <json> [options]
+Usage: ace-qwen3 [options]
 
 Required:
-  --model <dir>          Model directory (safetensors + config.json)
   --request <json>       Request JSON (read, enriched, overwritten)
+  --model <gguf>         Model GGUF file (from convert.py)
 
 Infra:
   --max-seq <N>          KV cache size (default: 8192)
@@ -181,13 +196,13 @@ Three LLM sizes: 0.6B (fast), 1.7B, 4B (best quality).
 ## dit-vae reference
 
 ```
-Usage: dit-vae --request <json> --dit <dir> --text-encoder <dir> --vae <dir> [options]
+Usage: dit-vae [options]
 
 Required:
-  --request <json>        Request JSON (from ace-qwen3 --request)
-  --text-encoder <dir>    Qwen3-Embedding-0.6B directory
-  --dit <dir>             DiT model directory (e.g. acestep-v15-turbo)
-  --vae <dir>             VAE directory
+  --request <json>        Request JSON (from ace-qwen3)
+  --text-encoder <gguf>   Text encoder GGUF file
+  --dit <gguf>            DiT GGUF file (from convert.py)
+  --vae <gguf>            VAE GGUF file
 
 Audio:
   --noise-file <path>     Load noise from bf16 file (Philox RNG dump)

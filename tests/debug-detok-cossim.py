@@ -14,10 +14,10 @@ import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
-GGML_BIN = os.path.join(ROOT, "build", "dit-vae")
-DIT_DIR = os.path.join(ROOT, "checkpoints", "acestep-v15-sft")
-QWEN_DIR = os.path.join(ROOT, "checkpoints", "Qwen3-Embedding-0.6B")
-VAE_DIR = os.path.join(ROOT, "checkpoints", "vae")
+GGML_BIN    = os.path.join(ROOT, "build", "dit-vae")
+DIT_GGUF    = os.path.join(ROOT, "models", "acestep-v15-sft-bf16.gguf")
+QWEN_GGUF   = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-bf16.gguf")
+VAE_GGUF    = os.path.join(ROOT, "models", "vae-bf16.gguf")
 
 FSQ_LEVELS = [8, 8, 8, 5, 5, 5]
 
@@ -65,7 +65,9 @@ def run_ggml(request_path, dump_dir):
     os.makedirs(dump_dir)
     cmd = [
         GGML_BIN,
-        "--dit", DIT_DIR, "--vae", VAE_DIR, "--text-encoder", QWEN_DIR,
+        "--dit", DIT_GGUF,
+        "--text-encoder", QWEN_GGUF,
+        "--vae", VAE_GGUF,
         "--request", request_path,
         "--dump", dump_dir,
         "--output", os.path.join(dump_dir, "output.wav"),

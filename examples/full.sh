@@ -4,9 +4,13 @@ set -eu
 
 cp full.json /tmp/request.json
 
-../build/ace-qwen3 --request /tmp/request.json --model ../checkpoints/acestep-5Hz-lm-4B
+../build/ace-qwen3 \
+    --request /tmp/request.json \
+    --model ../models/acestep-5Hz-lm-4B-bf16.gguf
 
-../build/dit-vae   --request /tmp/request.json --output full.wav \
-    --dit ../checkpoints/acestep-v15-turbo \
-    --text-encoder ../checkpoints/Qwen3-Embedding-0.6B \
-    --vae ../checkpoints/vae
+../build/dit-vae \
+    --request /tmp/request.json \
+    --text-encoder ../models/Qwen3-Embedding-0.6B-bf16.gguf \
+    --dit ../models/acestep-v15-turbo-bf16.gguf \
+    --vae ../models/vae-bf16.gguf \
+    --output full.wav

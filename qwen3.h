@@ -14,7 +14,7 @@
 #include "ggml.h"
 #include "ggml-backend.h"
 #include "backend.h"
-#include "safetensors.h"
+#include "gguf_weights.h"
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -64,7 +64,7 @@ struct Qwen3GGML {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     ggml_backend_sched_t sched;
-    SFWeightCtx wctx;
+    WeightCtx wctx;
 };
 
 // Helpers (pure graph ops, no side effects)
@@ -207,19 +207,19 @@ static struct ggml_tensor * qwen3_build_layers(
 }
 
 // Loading
-static void qwen3_load_layer(SFWeightCtx * wctx, const SafeTensors & st,
+static void qwen3_load_layer(WeightCtx * wctx, const GGUFModel & gf,
                                Qwen3Layer * ly, const std::string & prefix) {
-    ly->input_layernorm      = sf_load_tensor(wctx, st, prefix + ".input_layernorm.weight");
-    ly->post_attn_layernorm  = sf_load_tensor(wctx, st, prefix + ".post_attention_layernorm.weight");
-    ly->q_proj = sf_load_tensor(wctx, st, prefix + ".self_attn.q_proj.weight");
-    ly->k_proj = sf_load_tensor(wctx, st, prefix + ".self_attn.k_proj.weight");
-    ly->v_proj = sf_load_tensor(wctx, st, prefix + ".self_attn.v_proj.weight");
-    ly->o_proj = sf_load_tensor(wctx, st, prefix + ".self_attn.o_proj.weight");
-    ly->q_norm = sf_load_tensor(wctx, st, prefix + ".self_attn.q_norm.weight");
-    ly->k_norm = sf_load_tensor(wctx, st, prefix + ".self_attn.k_norm.weight");
-    ly->gate_proj = sf_load_tensor(wctx, st, prefix + ".mlp.gate_proj.weight");
-    ly->up_proj   = sf_load_tensor(wctx, st, prefix + ".mlp.up_proj.weight");
-    ly->down_proj = sf_load_tensor(wctx, st, prefix + ".mlp.down_proj.weight");
+    ly->input_layernorm      = gf_load_tensor(wctx, gf, prefix + ".input_layernorm.weight");
+    ly->post_attn_layernorm  = gf_load_tensor(wctx, gf, prefix + ".post_attention_layernorm.weight");
+    ly->q_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.q_proj.weight");
+    ly->k_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.k_proj.weight");
+    ly->v_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.v_proj.weight");
+    ly->o_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.o_proj.weight");
+    ly->q_norm = gf_load_tensor(wctx, gf, prefix + ".self_attn.q_norm.weight");
+    ly->k_norm = gf_load_tensor(wctx, gf, prefix + ".self_attn.k_norm.weight");
+    ly->gate_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.gate_proj.weight");
+    ly->up_proj   = gf_load_tensor(wctx, gf, prefix + ".mlp.up_proj.weight");
+    ly->down_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.down_proj.weight");
 }
 
 // Backend init
@@ -230,9 +230,9 @@ static void qwen3_init_backend(Qwen3GGML * m) {
     m->sched = backend_sched_new(bp, 4096);
 }
 
-// Load standalone text encoder (Qwen3-Embedding)
-// model_dir: directory containing model.safetensors + tokenizer files
-static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * model_dir) {
+// Load standalone text encoder (Qwen3-Embedding) from GGUF
+// gguf_path: path to the .gguf file
+static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * gguf_path) {
     m->cfg = {
         /*hidden_size*/       1024,
         /*intermediate_size*/ 3072,
@@ -245,27 +245,30 @@ static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * model_dir) {
         /*is_causal*/         true,
     };
 
-    SafeTensors st;
-    if (!safe_load(st, model_dir)) {
-        fprintf(stderr, "[Load] FATAL: cannot load from %s\n", model_dir);
+    GGUFModel gf;
+    if (!gf_load(&gf, gguf_path)) {
+        fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
-    fprintf(stderr, "[Load] Qwen3 safetensors: %zu tensors\n", st.tensors.size());
 
     // embed(1) + 28 layers * 11 weights + final_norm(1) = 310
     int n_tensors = 1 + m->cfg.n_layers * 11 + 1;
-    sf_weight_ctx_init(&m->wctx, n_tensors);
+    wctx_init(&m->wctx, n_tensors);
 
-    m->embed_tokens = sf_load_tensor(&m->wctx, st, "embed_tokens.weight");
-    m->final_norm   = sf_load_tensor(&m->wctx, st, "norm.weight");
+    m->embed_tokens = gf_load_tensor(&m->wctx, gf, "embed_tokens.weight");
+    m->final_norm   = gf_load_tensor(&m->wctx, gf, "norm.weight");
 
     for (int i = 0; i < m->cfg.n_layers; i++) {
         char prefix[64];
         snprintf(prefix, sizeof(prefix), "layers.%d", i);
-        qwen3_load_layer(&m->wctx, st, &m->layers[i], prefix);
+        qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix);
     }
 
-    if (!sf_weight_ctx_alloc(&m->wctx, m->backend)) return false;
+    if (!wctx_alloc(&m->wctx, m->backend)) {
+        gf_close(&gf);
+        return false;
+    }
+    gf_close(&gf);
 
     fprintf(stderr, "[Load] TextEncoder: %dL, H=%d, Nh=%d/%d\n",
             m->cfg.n_layers, m->cfg.hidden_size, m->cfg.n_heads, m->cfg.n_kv_heads);
@@ -349,7 +352,7 @@ static void qwen3_forward(Qwen3GGML * m, const int * token_ids, int S, float * o
 
 // CPU vocab lookup utility
 // For lyric embedding: look up token IDs in text encoder's embed table (bf16 -> f32)
-// SafeTensors keeps mmapped data alive. Output: [H, S] float (H contiguous per token).
+// GGUF keeps mmapped data alive. Output: [H, S] float (H contiguous per token).
 //
 // embed_data: pointer to bf16 weight data [vocab, H] in PyTorch layout (H contiguous per row)
 // token_ids: [S] int32
@@ -375,6 +378,6 @@ static void qwen3_free(Qwen3GGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
-    sf_weight_ctx_free(&m->wctx);
+    wctx_free(&m->wctx);
     *m = {};
 }
