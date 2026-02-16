@@ -1,0 +1,9 @@
+# Force LF on all platforms
+* text=auto eol=lf
+
+# Binary files — never touch
+*.wav binary
+*.bin binary
+*.bf16 binary
+*.safetensors binary
+*.gguf binary
