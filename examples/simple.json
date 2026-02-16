@@ -1,7 +1,6 @@
 {
     "caption": "Upbeat pop rock anthem with driving electric guitars, punchy drums, catchy vocal hooks, and a singalong chorus",
     "inference_steps": 8,
-    "guidance_scale": 7.0,
     "shift": 3.0,
     "vocal_language": "fr"
 }

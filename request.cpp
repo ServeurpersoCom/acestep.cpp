@@ -29,7 +29,7 @@ void request_init(AceRequest * r) {
     r->lm_negative_prompt = "NO USER INPUT";
     r->audio_codes        = "";
     r->inference_steps    = 8;
-    r->guidance_scale     = 7.0f;
+    r->guidance_scale     = 1.0f;
     r->shift              = 3.0f;
 }
 

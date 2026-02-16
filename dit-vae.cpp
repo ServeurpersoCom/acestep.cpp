@@ -203,6 +203,24 @@ int main(int argc, char ** argv) {
     }
     fprintf(stderr, "[Load] DiT weight load: %.1f ms\n", timer.ms());
 
+    // Detect turbo model from config.json (turbo models don't use CFG)
+    {
+        std::string cfg_path = std::string(dit_dir) + "/config.json";
+        FILE * fc = fopen(cfg_path.c_str(), "r");
+        if (fc) {
+            char buf[4096];
+            size_t n = fread(buf, 1, sizeof(buf) - 1, fc);
+            buf[n] = 0;
+            fclose(fc);
+            bool is_turbo = strstr(buf, "\"is_turbo\": true") || strstr(buf, "\"is_turbo\":true");
+            if (is_turbo && guidance_scale > 1.0f) {
+                fprintf(stderr, "[Pipeline] WARNING: turbo model detected, forcing guidance_scale=1.0 (was %.1f)\n",
+                        guidance_scale);
+                guidance_scale = 1.0f;
+            }
+        }
+    }
+
     int S = 0, enc_S = 0;
     int Oc = cfg.out_channels;      // 64
     int ctx_ch = cfg.in_channels - Oc;  // 128
@@ -239,8 +257,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Load] BPE tokenizer: %.1f ms\n", timer.ms());
 
         // 2. Build formatted prompts (match Python build_text_prompt/build_lyric_prompt)
-        // Python always uses "Fill the audio semantic mask..." for text2music (even with LM codes)
-        const char * instruction = "Fill the audio semantic mask based on the given conditions:";
+        // Text2music only, no cover/repainting mode
+        const char * instruction = "Generate audio semantic tokens based on the given conditions:";
         char metas[512];
         snprintf(metas, sizeof(metas),
                  "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",

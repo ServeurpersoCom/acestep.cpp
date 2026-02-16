@@ -7,6 +7,5 @@
     "timesignature": "4",
     "vocal_language": "fr",
     "inference_steps": 8,
-    "guidance_scale": 7.0,
     "shift": 3.0
 }
