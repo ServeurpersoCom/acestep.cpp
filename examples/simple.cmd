@@ -1,5 +1,6 @@
 @echo off
 
+chcp 65001
 set PATH=%~dp0..\build-msvc\bin\Release;%PATH%
 copy /y simple.json "%TEMP%\request.json"
 
