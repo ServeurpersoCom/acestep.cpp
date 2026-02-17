@@ -6,11 +6,11 @@ cp simple-sft.json /tmp/request.json
 
 ../build/ace-qwen3 \
     --request /tmp/request.json \
-    --model ../models/acestep-5Hz-lm-4B-bf16.gguf
+    --model ../models/acestep-5Hz-lm-4B-Q6_K.gguf
 
 ../build/dit-vae \
     --request /tmp/request.json \
-    --text-encoder ../models/Qwen3-Embedding-0.6B-bf16.gguf \
-    --dit ../models/acestep-v15-sft-bf16.gguf \
-    --vae ../models/vae-bf16.gguf \
+    --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --dit ../models/acestep-v15-sft-Q6_K.gguf \
+    --vae ../models/vae-BF16.gguf \
     --output simple-sft.wav

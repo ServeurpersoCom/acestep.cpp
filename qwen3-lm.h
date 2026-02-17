@@ -36,8 +36,8 @@ struct Qwen3LM {
     Qwen3LMConfig cfg;
 
     // Weights (on backend)
-    struct ggml_tensor * embed_tokens;   // [H, V] bf16
-    struct ggml_tensor * final_norm;     // [H] bf16
+    struct ggml_tensor * embed_tokens;   // [H, V] on GPU (used by mul_mat lm_head)
+    struct ggml_tensor * final_norm;     // [H]
     // lm_head = embed_tokens when tie_embeddings
     Qwen3Layer layers[QW3LM_MAX_LAYERS];
 
@@ -45,6 +45,12 @@ struct Qwen3LM {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     ggml_backend_sched_t sched;
+
+    // CPU-side embed lookup via mmap (avoids ggml_get_rows which lacks
+    // CUDA K-quant support, preventing costly cross-backend tensor copies)
+    GGUFModel gf_mmap;
+    const void * embed_mmap_data;
+    enum ggml_type embed_type;
 
     // KV cache: per-set, per-layer [D, max_seq, Nkv] f16
     struct ggml_context  * kv_ctx;
@@ -222,7 +228,19 @@ static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int
     }
 
     wctx_alloc(&m->wctx, m->backend);
-    gf_close(&gf);
+
+    // Keep mmap alive for CPU embed dequant lookup
+    m->embed_mmap_data = gf_get_data(gf, "model.embed_tokens.weight");
+    m->embed_type = m->embed_tokens->type;
+    if (!m->embed_mmap_data) {
+        fprintf(stderr, "[LM-Load] FATAL: embed_tokens not found in mmap\n");
+        gf_close(&gf);
+        return false;
+    }
+    m->gf_mmap = gf;  // transfer ownership (no gf_close here)
+    fprintf(stderr, "[LM-Load] CPU embed lookup: type=%s, row=%zu bytes\n",
+            ggml_type_name(m->embed_type),
+            ggml_row_size(m->embed_type, c.hidden_size));
 
     // KV cache
     qw3lm_alloc_kv_cache(m, n_kv_sets > 0 ? n_kv_sets : 1);
@@ -330,10 +348,6 @@ static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens,
     struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 16384, false);
 
     // Inputs
-    struct ggml_tensor * t_ids = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
-    ggml_set_name(t_ids, "token_ids");
-    ggml_set_input(t_ids);
-
     struct ggml_tensor * positions = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, n_tokens);
     ggml_set_name(positions, "positions");
     ggml_set_input(positions);
@@ -346,8 +360,14 @@ static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens,
         ggml_set_input(mask);
     }
 
-    // Embedding lookup: [H, V] x [n_tokens] -> [H, n_tokens]
-    struct ggml_tensor * hidden = ggml_get_rows(ctx, m->embed_tokens, t_ids);
+    // Embedding: CPU dequant from mmap, fed as F32 input.
+    // This keeps embed_tokens out of get_rows (no CUDA K-quant support)
+    // and only in mul_mat (lm_head) which has full K-quant CUDA support.
+    struct ggml_tensor * embed_out = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, H, n_tokens);
+    ggml_set_name(embed_out, "embed_out");
+    ggml_set_input(embed_out);
+
+    struct ggml_tensor * hidden = embed_out;
 
     // Transformer layers
     for (int l = 0; l < c.n_layers; l++) {
@@ -389,8 +409,18 @@ static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens,
     // Schedule + allocate
     ggml_backend_sched_alloc_graph(m->sched, gf);
 
-    // Set input data
-    ggml_backend_tensor_set(t_ids, token_ids, 0, n_tokens * sizeof(int));
+    // CPU-side embedding dequantization from mmap
+    {
+        const int64_t row_size = (int64_t)ggml_row_size(m->embed_type, H);
+        const ggml_to_float_t to_float = ggml_get_type_traits(m->embed_type)->to_float;
+        std::vector<float> embed_buf((size_t)H * n_tokens);
+        for (int i = 0; i < n_tokens; i++) {
+            const void * row = (const char *)m->embed_mmap_data + (int64_t)token_ids[i] * row_size;
+            to_float(row, embed_buf.data() + (int64_t)i * H, H);
+        }
+        ggml_backend_tensor_set(embed_out, embed_buf.data(), 0,
+            (size_t)H * n_tokens * sizeof(float));
+    }
 
     {
         std::vector<int> pos_data(n_tokens);
@@ -434,5 +464,6 @@ static void qw3lm_free(Qwen3LM * m) {
     if (m->backend && m->backend != m->cpu_backend) ggml_backend_free(m->backend);
     if (m->cpu_backend) ggml_backend_free(m->cpu_backend);
     wctx_free(&m->wctx);
+    gf_close(&m->gf_mmap);
     *m = {};
 }

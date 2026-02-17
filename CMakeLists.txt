@@ -46,3 +46,7 @@ link_ggml_backends(dit-vae)
 # ace-qwen3: LLM inference (CoT + audio codes)
 add_executable(ace-qwen3 ace-qwen3.cpp request.cpp)
 link_ggml_backends(ace-qwen3)
+
+# quantize: GGUF requantizer (BF16 -> K-quants)
+add_executable(quantize quantize.cpp)
+link_ggml_backends(quantize)

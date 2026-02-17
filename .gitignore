@@ -6,3 +6,4 @@ tests/*/
 
 checkpoints/
 models/
+__pycache__/

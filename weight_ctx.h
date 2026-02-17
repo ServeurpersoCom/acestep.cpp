@@ -47,6 +47,9 @@ static bool wctx_alloc(WeightCtx * wctx, ggml_backend_t backend) {
         fprintf(stderr, "[WeightCtx] FATAL: failed to allocate backend buffer\n");
         return false;
     }
+    // Mark as weight buffer so ggml_backend_sched assigns ops to the correct
+    // backend based on weight location (avoids fallback through expansion).
+    ggml_backend_buffer_set_usage(wctx->buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     size_t total = 0;
     for (auto & pc : wctx->pending) {
         ggml_backend_tensor_set(pc.tensor, pc.src, 0, pc.nbytes);

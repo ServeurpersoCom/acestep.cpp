@@ -67,10 +67,10 @@ Output models:
 
 | GGUF | Arch | Size |
 |------|------|------|
-| Qwen3-Embedding-0.6B-bf16.gguf | text encoder (28L, H=1024) | 1.1 GB |
-| acestep-5Hz-lm-{0.6B,1.7B,4B}-bf16.gguf | Qwen3 causal LM | 1.3 / 3.5 / 8.0 GB |
-| acestep-v15-{turbo,sft,base,...}-bf16.gguf | DiT + CondEncoder (24L, H=2048) | 4.5 GB |
-| vae-bf16.gguf | AutoencoderOobleck | 322 MB |
+| Qwen3-Embedding-0.6B-BF16.gguf | text encoder (28L, H=1024) | 1.1 GB |
+| acestep-5Hz-lm-{0.6B,1.7B,4B}-BF16.gguf | Qwen3 causal LM | 1.3 / 3.5 / 8.0 GB |
+| acestep-v15-{turbo,sft,base,...}-BF16.gguf | DiT + CondEncoder (24L, H=2048) | 4.5 GB |
+| vae-BF16.gguf | AutoencoderOobleck | 322 MB |
 
 A direct GGUF downloader (skipping the safetensors intermediate) is planned
 once `convert.py` supports quantized DiT exports (Q4_K, Q5_K, Q8_0).
@@ -94,13 +94,13 @@ EOF
 
 ./build/ace-qwen3 \
     --request /tmp/request.json \
-    --model models/acestep-5Hz-lm-4B-bf16.gguf
+    --model models/acestep-5Hz-lm-4B-BF16.gguf
 
 ./build/dit-vae \
     --request /tmp/request.json \
-    --text-encoder models/Qwen3-Embedding-0.6B-bf16.gguf \
-    --dit models/acestep-v15-turbo-bf16.gguf \
-    --vae models/vae-bf16.gguf \
+    --text-encoder models/Qwen3-Embedding-0.6B-BF16.gguf \
+    --dit models/acestep-v15-turbo-BF16.gguf \
+    --vae models/vae-BF16.gguf \
     --output output.wav
 ```
 
@@ -205,7 +205,7 @@ Required:
   --vae <gguf>            VAE GGUF file
 
 Audio:
-  --noise-file <path>     Load noise from bf16 file (Philox RNG dump)
+  --noise-file <path>     Load noise from BF16 file (Philox RNG dump)
   --output <path>         Output WAV (default: output.wav)
 
 VAE tiling (memory control):

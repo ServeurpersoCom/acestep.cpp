@@ -270,7 +270,7 @@ def main():
             skipped.append(name)
             continue
 
-        output_path = os.path.join(OUTPUT_DIR, "%s-bf16.gguf" % name)
+        output_path = os.path.join(OUTPUT_DIR, "%s-BF16.gguf" % name)
         if os.path.exists(output_path):
             log("GGUF", "skip %s: %s exists" % (name, os.path.basename(output_path)))
             converted += 1
