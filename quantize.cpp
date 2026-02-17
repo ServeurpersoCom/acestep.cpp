@@ -12,10 +12,16 @@
 #include <cstring>
 #include <string>
 #include <vector>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
+
+#ifdef _WIN32
+#  include <windows.h>
+#  define strcasecmp _stricmp
+#else
+#  include <sys/mman.h>
+#  include <sys/stat.h>
+#  include <fcntl.h>
+#  include <unistd.h>
+#endif
 
 #include "ggml.h"
 #include "gguf.h"
@@ -165,25 +171,51 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[Quantize] %s -> %s (%s)\n", inp_path, out_path, variant->name);
 
     // Mmap input file
+#ifdef _WIN32
+    HANDLE fh = CreateFileA(inp_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+                            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (fh == INVALID_HANDLE_VALUE) {
+        fprintf(stderr, "[Quantize] Failed to open %s\n", inp_path);
+        return 1;
+    }
+    LARGE_INTEGER li;
+    GetFileSizeEx(fh, &li);
+    size_t file_size = (size_t)li.QuadPart;
+    HANDLE mh = CreateFileMappingA(fh, NULL, PAGE_READONLY, 0, 0, NULL);
+    if (!mh) {
+        fprintf(stderr, "[Quantize] CreateFileMapping failed %s\n", inp_path);
+        CloseHandle(fh);
+        return 1;
+    }
+    void * mapping = MapViewOfFile(mh, FILE_MAP_READ, 0, 0, 0);
+    if (!mapping) {
+        fprintf(stderr, "[Quantize] MapViewOfFile failed %s\n", inp_path);
+        CloseHandle(mh); CloseHandle(fh);
+        return 1;
+    }
+#else
     int fd = open(inp_path, O_RDONLY);
     if (fd < 0) { perror("open"); return 1; }
-
     struct stat st;
     fstat(fd, &st);
-
-    void * mapping = mmap(nullptr, (size_t)st.st_size, PROT_READ, MAP_PRIVATE, fd, 0);
+    size_t file_size = (size_t)st.st_size;
+    void * mapping = mmap(nullptr, file_size, PROT_READ, MAP_PRIVATE, fd, 0);
     if (mapping == MAP_FAILED) { perror("mmap"); close(fd); return 1; }
+#endif
 
     // Parse input GGUF
-    struct gguf_init_params params = { .no_alloc = true, .ctx = nullptr };
+    struct gguf_init_params params = { /*no_alloc=*/ true, /*ctx=*/ nullptr };
     struct ggml_context * meta = nullptr;
     params.ctx = &meta;
 
     struct gguf_context * inp = gguf_init_from_file(inp_path, params);
     if (!inp) {
         fprintf(stderr, "[Quantize] Failed to read %s\n", inp_path);
-        munmap(mapping, (size_t)st.st_size);
-        close(fd);
+#ifdef _WIN32
+        UnmapViewOfFile(mapping); CloseHandle(mh); CloseHandle(fh);
+#else
+        munmap(mapping, file_size); close(fd);
+#endif
         return 1;
     }
 
@@ -337,8 +369,14 @@ int main(int argc, char ** argv) {
     gguf_free(out);
     gguf_free(inp);
     ggml_free(meta);
-    munmap(mapping, (size_t)st.st_size);
+#ifdef _WIN32
+    UnmapViewOfFile(mapping);
+    CloseHandle(mh);
+    CloseHandle(fh);
+#else
+    munmap(mapping, file_size);
     close(fd);
+#endif
 
     return 0;
 }
