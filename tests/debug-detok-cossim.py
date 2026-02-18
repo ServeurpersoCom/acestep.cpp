@@ -15,9 +15,9 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
 GGML_BIN    = os.path.join(ROOT, "build", "dit-vae")
-DIT_GGUF    = os.path.join(ROOT, "models", "acestep-v15-sft-bf16.gguf")
-QWEN_GGUF   = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-bf16.gguf")
-VAE_GGUF    = os.path.join(ROOT, "models", "vae-bf16.gguf")
+DIT_GGUF    = os.path.join(ROOT, "models", "acestep-v15-sft-BF16.gguf")
+QWEN_GGUF   = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-BF16.gguf")
+VAE_GGUF    = os.path.join(ROOT, "models", "vae-BF16.gguf")
 
 FSQ_LEVELS = [8, 8, 8, 5, 5, 5]
 

@@ -16,18 +16,18 @@ import numpy as np
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT       = os.path.dirname(SCRIPT_DIR)
 GGML_BIN   = os.path.join(ROOT, "build", "dit-vae")
-VAE_GGUF   = os.path.join(ROOT, "models", "vae-bf16.gguf")
-QWEN_GGUF  = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-bf16.gguf")
+VAE_GGUF   = os.path.join(ROOT, "models", "vae-BF16.gguf")
+QWEN_GGUF  = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-BF16.gguf")
 
 # Per-mode config
 MODE_CONFIG = {
     "turbo": {
-        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-turbo-bf16.gguf"),
+        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-turbo-BF16.gguf"),
         "config_path": "acestep-v15-turbo",
         "steps": 8, "shift": 3.0, "guidance": 0.0,
     },
     "sft": {
-        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-sft-bf16.gguf"),
+        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-sft-BF16.gguf"),
         "config_path": "acestep-v15-sft",
         "steps": 50, "shift": 1.0, "guidance": 7.0,
     },
