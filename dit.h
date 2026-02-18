@@ -113,6 +113,7 @@ struct DiTGGML {
     ggml_backend_t backend;
     ggml_backend_t cpu_backend;
     ggml_backend_sched_t sched;
+    bool use_flash_attn;
 
     // Weight storage
     WeightCtx wctx;
@@ -223,6 +224,9 @@ static void dit_ggml_init_backend(DiTGGML * m) {
     m->backend = bp.backend;
     m->cpu_backend = bp.cpu_backend;
     m->sched = backend_sched_new(bp, 8192);
+    // flash_attn_ext accumulates in F16 on CPU, causing audible drift over
+    // 24 layers x 8 steps. Use F32 manual attention on CPU instead.
+    m->use_flash_attn = (bp.backend != bp.cpu_backend);
 }
 
 // Graph builder: single DiT layer (self-attention block)
@@ -339,6 +343,24 @@ static struct ggml_tensor * dit_ggml_build_temb(
     return temb;  // [H] (used for output adaln)
 }
 
+// F32 manual attention (fallback when flash_attn_ext is not available or imprecise).
+// Q: [D, S, Nh], K: [D, S_kv, Nkv], V: [D, S_kv, Nkv]
+// mask: [S_kv, S] F16 or NULL, scale: 1/sqrt(D)
+// Returns: [D, Nh, S] (same layout as flash_attn_ext output)
+static struct ggml_tensor * dit_attn_f32(
+        struct ggml_context * ctx,
+        struct ggml_tensor * q,
+        struct ggml_tensor * k,
+        struct ggml_tensor * v,
+        struct ggml_tensor * mask,
+        float scale) {
+    struct ggml_tensor * scores = ggml_mul_mat(ctx, k, q);
+    scores = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
+    struct ggml_tensor * vt = ggml_cont(ctx, ggml_transpose(ctx, v));
+    struct ggml_tensor * out = ggml_mul_mat(ctx, vt, scores);
+    return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
+}
+
 // Build self-attention sub-graph for a single layer.
 // norm_sa: [H, S] pre-normalized + AdaLN-modulated hidden state
 // Returns: output [H, S] (self-attention output, NOT added to residual yet)
@@ -401,14 +423,14 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     k = ggml_permute(ctx, k, 0, 2, 1, 3);
     v = ggml_permute(ctx, v, 0, 2, 1, 3);
 
-    // 7) Flash Attention (handles GQA: Nh Q heads, Nkv KV heads)
+    // 7) Attention (flash on GPU, F32 manual on CPU)
     //    Q[D, S, Nh], K[D, S, Nkv], V[D, S, Nkv]
     float scale = 1.0f / sqrtf((float)D);
-    struct ggml_tensor * attn = ggml_flash_attn_ext(ctx, q, k, v,
-                                                     mask,
-                                                     scale, 0.0f, 0.0f);
+    struct ggml_tensor * attn = m->use_flash_attn
+        ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f)
+        : dit_attn_f32(ctx, q, k, v, mask, scale);
 
-    // flash_attn_ext returns [D, Nh, S] (permuted output, see ggml.h)
+    // Both return [D, Nh, S]
     // Reshape directly: [D, Nh, S] -> [D*Nh, S] = [H, S]
     attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
 
@@ -487,9 +509,11 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(
     // no RoPE for cross-attention
     // no mask (attend to all encoder positions)
     float scale = 1.0f / sqrtf((float)D);
-    struct ggml_tensor * attn = ggml_flash_attn_ext(ctx, q, k, v, NULL, scale, 0.0f, 0.0f);
+    struct ggml_tensor * attn = m->use_flash_attn
+        ? ggml_flash_attn_ext(ctx, q, k, v, NULL, scale, 0.0f, 0.0f)
+        : dit_attn_f32(ctx, q, k, v, NULL, scale);
 
-    // flash_attn_ext returns [D, Nh, S] (permuted), reshape directly to [H, S]
+    // Attention output: [D, Nh, S], reshape directly to [H, S]
     attn = ggml_reshape_2d(ctx, attn, Nh * D, S);
 
     // O projection
@@ -1023,14 +1047,12 @@ static void dit_ggml_generate(
             ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
         }
 
-        // For CFG: re-set ALL inputs before each compute.
-        // After graph_compute, GPU copies of inputs may be aliased with intermediates,
-        // but CPU originals survive. The scheduler re-copies CPU->GPU at each compute.
-        if (do_cfg) {
-            ggml_backend_tensor_set(t_enc, enc_hidden_data, 0, H * enc_S * sizeof(float));
-            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * sizeof(int32_t));
-            if (t_mask) ggml_backend_tensor_set(t_mask, mask_data.data(), 0, S * S * sizeof(uint16_t));
-        }
+        // Re-set constant inputs every step. The scheduler may alias input
+        // buffers with intermediates during compute (especially on CPU-only where
+        // there is no separate GPU copy). Without this, step 1+ reads garbage.
+        ggml_backend_tensor_set(t_enc, enc_hidden_data, 0, H * enc_S * sizeof(float));
+        ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * sizeof(int32_t));
+        if (t_mask) ggml_backend_tensor_set(t_mask, mask_data.data(), 0, S * S * sizeof(uint16_t));
 
         // build concat input: [in_ch, T]
         for (int t = 0; t < T; t++) {
