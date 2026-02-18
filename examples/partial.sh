@@ -6,11 +6,11 @@ cp partial.json request.json
 
 ../build/ace-qwen3 \
     --request request.json \
-    --model ../models/acestep-5Hz-lm-4B-Q6_K.gguf
+    --model ../models/acestep-5Hz-lm-4B-Q8_0.gguf
 
 ../build/dit-vae \
     --request request.json \
     --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \
-    --dit ../models/acestep-v15-turbo-Q6_K.gguf \
+    --dit ../models/acestep-v15-turbo-Q8_0.gguf \
     --vae ../models/vae-BF16.gguf \
     --output partial.wav

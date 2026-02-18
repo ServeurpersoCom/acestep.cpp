@@ -162,7 +162,7 @@ All fields with defaults. Only `caption` is required.
     "audio_codes":        "",
     "inference_steps":    8,
     "guidance_scale":     7.0,
-    "shift":              3.0
+    "shift":              1.0
 }
 ```
 
@@ -171,7 +171,7 @@ models or when all metadata is provided). `audio_codes` is populated by
 ace-qwen3 and consumed by dit-vae (comma-separated FSQ token IDs).
 
 Turbo preset: `inference_steps=8, shift=3.0` (no guidance_scale, turbo models don't use CFG).
-SFT preset: `inference_steps=32, guidance_scale=7.0, shift=3.0, thinking=false`.
+Base/SFT preset: `inference_steps=32, guidance_scale=7.0, shift=1.0, thinking=false`.
 
 ## ace-qwen3 reference
 

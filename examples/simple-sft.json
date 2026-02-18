@@ -3,6 +3,6 @@
     "thinking": false,
     "inference_steps": 32,
     "guidance_scale": 7.0,
-    "shift": 3.0,
+    "shift": 1.0,
     "vocal_language": "fr"
 }
