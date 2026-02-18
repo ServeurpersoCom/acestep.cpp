@@ -514,19 +514,20 @@ int main(int argc, char ** argv) {
         }
         fprintf(stderr, "[VAE] Decode: %.1f ms\n", timer.ms());
 
-        // Anti-clipping normalization (matches Python handler.py line 2106-2109)
+        // Peak normalization to -1.0 dB (matches Python audio_utils.py)
         {
             float peak = 0.0f;
-            int n_samples = 2 * T_audio;  // stereo
+            int n_samples = 2 * T_audio;  // stereo interleaved
             for (int i = 0; i < n_samples; i++) {
                 float a = audio[i] < 0 ? -audio[i] : audio[i];
                 if (a > peak) peak = a;
             }
-            if (peak > 1.0f) {
-                float inv_peak = 1.0f / peak;
+            if (peak > 1e-6f) {
+                const float target_amp = powf(10.0f, -1.0f / 20.0f);
+                float gain = target_amp / peak;
                 for (int i = 0; i < n_samples; i++)
-                    audio[i] *= inv_peak;
-                fprintf(stderr, "[VAE] Anti-clip normalize: peak=%.3f -> 1.0\n", peak);
+                    audio[i] *= gain;
+                fprintf(stderr, "[VAE] Peak normalize: %.3f -> -1.0 dB (gain=%.3f)\n", peak, gain);
             }
         }
 
