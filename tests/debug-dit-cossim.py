@@ -1,70 +1,57 @@
 #!/usr/bin/env python3
-"""GGML vs Python cosine similarity comparison for dit-vae pipeline.
+"""GGML vs Python cosine similarity comparison for ACE-Step DiT.
 
-Supports both turbo (no CFG) and SFT (CFG + APG) models.
+Run from tests/ directory. All paths relative to CWD.
 
 Usage:
-    python3 tests/debug-cos-sim.py                        # both modes
-    python3 tests/debug-cos-sim.py --mode turbo            # turbo only
-    python3 tests/debug-cos-sim.py --mode sft              # SFT only
-    python3 tests/debug-cos-sim.py --skip-python           # GGML only
-    python3 tests/debug-cos-sim.py --skip-ggml             # Python only
+    cd tests/
+    ./debug-dit-cossim.py                     # turbo BF16
+    ./debug-dit-cossim.py --quant Q6_K        # turbo Q6_K
+    ./debug-dit-cossim.py --mode sft           # SFT BF16
 """
-import os, sys, subprocess, struct, shutil, argparse
+import os, sys, subprocess, struct, shutil, argparse, json
 import numpy as np
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-ROOT       = os.path.dirname(SCRIPT_DIR)
-GGML_BIN   = os.path.join(ROOT, "build", "dit-vae")
-VAE_GGUF   = os.path.join(ROOT, "models", "vae-BF16.gguf")
-QWEN_GGUF  = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-BF16.gguf")
+SEED = 42
 
-# Per-mode config
 MODE_CONFIG = {
     "turbo": {
-        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-turbo-BF16.gguf"),
+        "gguf_base": "acestep-v15-turbo",
         "config_path": "acestep-v15-turbo",
         "steps": 8, "shift": 3.0, "guidance": 0.0,
     },
     "sft": {
-        "gguf_path": os.path.join(ROOT, "models", "acestep-v15-sft-BF16.gguf"),
+        "gguf_base": "acestep-v15-sft",
         "config_path": "acestep-v15-sft",
         "steps": 50, "shift": 1.0, "guidance": 7.0,
     },
 }
 
-# Defaults
-CAPTION  = "Upbeat pop rock anthem with driving electric guitars, punchy drums, catchy vocal hooks, and a singalong chorus"
-LYRICS   = "[verse]\nWe ride the lightning through the night\nChasing echoes burning bright\n[chorus]\nWe are the fire we are the flame\nNothing will ever be the same"
-BPM      = 120
-DURATION = 120
-SEED     = 42
+def load_request():
+    if not os.path.isfile("request.json"):
+        print("[Error] request.json not found in CWD")
+        sys.exit(1)
+    with open("request.json") as f:
+        req = json.load(f)
+    print(f"[Request] Loaded request.json")
+    return req
 
-def generate_philox_noise(path, seed=42, T=750, C=64):
-    """Generate Philox CUDA RNG noise and save as raw bf16.
-
-    CUDA Philox produces identical raw bytes regardless of logical shape:
-    torch.randn([1, C, T]) == torch.randn([1, T, C]) in raw memory.
-    File: 48000 bf16 values.  C++ reads linearly as [T, C] time-major,
-    matching Python handler convention.
-    """
+def generate_philox_noise(path, T, C=64):
     try:
         import torch
     except ImportError:
         print("[Noise] ERROR: PyTorch required")
         return False
     if not torch.cuda.is_available():
-        print("[Noise] ERROR: CUDA required for Philox RNG (generates different values on CPU)")
+        print("[Noise] ERROR: CUDA required for Philox RNG")
         return False
-    gen = torch.Generator(device="cuda").manual_seed(seed)
+    gen = torch.Generator(device="cuda").manual_seed(SEED)
     noise = torch.randn([1, C, T], generator=gen, device="cuda", dtype=torch.bfloat16)
     raw = noise[0].cpu().contiguous().view(torch.uint8).numpy().tobytes()
     with open(path, "wb") as f:
         f.write(raw)
-    print(f"[Noise] Generated {path}: [{T}, {C}] bf16 ({len(raw)} bytes, seed={seed})")
+    print(f"[Noise] Generated {path}: [{T}, {C}] bf16 ({len(raw)} bytes)")
     return True
-
-# binary dump I/O (matches C++ format: [ndim i32] [shape i32...] [data f32])
 
 def save_dump(path, data):
     import torch
@@ -95,40 +82,21 @@ def _cos_flat(a, b):
     return float(np.dot(a, b) / d) if d > 1e-10 else 0.0
 
 def cos(a, b, shape_a=None, shape_b=None):
-    """Cosine similarity with automatic layout detection.
-
-    GGML dumps with header [ne[0], ne[1]] where ne[0] is contiguous (Fortran-order).
-    Python/numpy uses C-order where last dim is contiguous.
-    For 2D: ggml [ne0, ne1] data should be reshaped as [ne1, ne0] in C-order.
-    We try all layout combinations and return the best match.
-    """
-    c_flat = _cos_flat(a.flatten(), b.flatten())
     if shape_a and shape_b and len(shape_a) == 2 and len(shape_b) == 2:
-        total_a, total_b = shape_a[0] * shape_a[1], shape_b[0] * shape_b[1]
-        n = min(len(a), len(b), total_a, total_b)
-        if total_a == total_b and n == total_a:
-            best = c_flat
-            try:
-                rb = b[:n].reshape(shape_b)
-                # Try: a is ggml (reversed dims), b is numpy (C-order)
-                ra_rev = a[:n].reshape(shape_a[1], shape_a[0])  # ggml: [ne1, ne0]
-                best = max(best, _cos_flat(ra_rev.T.flatten(), rb.flatten()))
-                # Try: b is ggml (reversed dims), a is numpy (C-order)
-                ra = a[:n].reshape(shape_a)
-                rb_rev = b[:n].reshape(shape_b[1], shape_b[0])
-                best = max(best, _cos_flat(ra.flatten(), rb_rev.T.flatten()))
-            except (ValueError, RuntimeError):
-                pass
-            return best
-    return c_flat
+        if shape_a[0] == shape_b[1] and shape_a[1] == shape_b[0]:
+            ra = a.reshape(shape_a)
+            rb = b.reshape(shape_b)
+            c_normal = _cos_flat(ra.flatten(), rb.flatten())
+            c_transposed = _cos_flat(ra.T.flatten(), rb.flatten())
+            if c_transposed > c_normal:
+                return c_transposed
+            return c_normal
+    return _cos_flat(a, b)
 
-def log_spectral_cos(a, b, n_bands=80):
-    n = min(len(a), len(b)) // 2
-    if n < 1024:
-        return 0.0
+def log_spectral_cos(a, b, sr=48000, n_bands=128):
+    n = min(len(a), len(b))
     sa = np.abs(np.fft.rfft(a[:n*2]))
     sb = np.abs(np.fft.rfft(b[:n*2]))
-    # Mel-like log bands
     edges = np.logspace(np.log10(1), np.log10(len(sa)), n_bands + 1).astype(int)
     ba, bb = np.zeros(n_bands), np.zeros(n_bands)
     for i in range(n_bands):
@@ -138,46 +106,44 @@ def log_spectral_cos(a, b, n_bands=80):
         bb[i] = np.log1p(sb[lo:hi].mean())
     return _cos_flat(ba, bb)
 
-# metadata helpers
-
-def write_request(path, caption, lyrics, bpm, duration, seed, cfg):
-    import json
-    req = {
-        "caption": caption,
-        "lyrics": lyrics,
-        "bpm": bpm,
-        "duration": duration,
-        "seed": seed,
-        "inference_steps": cfg["steps"],
-        "guidance_scale": cfg["guidance"],
-        "shift": cfg["shift"],
-        "vocal_language": "en",
-        "thinking": False,
-    }
-    with open(path, "w") as f:
-        json.dump(req, f, indent=4)
+def codes_to_python_format(codes_csv):
+    """Convert '43316,18426,...' to '<|audio_code_43316|><|audio_code_18426|>...'"""
+    if not codes_csv:
+        return ""
+    return "".join(f"<|audio_code_{c.strip()}|>" for c in codes_csv.split(",") if c.strip())
 
 # GGML runner
 
-def run_ggml(dump_dir, caption, lyrics, bpm, duration, seed, cfg, noise_file=None):
-    if not os.path.isfile(GGML_BIN):
-        print(f"[GGML] binary not found: {GGML_BIN}")
+def run_ggml(dump_dir, req, cfg, gguf_path, noise_file):
+    ggml_bin = "../build/dit-vae"
+    if not os.path.isfile(ggml_bin):
+        print(f"[GGML] binary not found: {ggml_bin}")
         return False
     os.makedirs(dump_dir, exist_ok=True)
+
+    # Build request from input, override mode-specific params
+    merged = dict(req)
+    merged["seed"] = SEED
+    merged["inference_steps"] = cfg["steps"]
+    merged["guidance_scale"] = cfg["guidance"]
+    merged["shift"] = cfg["shift"]
+    merged["thinking"] = False
     request_json = os.path.join(dump_dir, "request.json")
-    write_request(request_json, caption, lyrics, bpm, duration, seed, cfg)
+    with open(request_json, "w") as f:
+        json.dump(merged, f, indent=4)
+
     cmd = [
-        GGML_BIN,
-        "--dit", cfg["gguf_path"],
-        "--text-encoder", QWEN_GGUF,
-        "--vae", VAE_GGUF,
+        ggml_bin,
+        "--dit", gguf_path,
+        "--text-encoder", "../models/Qwen3-Embedding-0.6B-BF16.gguf",
+        "--vae", "../models/vae-BF16.gguf",
         "--request", request_json,
         "--dump", dump_dir,
         "--output", os.path.join(dump_dir, "output.wav"),
     ]
     if noise_file:
         cmd += ["--noise-file", noise_file]
-    print(f"[GGML] Running {cfg['config_path']}...")
+    print(f"[GGML] Running {os.path.basename(gguf_path)}...")
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     n = len([f for f in os.listdir(dump_dir) if f.endswith(".bin")])
     if r.returncode != 0:
@@ -193,25 +159,29 @@ def run_ggml(dump_dir, caption, lyrics, bpm, duration, seed, cfg, noise_file=Non
 
 # Python runner
 
-def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
-    sys.path.insert(0, os.path.join(ROOT, "..", "ACE-Step-1.5"))
+def run_python(dump_dir, req, cfg):
+    sys.path.insert(0, "../../ACE-Step-1.5")
     from acestep.handler import AceStepHandler
 
     os.makedirs(dump_dir, exist_ok=True)
     has_cfg = cfg["guidance"] > 0
 
+    caption  = req["caption"]
+    lyrics   = req.get("lyrics", "")
+    bpm      = req.get("bpm", 0)
+    duration = req["duration"]
+    language = req.get("vocal_language", "en")
+
     print(f"[Python] Initializing {cfg['config_path']}...")
     handler = AceStepHandler()
     handler.initialize_service(
-        project_root=os.path.join(ROOT, "checkpoints"),
+        project_root="../checkpoints",
         config_path=cfg["config_path"],
         device="cuda",
     )
     model = handler.model
-
     _dumps = {}
 
-    # Hook 1: text encoder
     orig_text = handler.infer_text_embeddings
     def hooked_text(*a, **kw):
         r = orig_text(*a, **kw)
@@ -219,7 +189,6 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         return r
     handler.infer_text_embeddings = hooked_text
 
-    # Hook 2: lyric embeddings
     orig_lyric = handler.infer_lyric_embeddings
     def hooked_lyric(*a, **kw):
         r = orig_lyric(*a, **kw)
@@ -227,7 +196,6 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         return r
     handler.infer_lyric_embeddings = hooked_lyric
 
-    # Hook 3: prepare_condition -> enc_hidden, context
     orig_cond = model.prepare_condition
     def hooked_prepare(*a, **kw):
         r = orig_cond(*a, **kw)
@@ -240,7 +208,6 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         return r
     model.prepare_condition = hooked_prepare
 
-    # Hook 4: noise
     orig_noise = model.prepare_noise
     def hooked_noise(*a, **kw):
         n = orig_noise(*a, **kw)
@@ -248,7 +215,6 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         return n
     model.prepare_noise = hooked_noise
 
-    # Hook 5: decoder.forward -> per-step vt and xt
     decoder = model.decoder
     _step = [0]
     orig_fwd = decoder.forward
@@ -270,7 +236,6 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         return out
     decoder.forward = hooked_fwd
 
-    # Hook 5b (SFT only): APG post-guidance vt
     if has_cfg:
         gen_globals = model.generate_audio.__func__.__globals__
         _apg_step = [0]
@@ -283,9 +248,7 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
         gen_globals['apg_forward'] = hooked_apg
         _dumps["null_condition_emb"] = model.null_condition_emb.squeeze().clone()
 
-    # Hook 6: layer intermediates at step 0
     _hooks = []
-
     def make_hook(name, step_filter=0):
         def hook(module, input, output):
             if _step[0] == step_filter:
@@ -298,31 +261,32 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
     _hooks.append(decoder.layers[0].register_forward_hook(make_hook("hidden_after_layer0")))
     _hooks.append(decoder.layers[0].self_attn.register_forward_hook(make_hook("layer0_sa_output")))
     for li in [6, 12, 18, 23]:
-        if li < len(decoder.layers):
-            _hooks.append(decoder.layers[li].register_forward_hook(make_hook(f"hidden_after_layer{li}")))
+        _hooks.append(decoder.layers[li].register_forward_hook(make_hook(f"hidden_after_layer{li}")))
+
     _hooks.append(decoder.time_embed.register_forward_hook(make_hook("temb_t")))
+
+    # Hook detokenizer (runs during prepare_condition, before diffusion)
+    if hasattr(model, 'detokenizer'):
+        def detok_hook(module, input, output):
+            _dumps["detok_output"] = output[0].clone().float()
+        _hooks.append(model.detokenizer.register_forward_hook(detok_hook))
 
     gen_kwargs = dict(
         captions=caption, lyrics=lyrics, bpm=bpm,
-        audio_duration=float(duration), seed=str(seed),
+        audio_duration=float(duration), seed=str(SEED),
         use_random_seed=False, batch_size=1,
         inference_steps=cfg["steps"], shift=cfg["shift"],
-        infer_method="ode", vocal_language="en",
-        # Match GGML instruction (production always uses "Generate...")
-        instruction="Generate audio semantic tokens based on the given conditions:",
+        guidance_scale=cfg["guidance"],
+        infer_method="ode", vocal_language=language,
+        audio_code_string=codes_to_python_format(req.get("audio_codes", "")),
+        key_scale=req.get("keyscale", ""),
+        time_signature=req.get("timesignature", ""),
     )
 
-    # "Generate..." instruction triggers is_cover=True in Python even without codes,
-    # which round-trips silence through FSQ and changes src_latents.
-    # GGML uses raw silence_latent.bin directly. Patch to match.
-    orig_build = handler._build_chunk_masks_and_src_latents
-    def _patched_build(*a, **kw):
-        import torch
-        chunk_masks, spans, is_covers, src_latents = orig_build(*a, **kw)
-        return chunk_masks, spans, torch.zeros_like(is_covers), src_latents
-    handler._build_chunk_masks_and_src_latents = _patched_build
-    if has_cfg:
-        gen_kwargs["guidance_scale"] = cfg["guidance"]
+    # When audio_codes are present, Python auto-sets is_covers=True via
+    # conditioning_masks.py (instruction match + has_code_hint).
+    # This makes it use decoded codes as context, matching C++ behavior.
+    # Do NOT patch is_covers to False, that would use silence instead of codes.
 
     tag = f"{cfg['config_path']}, {cfg['steps']} steps"
     if has_cfg:
@@ -344,8 +308,7 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
     audios = result.get("audios", [])
     if audios and "tensor" in audios[0]:
         _dumps["vae_audio"] = audios[0]["tensor"].squeeze(0)
-        # Save Python WAV for listening comparison
-        audio_np = audios[0]["tensor"].squeeze(0).cpu().numpy()  # [2, N]
+        audio_np = audios[0]["tensor"].squeeze(0).cpu().numpy()
         wav_path = os.path.join(dump_dir, "output.wav")
         import wave
         n_samples = audio_np.shape[1]
@@ -369,28 +332,22 @@ def run_python(dump_dir, caption, lyrics, bpm, duration, seed, cfg):
 # comparison
 
 def build_stages(cfg):
-    """Build stage list dynamically based on mode config."""
     has_cfg = cfg["guidance"] > 0
     steps = cfg["steps"]
-
     stages = [
-        "text_hidden", "lyric_embed", "enc_hidden", "context", "noise",
+        "text_hidden", "lyric_embed", "enc_hidden", "detok_output", "context", "noise",
         "temb_t", "hidden_after_proj_in", "enc_after_cond_emb",
         "layer0_sa_output", "hidden_after_layer0",
         "hidden_after_layer6", "hidden_after_layer12", "hidden_after_layer18", "hidden_after_layer23",
     ]
-
     if has_cfg:
         stages += ["null_condition_emb", "null_enc_hidden"]
-
-    # Step dumps: all steps for turbo, sampled for SFT
     if steps <= 8:
         step_indices = list(range(steps))
     else:
         step_indices = list(range(0, steps, 5))
         if (steps - 1) not in step_indices:
             step_indices.append(steps - 1)
-
     for si in step_indices:
         if has_cfg:
             stages.append(f"dit_step{si}_vt_cond")
@@ -399,7 +356,6 @@ def build_stages(cfg):
         stages.append(f"dit_step{si}_vt")
         if si < steps - 1:
             stages.append(f"dit_step{si}_xt")
-
     stages += ["dit_x0", "vae_audio"]
     return stages
 
@@ -419,10 +375,8 @@ def compare(dirs, stages, tag):
             f = os.path.join(d, stage + ".bin")
             if os.path.isfile(f):
                 data[label] = load_dump(f)
-
         if not data:
             continue
-
         print(f"  {stage:30s}", end="")
         for a, b in pairs:
             if a in data and b in data:
@@ -434,7 +388,6 @@ def compare(dirs, stages, tag):
                 print(f" {'N/A':>14s}", end="")
         print()
 
-    # VAE audio spectral comparison
     vae_data = {}
     for label, d in dirs.items():
         f = os.path.join(d, "vae_audio.bin")
@@ -450,7 +403,6 @@ def compare(dirs, stages, tag):
                 print(f" {'N/A':>14s}", end="")
         print()
 
-    # Error growth analysis on xt
     if len(pairs) > 0:
         a_label, b_label = pairs[0]
         a_dir, b_dir = dirs[a_label], dirs[b_label]
@@ -489,72 +441,61 @@ def compare(dirs, stages, tag):
 
 # main
 
-def run_mode(mode_name, cfg, args, noise_file):
-    """Run a single mode (turbo or sft). Returns True if comparison succeeded."""
-    dump_ggml   = os.path.join(SCRIPT_DIR, f"ggml-{mode_name}")
-    dump_python = os.path.join(SCRIPT_DIR, f"python-{mode_name}")
-    dirs = {}
+def run_mode(mode_name, cfg, req, gguf_path, noise_file):
+    dump_ggml   = f"ggml-{mode_name}"
+    dump_python = f"python-{mode_name}"
 
     tag = mode_name.upper() if mode_name == "sft" else mode_name.capitalize()
     cfg_str = f"steps={cfg['steps']}, shift={cfg['shift']}"
     if cfg['guidance'] > 0:
         cfg_str += f", CFG={cfg['guidance']}"
-    print(f"[{tag}] {cfg_str}")
+    print(f"[{tag}] {cfg_str} | {os.path.basename(gguf_path)}")
 
-    if not args.skip_ggml:
-        if os.path.isdir(dump_ggml):
-            shutil.rmtree(dump_ggml)
-        if run_ggml(dump_ggml, args.caption, args.lyrics,
-                    args.bpm, args.duration, args.seed, cfg,
-                    noise_file=noise_file):
-            dirs["GGML"] = dump_ggml
+    if os.path.isdir(dump_ggml):
+        shutil.rmtree(dump_ggml)
+    if not run_ggml(dump_ggml, req, cfg, gguf_path, noise_file):
+        print(f"[{tag}] GGML failed")
+        return False
 
-    if not args.skip_python:
-        if os.path.isdir(dump_python):
-            shutil.rmtree(dump_python)
-        if run_python(dump_python, args.caption, args.lyrics, args.bpm,
-                      args.duration, args.seed, cfg):
-            dirs["Python"] = dump_python
-
-    if len(dirs) < 2:
-        print(f"[{tag}] Need both backends, got {len(dirs)}: {list(dirs.keys())}")
+    if os.path.isdir(dump_python):
+        shutil.rmtree(dump_python)
+    if not run_python(dump_python, req, cfg):
+        print(f"[{tag}] Python failed")
         return False
 
     stages = build_stages(cfg)
-    compare(dirs, stages, tag)
+    compare({"GGML": dump_ggml, "Python": dump_python}, stages, tag)
     return True
 
 def main():
     ap = argparse.ArgumentParser(description="GGML vs Python cosine similarity comparison")
-    ap.add_argument("--mode",        default="both", choices=["turbo", "sft", "both"],
-                    help="which model(s) to test (default: both)")
-    ap.add_argument("--skip-ggml",   action="store_true", help="skip GGML backend")
-    ap.add_argument("--skip-python", action="store_true", help="skip Python backend")
-    ap.add_argument("--caption",     default=CAPTION)
-    ap.add_argument("--lyrics",      default=LYRICS)
-    ap.add_argument("--bpm",         type=int, default=BPM)
-    ap.add_argument("--duration",    type=int, default=DURATION)
-    ap.add_argument("--seed",        type=int, default=SEED)
-    ap.add_argument("--noise-file",  default=None,
-                    help="bf16 noise file for GGML (default: auto for seed 42)")
+    ap.add_argument("--mode", default="turbo", choices=["turbo", "sft", "both"],
+                    help="which model(s) to test (default: turbo)")
+    ap.add_argument("--quant", default="BF16",
+                    help="quantization suffix for GGUF (default: BF16, e.g. Q6_K, Q8_0)")
     args = ap.parse_args()
 
-    # Noise file
-    noise_file = args.noise_file
-    T_noise = args.duration * 25  # must match Python's torch.randn([1, 64, T])
-    if noise_file is None and args.seed == 42:
-        auto = os.path.join(SCRIPT_DIR, "rng_philox_seed42.bf16")
-        print(f"[Noise] Generating T={T_noise} (duration={args.duration}s)...")
-        if not generate_philox_noise(auto, seed=42, T=T_noise):
-            print("[Noise] WARNING: cannot generate, GGML will use mt19937")
-        if os.path.isfile(auto):
-            noise_file = auto
+    req = load_request()
+    duration = req["duration"]
 
-    # Run selected modes
+    # Noise
+    T_noise = int(duration) * 25
+    noise_file = "rng_philox_seed42.bf16"
+    print(f"[Noise] Generating T={T_noise} (duration={duration}s)...")
+    if not generate_philox_noise(noise_file, T=T_noise):
+        print("[Noise] WARNING: cannot generate, GGML will use mt19937")
+        noise_file = None
+
     modes = ["turbo", "sft"] if args.mode == "both" else [args.mode]
     ok = True
     for m in modes:
-        if not run_mode(m, MODE_CONFIG[m], args, noise_file):
+        cfg = MODE_CONFIG[m]
+        gguf_path = f"../models/{cfg['gguf_base']}-{args.quant}.gguf"
+        if not os.path.isfile(gguf_path):
+            print(f"[Error] GGUF not found: {gguf_path}")
+            ok = False
+            continue
+        if not run_mode(m, cfg, req, gguf_path, noise_file):
             ok = False
 
     return 0 if ok else 1
