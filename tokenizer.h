@@ -191,7 +191,10 @@ static int detok_ggml_decode(DetokGGML * m, const int * codes, int T_5Hz,
     struct ggml_tensor * t_out = ggml_graph_get_tensor(gf, "detok_out");
 
     // Step 3: loop over T_5Hz tokens
+    struct ggml_tensor * t_pos = ggml_graph_get_tensor(gf, "detok_pos");
     for (int g = 0; g < T_5Hz; g++) {
+        // Re-set positions every iteration (allocator may share buffer with intermediates)
+        ggml_backend_tensor_set(t_pos, pos_data, 0, P * sizeof(int));
         ggml_backend_tensor_set(t_in, fsq_decoded.data() + g * FSQ_NDIMS,
                                 0, FSQ_NDIMS * sizeof(float));
         ggml_backend_sched_graph_compute(m->sched, gf);
