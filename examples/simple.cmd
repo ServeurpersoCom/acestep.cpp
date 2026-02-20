@@ -11,7 +11,6 @@ set PATH=%~dp0..\build-msvc\bin\Release;%PATH%
     --request simple0.json ^
     --text-encoder ..\models\Qwen3-Embedding-0.6B-Q8_0.gguf ^
     --dit ..\models\acestep-v15-turbo-Q6_K.gguf ^
-    --vae ..\models\vae-BF16.gguf ^
-    --output simple.wav
+    --vae ..\models\vae-BF16.gguf
 
 pause

@@ -139,7 +139,6 @@ def run_ggml(dump_dir, req, cfg, gguf_path, noise_file):
         "--vae", "../models/vae-BF16.gguf",
         "--request", request_json,
         "--dump", dump_dir,
-        "--output", os.path.join(dump_dir, "output.wav"),
     ]
     if noise_file:
         cmd += ["--noise-file", noise_file]

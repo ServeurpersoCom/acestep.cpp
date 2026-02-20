@@ -70,7 +70,6 @@ def run_ggml(request_path, dump_dir):
         "--vae", VAE_GGUF,
         "--request", request_path,
         "--dump", dump_dir,
-        "--output", os.path.join(dump_dir, "output.wav"),
     ]
     print(f"[GGML] Running dit-vae...")
     r = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
