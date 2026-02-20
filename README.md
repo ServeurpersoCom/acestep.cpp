@@ -307,10 +307,11 @@ python3 debug-dit-cossim.py       # DiT: per-layer cossim GGML vs Python (turbo/
 
 ## Known issues
 
-Uses a patched GGML fork (submodule). Two fixes for long-sequence audio:
+Uses a patched GGML fork (submodule). Three fixes for long-sequence audio:
 
-- im2col.cu gridDim.y overflow when T > 65535 patches,
-- conv_transpose_1d.cu O(T_in) brute-force loop too slow for VAE upsampling.
+- **CUDA**: im2col.cu gridDim.y overflow when T > 65535 patches (Metal unaffected, grid dims up to 2^32).
+- **CUDA**: conv_transpose_1d.cu O(T_in) brute-force loop too slow for VAE upsampling.
+- **Metal**: conv_transpose_1d same O(T_in) brute-force loop, replaced with bounded range (matching CUDA).
 
 TODO: verify if these are still needed on latest GGML and submit upstream PRs.
 
