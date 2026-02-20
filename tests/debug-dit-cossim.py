@@ -28,12 +28,12 @@ MODE_CONFIG = {
 }
 
 def load_request():
-    if not os.path.isfile("request.json"):
-        print("[Error] request.json not found in CWD")
+    if not os.path.isfile("request0.json"):
+        print("[Error] request0.json not found in CWD")
         sys.exit(1)
-    with open("request.json") as f:
+    with open("request0.json") as f:
         req = json.load(f)
-    print(f"[Request] Loaded request.json")
+    print(f"[Request] Loaded request0.json")
     return req
 
 def generate_philox_noise(path, T, C=64):
@@ -128,7 +128,7 @@ def run_ggml(dump_dir, req, cfg, gguf_path, noise_file):
     merged["guidance_scale"] = cfg["guidance"]
     merged["shift"] = cfg["shift"]
     merged["thinking"] = False
-    request_json = os.path.join(dump_dir, "request.json")
+    request_json = os.path.join(dump_dir, "request0.json")
     with open(request_json, "w") as f:
         json.dump(merged, f, indent=4)
 
@@ -175,7 +175,7 @@ def run_python(dump_dir, req, cfg):
     print(f"[Python] Initializing {cfg['config_path']}...")
     handler = AceStepHandler()
     handler.initialize_service(
-        project_root="../checkpoints",
+        project_root="..",
         config_path=cfg["config_path"],
         device="cuda",
     )
