@@ -88,33 +88,33 @@ EOF
     --request /tmp/request.json \
     --model models/acestep-5Hz-lm-4B-BF16.gguf
 
-# DiT+VAE: request0.json -> output.wav
+# DiT+VAE: request0.json -> request00.wav
 ./build/dit-vae \
     --request /tmp/request0.json \
     --text-encoder models/Qwen3-Embedding-0.6B-BF16.gguf \
     --dit models/acestep-v15-turbo-BF16.gguf \
     --vae models/vae-BF16.gguf
-# -> request00.wav
 ```
 
 Generate multiple songs at once with `--batch`:
 
 ```bash
-# 2 LM variations x 2 DiT variations = 4 WAVs total
+# LLM: 2 LM variations x 2 DiT variations = 4 WAVs total
+# -> request0.json, request1.json (different lyrics/codes, seeds auto+0, auto+1)
 ./build/ace-qwen3 \
     --request /tmp/request.json \
     --model models/acestep-5Hz-lm-4B-BF16.gguf \
     --batch 2
-# -> request0.json, request1.json (different lyrics/codes, seeds auto+0, auto+1)
 
+# DiT+VAE: (2 DiT variations of LM output 1 and 2)
+# -> request0.json -> request00.wav, request01.wav
+# -> request1.json -> request10.wav, request11.wav
 ./build/dit-vae \
     --request /tmp/request0.json /tmp/request1.json \
     --text-encoder models/Qwen3-Embedding-0.6B-BF16.gguf \
     --dit models/acestep-v15-turbo-BF16.gguf \
     --vae models/vae-BF16.gguf \
     --batch 2
-# -> request00.wav, request01.wav  (2 DiT variations of LM output 0)
-#    request10.wav, request11.wav  (2 DiT variations of LM output 1)
 ```
 
 The LM decides song structure (lyrics, melody, rhythm via audio codes), so
