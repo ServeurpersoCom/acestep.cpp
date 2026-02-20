@@ -178,9 +178,6 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Quantize] Failed to open %s\n", inp_path);
         return 1;
     }
-    LARGE_INTEGER li;
-    GetFileSizeEx(fh, &li);
-    size_t file_size = (size_t)li.QuadPart;
     HANDLE mh = CreateFileMappingA(fh, NULL, PAGE_READONLY, 0, 0, NULL);
     if (!mh) {
         fprintf(stderr, "[Quantize] CreateFileMapping failed %s\n", inp_path);
