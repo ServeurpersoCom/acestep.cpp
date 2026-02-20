@@ -258,7 +258,7 @@ Output naming is automatic: `input.json` with `--batch 2` produces
 `input0.wav`, `input1.wav`. Models are loaded once and reused across
 all requests.
 
-## Pipeline
+## Architecture
 
 ```
 ace-qwen3 (Qwen3 causal LM, 0.6B/1.7B/4B)
@@ -280,11 +280,19 @@ dit-vae
 
 ## Accuracy
 
-Full test log (turbo + SFT, seed 42, Philox noise):
-[`tests/Q6_K.log`](https://github.com/ServeurpersoCom/acestep.cpp/blob/master/tests/Q6_K.log)
-[`tests/CPU_Q6_K.log`](https://github.com/ServeurpersoCom/acestep.cpp/blob/master/tests/CPU_Q6_K.log)
+Test logs (turbo + SFT, seed 42, Philox noise, multiple quantizations):
+[`tests/`](https://github.com/ServeurpersoCom/acestep.cpp/tree/master/tests)
 
-Run `python3 tests/debug-dit-cossim.py` to reproduce.
+Each script compares GGML C++ output against the Python reference
+(cosine similarity per intermediate tensor). Requires the original
+ACE-Step-1.5 repo cloned alongside acestep.cpp (`../ACE-Step-1.5`).
+
+```bash
+cd tests
+python3 debug-lm-logits.py        # Qwen3 LM: first-token logits GGML vs PyTorch (0.6B/1.7B/4B)
+python3 debug-detok-cossim.py     # FSQ detokenizer: step-by-step cossim C++ vs Python
+python3 debug-dit-cossim.py       # DiT: per-layer cossim GGML vs Python (turbo/SFT, BF16/quantized)
+```
 
 ## Known issues
 
