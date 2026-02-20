@@ -34,39 +34,50 @@ enabled by default. On Linux, install `libopenblas-dev` and pass
 
 Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 
-## Checkpoints
+## Models
+
+Pre-quantized GGUFs on [Hugging Face](https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF).
 
 ```bash
-pip install gguf
-./checkpoints.sh          # core models (turbo + 4B LM)
-./checkpoints.sh --all    # all variants (SFT, shift1/3, 0.6B/1.7B LM)
-python3 convert.py        # convert all checkpoints to GGUF (models/)
+pip install huggingface_hub
+./models.sh              # Q8_0 turbo essentials (~7.7 GB)
+./models.sh --all        # every model, every quant (~97 GB)
+./models.sh --quant Q6_K # pick a specific quant (Q4_K_M, Q5_K_M, Q6_K, Q8_0, BF16)
+./models.sh --sft        # add SFT DiT variant
+./models.sh --shifts     # add shift1/shift3/continuous variants
 ```
 
-`checkpoints.sh` downloads raw HuggingFace checkpoints (safetensors,
-config.json, tokenizer files) into `checkpoints/`. These are the source
-material for GGUF conversion, not used at runtime.
-
-`convert.py` packs everything into self-contained GGUF files in `models/`.
-Each GGUF bundles model weights with all dependent files so that no external
-file is needed at runtime:
-
-- BPE tokenizer (from `vocab.json` + `merges.txt`) in LM and text encoder
-- silence_latent (from `silence_latent.pt`, transposed to [15000, 64] f32) in DiT
-- full config.json as KV metadata in all models
-
-Output models:
+Default downloads 4 files into `models/`:
 
 | GGUF | Arch | Size |
 |------|------|------|
-| Qwen3-Embedding-0.6B-BF16.gguf | text encoder (28L, H=1024) | 1.1 GB |
-| acestep-5Hz-lm-{0.6B,1.7B,4B}-BF16.gguf | Qwen3 causal LM | 1.3 / 3.5 / 8.0 GB |
-| acestep-v15-{turbo,sft,base,...}-BF16.gguf | DiT + CondEncoder (24L, H=2048) | 4.5 GB |
+| Qwen3-Embedding-0.6B-Q8_0.gguf | text encoder (28L, H=1024) | 748 MB |
+| acestep-5Hz-lm-4B-Q8_0.gguf | Qwen3 causal LM | 4.2 GB |
+| acestep-v15-turbo-Q8_0.gguf | DiT + CondEncoder (24L, H=2048) | 2.4 GB |
 | vae-BF16.gguf | AutoencoderOobleck | 322 MB |
 
-A direct GGUF downloader (skipping the safetensors intermediate) is planned
-once `convert.py` supports quantized DiT exports (Q4_K, Q5_K, Q8_0).
-VAE will stay in BF16 (small, bandwidth-bound, quality-critical).
+Three LM sizes: 0.6B (fast), 1.7B, 4B (best quality).
+VAE is always BF16 (small, bandwidth-bound, quality-critical).
+
+<details>
+<summary>Building GGUFs from source (checkpoints + convert)</summary>
+
+If you want to convert from the original safetensors yourself:
+
+```bash
+pip install gguf
+./checkpoints.sh          # download raw HF checkpoints (turbo + 4B LM)
+./checkpoints.sh --all    # all variants (SFT, shift1/3, 0.6B/1.7B LM)
+python3 convert.py        # convert all checkpoints to GGUF (models/)
+./quantize.sh             # quantize BF16 -> Q4_K_M/Q5_K_M/Q6_K/Q8_0
+```
+
+`checkpoints.sh` downloads safetensors, config.json, and tokenizer files
+into `checkpoints/`. `convert.py` packs everything into self-contained
+GGUF files in `models/`, bundling BPE tokenizer, silence_latent, and
+config metadata so no external file is needed at runtime.
+
+</details>
 
 ## Quick start
 
