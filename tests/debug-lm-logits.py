@@ -12,9 +12,17 @@ def test_pytorch_logits(model_dir, prompt_tokens):
     with open(config_path) as f:
         cfg = json.load(f)
 
-    # Load weights
-    st_path = os.path.join(model_dir, "model.safetensors")
-    weights = load_file(st_path)
+    # Load weights (single file or sharded)
+    st_single = os.path.join(model_dir, "model.safetensors")
+    if os.path.isfile(st_single):
+        weights = load_file(st_single)
+    else:
+        import glob
+        shards = sorted(glob.glob(os.path.join(model_dir, "model-*.safetensors")))
+        assert shards, f"no safetensors found in {model_dir}"
+        weights = {}
+        for s in shards:
+            weights.update(load_file(s))
 
     H = cfg["hidden_size"]
     V = cfg["vocab_size"]
