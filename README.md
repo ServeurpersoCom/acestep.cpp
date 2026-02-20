@@ -39,7 +39,7 @@ Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 Pre-quantized GGUFs on [Hugging Face](https://huggingface.co/Serveurperso/ACE-Step-1.5-GGUF).
 
 ```bash
-pip install huggingface_hub
+pip install hf
 ./models.sh              # Q8_0 turbo essentials (~7.7 GB)
 ./models.sh --all        # every model, every quant (~97 GB)
 ./models.sh --quant Q6_K # pick a specific quant (Q4_K_M, Q5_K_M, Q6_K, Q8_0, BF16)
@@ -65,7 +65,7 @@ VAE is always BF16 (small, bandwidth-bound, quality-critical).
 If you want to convert from the original safetensors yourself:
 
 ```bash
-pip install gguf
+pip install gguf hf
 ./checkpoints.sh          # download raw HF checkpoints (turbo + 4B LM)
 ./checkpoints.sh --all    # all variants (SFT, shift1/3, 0.6B/1.7B LM)
 python3 convert.py        # convert all checkpoints to GGUF (models/)
