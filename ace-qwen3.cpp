@@ -694,6 +694,33 @@ static std::string codes_to_string(const std::vector<int> & codes) {
 // Phase 2: run audio code generation with all metas known
 // Returns comma-separated codes string (empty on failure)
 
+// Parse N Phase 1 outputs into N AcePrompts, merging into base.
+// merge_lyrics: true for simple mode (Phase 1 generates lyrics),
+//               false for partial mode (user provided lyrics).
+static void parse_phase1_into_aces(
+        const std::vector<std::string> & texts, const AcePrompt & base,
+        std::vector<AcePrompt> & aces, int base_seed,
+        const char * label, bool merge_lyrics) {
+    int N = (int)texts.size();
+    aces.resize(N);
+    for (int i = 0; i < N; i++) {
+        fprintf(stderr, "[%s Batch%d] seed=%d:\n%s\n", label, i, base_seed + i, texts[i].c_str());
+        AcePrompt parsed = {};
+        if (!parse_cot_and_lyrics(texts[i], &parsed))
+            fprintf(stderr, "WARNING: batch %d CoT parse incomplete\n", i);
+        aces[i] = base;
+        if (parsed.bpm > 0) aces[i].bpm = parsed.bpm;
+        if (parsed.duration > 0) aces[i].duration = parsed.duration;
+        if (!parsed.keyscale.empty()) aces[i].keyscale = parsed.keyscale;
+        if (!parsed.timesignature.empty()) aces[i].timesignature = parsed.timesignature;
+        if (!parsed.vocal_language.empty()) aces[i].vocal_language = parsed.vocal_language;
+        if (!parsed.caption.empty()) aces[i].caption = parsed.caption;
+        if (merge_lyrics && !parsed.lyrics.empty()) aces[i].lyrics = parsed.lyrics;
+        if (aces[i].duration <= 0) aces[i].duration = 120.0f;
+        if (aces[i].duration > 600) aces[i].duration = 600.0f;
+    }
+}
+
 // Batched Phase 1: N text generations with shared prompt, different seeds.
 // No CFG. Each element gets its own FSM state and RNG.
 // Returns N generated text strings.
@@ -1204,24 +1231,7 @@ int main(int argc, char ** argv) {
             &model, &bpe, prompt, 2048, temperature, 1.0f,
             seed, batch_size, use_fsm ? &fsm : nullptr, true);
 
-        aces.resize(batch_size);
-        for (int i = 0; i < batch_size; i++) {
-            fprintf(stderr, "[Simple Batch%d] seed=%d:\n%s\n", i, seed + i, phase1_texts[i].c_str());
-            AcePrompt parsed = {};
-            parse_cot_and_lyrics(phase1_texts[i], &parsed);
-
-            aces[i] = ace;
-            if (parsed.bpm > 0) aces[i].bpm = parsed.bpm;
-            if (parsed.duration > 0) aces[i].duration = parsed.duration;
-            if (!parsed.keyscale.empty()) aces[i].keyscale = parsed.keyscale;
-            if (!parsed.timesignature.empty()) aces[i].timesignature = parsed.timesignature;
-            if (!parsed.vocal_language.empty()) aces[i].vocal_language = parsed.vocal_language;
-            if (!parsed.caption.empty()) aces[i].caption = parsed.caption;
-            if (!parsed.lyrics.empty()) aces[i].lyrics = parsed.lyrics;
-
-            if (aces[i].duration <= 0) aces[i].duration = 120.0f;
-            if (aces[i].duration > 600) aces[i].duration = 600.0f;
-        }
+        parse_phase1_into_aces(phase1_texts, ace, aces, seed, "Simple", true);
 
         for (int i = 0; i < batch_size; i++) qw3lm_reset_kv(&model, i);
     }
@@ -1247,33 +1257,18 @@ int main(int argc, char ** argv) {
             seed, batch_size, use_fsm ? &fsm : nullptr, false,
             cfg_scale, uncond.empty() ? nullptr : &uncond, true);
 
-        aces.resize(batch_size);
-        for (int i = 0; i < batch_size; i++) {
-            fprintf(stderr, "[Partial Batch%d] seed=%d:\n%s\n", i, seed + i, phase1_texts[i].c_str());
-            AcePrompt parsed = ace;
-            if (!parse_cot_and_lyrics(phase1_texts[i], &parsed))
-                fprintf(stderr, "WARNING: batch %d CoT parse incomplete\n", i);
-
-            aces[i] = ace;
-            if (parsed.bpm > 0) aces[i].bpm = parsed.bpm;
-            if (parsed.duration > 0) aces[i].duration = parsed.duration;
-            if (!parsed.keyscale.empty()) aces[i].keyscale = parsed.keyscale;
-            if (!parsed.timesignature.empty()) aces[i].timesignature = parsed.timesignature;
-            if (!parsed.vocal_language.empty()) aces[i].vocal_language = parsed.vocal_language;
-            if (!parsed.caption.empty()) aces[i].caption = parsed.caption;
-
-            if (aces[i].duration <= 0) aces[i].duration = 120.0f;
-            if (aces[i].duration > 600) aces[i].duration = 600.0f;
-        }
+        parse_phase1_into_aces(phase1_texts, ace, aces, seed, "Partial", false);
 
         for (int i = 0; i < 2 * batch_size; i++) qw3lm_reset_kv(&model, i);
     }
 
-    // Debug: dump tokens/logits (uses first ace for prompt construction)
+    // Guarantee aces is populated (all-metas: single shared ace for prefill optimization)
+    if (aces.empty()) aces = {ace};
+
+    // Debug: dump tokens/logits
     if (need_lm_codes && (dump_logits || dump_tokens)) {
-        const AcePrompt & dbg_ace = aces.empty() ? ace : aces[0];
-        std::string cot = build_cot_yaml(dbg_ace);
-        auto dbg_prompt = build_lm_prompt_with_cot(bpe, dbg_ace, cot);
+        std::string cot = build_cot_yaml(aces[0]);
+        auto dbg_prompt = build_lm_prompt_with_cot(bpe, aces[0], cot);
 
         if (dump_tokens) {
             FILE * f = fopen(dump_tokens, "w");
@@ -1304,7 +1299,6 @@ int main(int argc, char ** argv) {
     // Phase 2: generate audio codes (always batched, N=batch_size)
     std::vector<std::string> batch_codes(batch_size);
     if (need_lm_codes) {
-        if (aces.empty()) aces = {ace};  // all-metas: single ace, shared prefill
         batch_codes = run_phase2_batch(&model, bpe, aces,
             temperature, top_p, seed, batch_size, cfg_scale, neg_prompt);
     } else {
@@ -1320,8 +1314,7 @@ int main(int argc, char ** argv) {
         if (dot != std::string::npos) { ext = base.substr(dot); base = base.substr(0, dot); }
         for (int b = 0; b < batch_size; b++) {
             AceRequest rr = req;
-            const AcePrompt & a = aces.empty() ? ace :
-                ((int)aces.size() == 1 ? aces[0] : aces[b]);
+            const AcePrompt & a = aces[b < (int)aces.size() ? b : 0];
             rr.caption        = a.caption;
             rr.lyrics         = a.lyrics;
             rr.bpm            = a.bpm;
