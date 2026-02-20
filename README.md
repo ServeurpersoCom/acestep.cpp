@@ -7,15 +7,7 @@ Text + lyrics in, stereo 48kHz WAV out. Runs on CPU, CUDA, Metal, Vulkan.
 
 ```bash
 git submodule update --init
-./build.sh
-```
 
-`build.sh` auto-detects your platform: Metal + Accelerate on macOS,
-CUDA on Linux with nvcc, Vulkan if available, and OpenBLAS when found.
-
-Manual cmake if you prefer:
-
-```bash
 mkdir build && cd build
 
 # macOS (Metal + Accelerate BLAS auto-enabled)
@@ -101,31 +93,35 @@ EOF
     --request /tmp/request0.json \
     --text-encoder models/Qwen3-Embedding-0.6B-BF16.gguf \
     --dit models/acestep-v15-turbo-BF16.gguf \
-    --vae models/vae-BF16.gguf \
-    --output output.wav
+    --vae models/vae-BF16.gguf
+# -> request00.wav
 ```
 
 Generate multiple songs at once with `--batch`:
 
 ```bash
-# 4 different songs from one caption, memory-bound batch (weights read once)
+# 2 LM variations x 2 DiT variations = 4 WAVs total
 ./build/ace-qwen3 \
     --request /tmp/request.json \
     --model models/acestep-5Hz-lm-4B-BF16.gguf \
-    --batch 4
-# -> request0.json, request1.json, request2.json, request3.json
-# seeds: auto, auto+1, auto+2, auto+3
+    --batch 2
+# -> request0.json, request1.json (different lyrics/codes, seeds auto+0, auto+1)
 
-# then feed each to dit-vae
-for i in 0 1 2 3; do
-    ./build/dit-vae \
-        --request /tmp/request${i}.json \
-        --text-encoder models/Qwen3-Embedding-0.6B-BF16.gguf \
-        --dit models/acestep-v15-turbo-BF16.gguf \
-        --vae models/vae-BF16.gguf \
-        --output output${i}.wav
-done
+./build/dit-vae \
+    --request /tmp/request0.json /tmp/request1.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-BF16.gguf \
+    --dit models/acestep-v15-turbo-BF16.gguf \
+    --vae models/vae-BF16.gguf \
+    --batch 2
+# -> request00.wav, request01.wav  (2 DiT variations of LM output 0)
+#    request10.wav, request11.wav  (2 DiT variations of LM output 1)
 ```
+
+The LM decides song structure (lyrics, melody, rhythm via audio codes), so
+LM batch variations produce genuinely different songs. DiT batch variations
+only differ by initial noise, producing subtle variations of the same piece
+(slightly different timbres, minor rhythmic shifts). Use LM batching for
+diversity, DiT batching for cherry-picking the best render.
 
 Ready-made examples in `examples/`:
 
@@ -135,7 +131,6 @@ cd examples
 ./partial.sh          # caption + lyrics + duration
 ./full.sh             # all metadata provided
 ./dit-only.sh         # skip LLM, DiT from noise
-./all.sh              # run all examples
 ```
 
 Each example has a `-sft` variant (SFT model, 50 steps, CFG 7.0)
@@ -239,14 +234,17 @@ are both batched with independent seeds (seed+0 .. seed+N-1).
 Usage: dit-vae [options]
 
 Required:
-  --request <json>        Request JSON (output from ace-qwen3)
+  --request <json> ...    One or more request JSONs (output from ace-qwen3)
   --text-encoder <gguf>   Text encoder GGUF file
   --dit <gguf>            DiT GGUF file (from convert.py)
   --vae <gguf>            VAE GGUF file
 
+Generation:
+  --batch <N>             Generate N noise variations per request (default: 1)
+                          Output: request0.wav .. requestN-1.wav
+
 Audio:
   --noise-file <path>     Load noise from BF16 file (Philox RNG dump)
-  --output <path>         Output WAV (default: output.wav)
 
 VAE tiling (memory control):
   --vae-chunk <n>         Latent frames per tile (default: 256)
@@ -255,6 +253,10 @@ VAE tiling (memory control):
 Debug:
   --dump <dir>            Dump intermediate tensors
 ```
+
+Output naming is automatic: `input.json` with `--batch 2` produces
+`input0.wav`, `input1.wav`. Models are loaded once and reused across
+all requests.
 
 ## Pipeline
 
