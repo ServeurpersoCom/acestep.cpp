@@ -44,6 +44,14 @@ struct VAEGGML {
     ggml_backend_sched_t sched;
     ggml_backend_buffer_t buf;
     struct ggml_context * weight_ctx;  // holds weight tensor metadata
+
+    // Graph cache for tiled decode (avoids rebuild per tile)
+    struct ggml_context * graph_ctx;
+    uint8_t            * graph_buf;    // heap-allocated backing for graph_ctx
+    struct ggml_cgraph  * graph;
+    struct ggml_tensor  * graph_input;
+    struct ggml_tensor  * graph_output;
+    int                   graph_T;     // cached T_latent (0 = no cache)
 };
 
 // Load helpers
@@ -312,6 +320,7 @@ static struct ggml_tensor * vae_ggml_build_graph(
 // Decode latent [T_latent, out_ch] -> audio [2, T_audio]
 // Input layout matches DiT output: [T, Oc] time-major (Oc contiguous per frame).
 // Returns T_audio (or -1 on error).
+// Graph is cached in VAEGGML and reused when T_latent matches.
 static int vae_ggml_decode(
         VAEGGML * m,
         const float * latent,   // [T_latent, 64] flat time-major (DiT output layout)
@@ -325,60 +334,64 @@ static int vae_ggml_decode(
         return -1;
     }
 
-    // Build graph context (large: VAE has many ops with big intermediate tensors)
-    size_t ctx_size = ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(8192, false);
-    std::vector<uint8_t> ctx_buf(ctx_size);
-    struct ggml_init_params p = { ctx_size, ctx_buf.data(), true };
-    struct ggml_context * ctx = ggml_init(p);
+    // Build graph only when T_latent changes
+    if (m->graph_T != T_latent) {
+        if (m->graph_ctx) {
+            ggml_backend_sched_reset(m->sched);
+            ggml_free(m->graph_ctx);
+            free(m->graph_buf);
+        }
+        size_t ctx_size = ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(8192, false);
+        m->graph_buf = (uint8_t *)malloc(ctx_size);
+        struct ggml_init_params p = { ctx_size, m->graph_buf, true };
+        struct ggml_context * ctx = ggml_init(p);
 
-    // Input: [T_latent, 64] for ggml conv_1d (ne[0]=T_latent contiguous)
-    struct ggml_tensor * input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_latent, 64);
-    ggml_set_name(input, "vae_input");
-    ggml_set_input(input);
+        m->graph_input = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, T_latent, 64);
+        ggml_set_name(m->graph_input, "vae_input");
+        ggml_set_input(m->graph_input);
 
-    // Build graph
-    struct ggml_tensor * output = vae_ggml_build_graph(ctx, m, input);
-    ggml_set_name(output, "vae_output");
-    ggml_set_output(output);
+        m->graph_output = vae_ggml_build_graph(ctx, m, m->graph_input);
+        ggml_set_name(m->graph_output, "vae_output");
+        ggml_set_output(m->graph_output);
 
-    struct ggml_cgraph * gf = ggml_new_graph_custom(ctx, 8192, false);
-    ggml_build_forward_expand(gf, output);
-    fprintf(stderr, "[VAE] Graph: %d nodes, output ne=[%lld, %lld]\n",
-            ggml_graph_n_nodes(gf), (long long)output->ne[0], (long long)output->ne[1]);
+        m->graph = ggml_new_graph_custom(ctx, 8192, false);
+        ggml_build_forward_expand(m->graph, m->graph_output);
 
-    // Allocate compute graph on persistent scheduler
-    if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
-        fprintf(stderr, "[VAE] FATAL: graph alloc failed\n");
-        ggml_free(ctx);
-        return -1;
+        if (!ggml_backend_sched_alloc_graph(m->sched, m->graph)) {
+            fprintf(stderr, "[VAE] FATAL: graph alloc failed\n");
+            ggml_free(ctx);
+            free(m->graph_buf);
+            m->graph_ctx = NULL;
+            m->graph_buf = NULL;
+            m->graph_T = 0;
+            return -1;
+        }
+        m->graph_ctx = ctx;
+        m->graph_T = T_latent;
+        fprintf(stderr, "[VAE] Graph: %d nodes, T_latent=%d\n",
+                ggml_graph_n_nodes(m->graph), T_latent);
     }
 
     // Set input: transpose [T, 64] time-major -> ggml ne=[T, 64] channel-major
-    // DiT flat: frame t at offset t*64, element (t,c) = latent[t*64 + c]
-    // ggml [T, 64]: ne[0]=T contiguous, element (t,c) = data[c*T + t]
     std::vector<float> transposed(64 * T_latent);
     for (int t = 0; t < T_latent; t++)
         for (int c = 0; c < 64; c++)
             transposed[c * T_latent + t] = latent[t * 64 + c];
-    ggml_backend_tensor_set(ggml_graph_get_tensor(gf, "vae_input"),
+    ggml_backend_tensor_set(m->graph_input,
                             transposed.data(), 0, transposed.size() * sizeof(float));
 
     // Compute
-    ggml_backend_sched_graph_compute(m->sched, gf);
+    ggml_backend_sched_graph_compute(m->sched, m->graph);
 
-    // Read output: ggml [T_audio, 2] ne[0]=T_audio -> element (t,c) = data[c*T_audio + t]
-    // Target: [2, T_audio] flat = channel 0 then channel 1
-    int T_out = (int)output->ne[0];
+    // Read output
+    int T_out = (int)m->graph_output->ne[0];
     std::vector<float> raw(T_out * 2);
-    ggml_backend_tensor_get(output, raw.data(), 0, raw.size() * sizeof(float));
-    // raw is already [c=0: T_out floats, c=1: T_out floats] due to ggml layout
+    ggml_backend_tensor_get(m->graph_output, raw.data(), 0, raw.size() * sizeof(float));
     memcpy(audio_out, raw.data(), T_out * 2 * sizeof(float));
 
     fprintf(stderr, "[VAE] Decoded: T_latent=%d -> T_audio=%d (%.2fs @ 48kHz)\n",
             T_latent, T_out, (float)T_out / 48000.0f);
 
-    ggml_backend_sched_reset(m->sched);
-    ggml_free(ctx);
     return T_out;
 }
 
@@ -494,6 +507,11 @@ static int vae_ggml_decode_tiled(
 
 // Free
 static void vae_ggml_free(VAEGGML * m) {
+    if (m->graph_ctx) {
+        ggml_backend_sched_reset(m->sched);
+        ggml_free(m->graph_ctx);
+        free(m->graph_buf);
+    }
     if (m->sched) ggml_backend_sched_free(m->sched);
     if (m->buf) ggml_backend_buffer_free(m->buf);
     if (m->weight_ctx) ggml_free(m->weight_ctx);
