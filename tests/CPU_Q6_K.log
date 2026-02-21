@@ -21,39 +21,39 @@ Using precomputed LM hints
   temb_t                               0.999986
   hidden_after_proj_in                 0.999975
   enc_after_cond_emb                   0.999574
-  layer0_sa_output                     0.999188
-  hidden_after_layer0                  0.999682
-  hidden_after_layer6                  0.996842
-  hidden_after_layer12                 0.997406
-  hidden_after_layer18                 0.993858
-  hidden_after_layer23                 0.990014
-  dit_step0_vt                         0.962674
-  dit_step0_xt                         0.999918
-  dit_step1_vt                         0.969068
-  dit_step1_xt                         0.999755
-  dit_step2_vt                         0.972226
-  dit_step2_xt                         0.999367
-  dit_step3_vt                         0.972188
-  dit_step3_xt                         0.998455
-  dit_step4_vt                         0.969434
-  dit_step4_xt                         0.996318
-  dit_step5_vt                         0.965667
-  dit_step5_xt                         0.991409
-  dit_step6_vt                         0.960853
-  dit_step6_xt                         0.981903
-  dit_step7_vt                         0.952667
-  dit_x0                               0.967966
-  vae_audio                            0.468596
-  vae_audio (log spectral)             0.999684
+  layer0_sa_output                     0.999717
+  hidden_after_layer0                  0.999819
+  hidden_after_layer6                  0.999796
+  hidden_after_layer12                 0.998673
+  hidden_after_layer18                 0.995619
+  hidden_after_layer23                 0.991734
+  dit_step0_vt                         0.969206
+  dit_step0_xt                         0.999932
+  dit_step1_vt                         0.973064
+  dit_step1_xt                         0.999789
+  dit_step2_vt                         0.974843
+  dit_step2_xt                         0.999431
+  dit_step3_vt                         0.974760
+  dit_step3_xt                         0.998601
+  dit_step4_vt                         0.971372
+  dit_step4_xt                         0.996642
+  dit_step5_vt                         0.966576
+  dit_step5_xt                         0.992020
+  dit_step6_vt                         0.962352
+  dit_step6_xt                         0.982974
+  dit_step7_vt                         0.954566
+  dit_x0                               0.969537
+  vae_audio                            0.884646
+  vae_audio (log spectral)             0.999800
 [Turbo] Error growth GGML vs Python
   stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B
-  dit_step0_xt             0.999918   0.220382   0.008277  -0.002299   0.972885  -0.002342   0.972003
-  dit_step1_xt             0.999755   0.315690   0.014161  -0.005258   0.942550  -0.005313   0.941730
-  dit_step2_xt             0.999367   0.485305   0.021548  -0.009261   0.908712  -0.009311   0.908527
-  dit_step3_xt             0.998455   1.030412   0.032039  -0.014680   0.872805  -0.014577   0.873624
-  dit_step4_xt             0.996318   1.933131   0.046992  -0.021967   0.840379  -0.021660   0.841995
-  dit_step5_xt             0.991409   3.135714   0.069571  -0.032469   0.822982  -0.032109   0.824593
-  dit_step6_xt             0.981903   4.795673   0.104029  -0.047529   0.853453  -0.046482   0.855546
+  dit_step0_xt             0.999932   0.151740   0.007444  -0.002272   0.972929  -0.002342   0.972003
+  dit_step1_xt             0.999789   0.296944   0.012894  -0.005217   0.942698  -0.005313   0.941730
+  dit_step2_xt             0.999431   0.480226   0.020058  -0.009169   0.909198  -0.009311   0.908527
+  dit_step3_xt             0.998601   0.735558   0.029990  -0.014527   0.873715  -0.014577   0.873624
+  dit_step4_xt             0.996642   1.052198   0.044521  -0.021723   0.841752  -0.021660   0.841995
+  dit_step5_xt             0.992020   1.529275   0.066809  -0.032045   0.824936  -0.032109   0.824593
+  dit_step6_xt             0.982974   2.218505   0.100581  -0.046647   0.855983  -0.046482   0.855546
 [SFT] steps=50, shift=1.0, CFG=7.0 | acestep-v15-sft-Q6_K.gguf
 [GGML] Running acestep-v15-sft-Q6_K.gguf...
 [GGML] Done, 233 dump files
@@ -74,59 +74,59 @@ Using precomputed LM hints
   temb_t                               0.999952
   hidden_after_proj_in                 0.999975
   enc_after_cond_emb                   0.999578
-  layer0_sa_output                     0.999199
-  hidden_after_layer0                  0.999799
-  hidden_after_layer6                  0.992314
-  hidden_after_layer12                 0.965680
-  hidden_after_layer18                 0.954287
-  hidden_after_layer23                 0.997586
+  layer0_sa_output                     0.999729
+  hidden_after_layer0                  0.999850
+  hidden_after_layer6                  0.999739
+  hidden_after_layer12                 0.999297
+  hidden_after_layer18                 0.998408
+  hidden_after_layer23                 0.998695
   null_condition_emb                   1.000000
   null_enc_hidden                      1.000000
-  dit_step0_vt_cond                    0.998163
-  dit_step0_vt_uncond                  0.998043
-  dit_step0_vt                         0.993529
+  dit_step0_vt_cond                    0.998599
+  dit_step0_vt_uncond                  0.998145
+  dit_step0_vt                         0.994450
   dit_step0_xt                         0.999997
-  dit_step5_vt_cond                    0.998518
-  dit_step5_vt                         0.988375
-  dit_step5_xt                         0.999936
-  dit_step10_vt_cond                   0.996949
-  dit_step10_vt                        0.985989
-  dit_step10_xt                        0.999748
-  dit_step15_vt_cond                   0.992860
-  dit_step15_vt                        0.970945
-  dit_step15_xt                        0.999175
-  dit_step20_vt_cond                   0.987083
-  dit_step20_vt                        0.956777
-  dit_step20_xt                        0.997727
-  dit_step25_vt_cond                   0.977955
-  dit_step25_vt                        0.940336
-  dit_step25_xt                        0.994991
-  dit_step30_vt_cond                   0.968723
-  dit_step30_vt                        0.926164
-  dit_step30_xt                        0.990801
-  dit_step35_vt_cond                   0.959458
-  dit_step35_vt                        0.911129
-  dit_step35_xt                        0.985979
-  dit_step40_vt_cond                   0.953760
-  dit_step40_vt                        0.895986
-  dit_step40_xt                        0.981441
-  dit_step45_vt_cond                   0.957699
-  dit_step45_vt                        0.899692
-  dit_step45_xt                        0.978282
-  dit_step49_vt_cond                   0.964132
-  dit_step49_vt                        0.927334
-  dit_x0                               0.977261
-  vae_audio                            0.465972
-  vae_audio (log spectral)             0.999576
+  dit_step5_vt_cond                    0.999073
+  dit_step5_vt                         0.990884
+  dit_step5_xt                         0.999949
+  dit_step10_vt_cond                   0.997877
+  dit_step10_vt                        0.988107
+  dit_step10_xt                        0.999824
+  dit_step15_vt_cond                   0.995617
+  dit_step15_vt                        0.978185
+  dit_step15_xt                        0.999461
+  dit_step20_vt_cond                   0.992383
+  dit_step20_vt                        0.966489
+  dit_step20_xt                        0.998586
+  dit_step25_vt_cond                   0.986529
+  dit_step25_vt                        0.953404
+  dit_step25_xt                        0.996971
+  dit_step30_vt_cond                   0.980144
+  dit_step30_vt                        0.943520
+  dit_step30_xt                        0.994482
+  dit_step35_vt_cond                   0.973693
+  dit_step35_vt                        0.931521
+  dit_step35_xt                        0.991507
+  dit_step40_vt_cond                   0.969689
+  dit_step40_vt                        0.917785
+  dit_step40_xt                        0.988595
+  dit_step45_vt_cond                   0.972971
+  dit_step45_vt                        0.917770
+  dit_step45_xt                        0.986498
+  dit_step49_vt_cond                   0.976321
+  dit_step49_vt                        0.906986
+  dit_x0                               0.985726
+  vae_audio                            0.941740
+  vae_audio (log spectral)             0.999656
 [SFT] Error growth GGML vs Python
   stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B
-  dit_step0_xt             0.999997   0.041343   0.002366  -0.001767   0.980207  -0.001741   0.980402
-  dit_step5_xt             0.999936   0.145090   0.007853  -0.006758   0.890158  -0.007143   0.887999
-  dit_step10_xt            0.999748   0.240867   0.013532  -0.012058   0.811898  -0.012603   0.811299
-  dit_step15_xt            0.999175   0.468848   0.021939  -0.017220   0.746893  -0.018114   0.745268
-  dit_step20_xt            0.997727   0.682158   0.033555  -0.022460   0.701282  -0.023808   0.699582
-  dit_step25_xt            0.994991   0.869848   0.047820  -0.027757   0.679501  -0.029311   0.679278
-  dit_step30_xt            0.990801   1.147446   0.064932  -0.033080   0.684101  -0.035027   0.685262
-  dit_step35_xt            0.985979   1.438686   0.083820  -0.038366   0.714217  -0.040716   0.717195
-  dit_step40_xt            0.981441   1.846406   0.104107  -0.043665   0.766273  -0.046462   0.771853
-  dit_step45_xt            0.978282   2.259135   0.123500  -0.049312   0.836198  -0.052475   0.843036
+  dit_step0_xt             0.999997   0.038008   0.002247  -0.001751   0.980202  -0.001741   0.980402
+  dit_step5_xt             0.999949   0.135739   0.006985  -0.006980   0.889900  -0.007143   0.887999
+  dit_step10_xt            0.999824   0.193634   0.011359  -0.012388   0.811396  -0.012603   0.811299
+  dit_step15_xt            0.999461   0.312492   0.017994  -0.017664   0.745799  -0.018114   0.745268
+  dit_step20_xt            0.998586   0.525532   0.026868  -0.022959   0.699406  -0.023808   0.699582
+  dit_step25_xt            0.996971   0.780155   0.037686  -0.028371   0.677020  -0.029311   0.679278
+  dit_step30_xt            0.994482   1.081808   0.050865  -0.033803   0.681274  -0.035027   0.685262
+  dit_step35_xt            0.991507   1.668724   0.065783  -0.039118   0.711362  -0.040716   0.717195
+  dit_step40_xt            0.988595   2.092443   0.082225  -0.044398   0.763266  -0.046462   0.771853
+  dit_step45_xt            0.986498   2.350159   0.098049  -0.050127   0.833073  -0.052475   0.843036
