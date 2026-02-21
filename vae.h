@@ -53,9 +53,8 @@ struct VAEGGML {
     struct ggml_tensor  * graph_output;
     int                   graph_T;     // cached T_latent (0 = no cache)
 
-    // Scratch buffers (reused across tiles, grown as needed)
+    // Scratch buffer (reused across tiles, grown as needed)
     std::vector<float> scratch_in;     // transposed input [64 * T]
-    std::vector<float> scratch_tile;   // tile audio output [2 * max_tile_audio]
 };
 
 // Load helpers
@@ -176,7 +175,7 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->sb  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
     m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 7, 128, 2);
 
-    // Phase 2: allocate backend buffer on GPU (im2col grid Y fix enables long-sequence conv1d)
+    // Phase 2: allocate backend buffer (im2col grid Y fix enables long-sequence conv1d)
     BackendPair bp = backend_init("VAE");
     m->backend = bp.backend;
     m->cpu_backend = bp.cpu_backend;
@@ -320,25 +319,13 @@ static struct ggml_tensor * vae_ggml_build_graph(
     return x;  // [T_audio, 2]
 }
 
-// Decode API
-// Decode latent window [win_start..win_start+T_latent) from full latent -> audio [2, T_audio]
-// Input layout: full_latent is [T_full, 64] time-major (DiT output layout).
-// If full_latent==NULL, latent_or_full is already a [T_latent, 64] standalone buffer.
-// Graph is cached in VAEGGML and reused when T_latent matches.
-// Returns T_audio (or -1 on error).
-static int vae_ggml_decode(
+// Core compute: ensure graph cached, set input, run. Returns T_audio or -1.
+// Output remains in m->graph_output for caller to read as needed.
+static int vae_ggml_compute(
         VAEGGML * m,
-        const float * latent,   // [T_latent, 64] or [T_full, 64] if windowed
-        int T_latent,
-        float * audio_out,      // [2, T_audio] flat
-        int max_T_audio,
-        int win_start = 0) {    // offset into latent (0 = no windowing)
-
-    int T_audio = T_latent * 1920;
-    if (T_audio > max_T_audio) {
-        fprintf(stderr, "[VAE] T_audio %d exceeds max %d\n", T_audio, max_T_audio);
-        return -1;
-    }
+        const float * latent,   // [T_full, 64] time-major
+        int T_latent,           // window length to decode
+        int win_start = 0) {    // offset into latent
 
     // Build graph only when T_latent changes
     if (m->graph_T != T_latent) {
@@ -378,8 +365,7 @@ static int vae_ggml_decode(
                 ggml_graph_n_nodes(m->graph), T_latent);
     }
 
-    // Extract window + transpose in one pass: [T, 64] time-major -> ggml [T, 64] channel-major
-    // Loop order: c-outer for sequential writes (stride-64 reads are prefetcher-friendly)
+    // Extract window + transpose: [T, 64] time-major -> ggml [T, 64] channel-major
     size_t in_size = 64 * T_latent;
     if (m->scratch_in.size() < in_size)
         m->scratch_in.resize(in_size);
@@ -389,16 +375,33 @@ static int vae_ggml_decode(
     ggml_backend_tensor_set(m->graph_input,
                             m->scratch_in.data(), 0, in_size * sizeof(float));
 
-    // Compute
     ggml_backend_sched_graph_compute(m->sched, m->graph);
 
-    // Read output directly into audio_out (ggml layout is already [ch0..., ch1...])
-    int T_out = (int)m->graph_output->ne[0];
+    return (int)m->graph_output->ne[0];
+}
+
+// Decode API: latent [T_latent, 64] -> audio [2, T_audio] flat.
+// Returns T_audio (or -1 on error).
+static int vae_ggml_decode(
+        VAEGGML * m,
+        const float * latent,
+        int T_latent,
+        float * audio_out,
+        int max_T_audio) {
+
+    int T_audio = T_latent * 1920;
+    if (T_audio > max_T_audio) {
+        fprintf(stderr, "[VAE] T_audio %d exceeds max %d\n", T_audio, max_T_audio);
+        return -1;
+    }
+
+    int T_out = vae_ggml_compute(m, latent, T_latent, 0);
+    if (T_out < 0) return -1;
+
     ggml_backend_tensor_get(m->graph_output, audio_out, 0, T_out * 2 * sizeof(float));
 
     fprintf(stderr, "[VAE] Decoded: T_latent=%d -> T_audio=%d (%.2fs @ 48kHz)\n",
             T_latent, T_out, (float)T_out / 48000.0f);
-
     return T_out;
 }
 
@@ -432,13 +435,6 @@ static int vae_ggml_decode_tiled(
     fprintf(stderr, "[VAE] Tiled decode: %d tiles (chunk=%d, overlap=%d, stride=%d)\n",
             num_steps, chunk_size, overlap, stride);
 
-    // Temp buffer for one tile output (max tile = chunk_size + 2*overlap latent frames)
-    int max_win = chunk_size + 2 * overlap;
-    int max_tile_audio = max_win * 1920 + 1920;  // margin for conv padding
-    if ((int)m->scratch_tile.size() < 2 * max_tile_audio)
-        m->scratch_tile.resize(2 * max_tile_audio);
-    float * tile_audio = m->scratch_tile.data();
-
     float upsample_factor = 0.0f;
     int audio_write_pos = 0;
 
@@ -455,9 +451,8 @@ static int vae_ggml_decode_tiled(
         if (win_end > T_latent) win_end = T_latent;
         int win_len = win_end - win_start;
 
-        // Decode tile (extract+transpose fused inside vae_ggml_decode via win_start)
-        int tile_T = vae_ggml_decode(m, latent, win_len,
-                                     tile_audio, max_tile_audio, win_start);
+        // Compute tile (graph cached, extract+transpose fused)
+        int tile_T = vae_ggml_compute(m, latent, win_len, win_start);
         if (tile_T < 0) {
             fprintf(stderr, "[VAE] FATAL: tile %d decode failed\n", i);
             return -1;
@@ -485,13 +480,16 @@ static int vae_ggml_decode_tiled(
             return -1;
         }
 
-        // Append core audio: tile_audio is [2, tile_T] = ch0[0..tile_T-1] ch1[tile_T..2*tile_T-1]
-        memcpy(audio_out + audio_write_pos,
-               tile_audio + trim_start,
-               core_len * sizeof(float));
-        memcpy(audio_out + max_T_audio + audio_write_pos,
-               tile_audio + tile_T + trim_start,
-               core_len * sizeof(float));
+        // Read trimmed ch0 and ch1 directly from backend tensor into final audio_out
+        // Layout: [ch0: tile_T floats, ch1: tile_T floats]
+        ggml_backend_tensor_get(m->graph_output,
+                                audio_out + audio_write_pos,
+                                trim_start * sizeof(float),
+                                core_len * sizeof(float));
+        ggml_backend_tensor_get(m->graph_output,
+                                audio_out + max_T_audio + audio_write_pos,
+                                (tile_T + trim_start) * sizeof(float),
+                                core_len * sizeof(float));
         audio_write_pos += core_len;
     }
 
