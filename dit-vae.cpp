@@ -296,7 +296,7 @@ int main(int argc, char ** argv) {
             continue;
         }
 
-        // --- Text encoding ---
+        // Text encoding
         // 1. Load BPE tokenizer
         timer.reset();
         BPETokenizer tok;
@@ -407,7 +407,7 @@ int main(int argc, char ** argv) {
 
         debug_dump_2d(&dbg, "enc_hidden", enc_hidden.data(), enc_S, 2048);
 
-        // --- Context building ---
+        // Context building
         // Silence latent for this T
         std::vector<float> silence(Oc * T);
         memcpy(silence.data(), silence_full.data(), (size_t)(Oc * T) * sizeof(float));
@@ -463,7 +463,7 @@ int main(int argc, char ** argv) {
             memcpy(context.data() + b * T * ctx_ch, context_single.data(),
                    T * ctx_ch * sizeof(float));
 
-        // --- Generate N noise samples ---
+        // Generate N noise samples
         std::vector<float> noise(batch_n * Oc * T);
 
         if (noise_file && batch_n == 1) {
@@ -479,7 +479,10 @@ int main(int argc, char ** argv) {
                 fclose(nf); return 1;
             }
             std::vector<uint16_t> bf16_all(Oc * T);
-            fread(bf16_all.data(), sizeof(uint16_t), Oc * T, nf);
+            if (fread(bf16_all.data(), sizeof(uint16_t), Oc * T, nf) != (size_t)(Oc * T)) {
+                fprintf(stderr, "FATAL: noise file read error\n");
+                fclose(nf); return 1;
+            }
             fclose(nf);
             for (int i = 0; i < Oc * T; i++) {
                 uint32_t w = (uint32_t)bf16_all[i] << 16;
@@ -500,7 +503,7 @@ int main(int argc, char ** argv) {
             }
         }
 
-        // --- DiT Generate ---
+        // DiT Generate
         std::vector<float> output(batch_n * Oc * T);
 
         // Debug dumps (sample 0)
@@ -519,7 +522,7 @@ int main(int argc, char ** argv) {
 
         debug_dump_2d(&dbg, "dit_output", output.data(), T, Oc);
 
-        // --- VAE Decode + Write WAVs ---
+        // VAE Decode + Write WAVs
         if (have_vae) {
             int T_latent = T;
             int T_audio_max = T_latent * 1920;

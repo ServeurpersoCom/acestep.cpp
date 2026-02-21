@@ -192,8 +192,9 @@ static std::string read_file(const char * path) {
     long sz = ftell(f);
     fseek(f, 0, SEEK_SET);
     std::string buf((size_t)sz, '\0');
-    fread(&buf[0], 1, (size_t)sz, f);
+    size_t nr = fread(&buf[0], 1, (size_t)sz, f);
     fclose(f);
+    if ((long)nr != sz) buf.resize(nr);
     return buf;
 }
 
