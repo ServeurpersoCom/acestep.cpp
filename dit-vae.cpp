@@ -279,7 +279,12 @@ int main(int argc, char ** argv) {
             schedule[i] = shift * t / (1.0f + (shift - 1.0f) * t);
         }
 
-        int T = (int)(duration * FRAMES_PER_SECOND);
+        // T = number of 25Hz latent frames for DiT
+        // When audio codes are present, T is determined by the codes.
+        // Otherwise, T is derived from the requested duration.
+        int T = codes_vec.empty()
+            ? (int)(duration * FRAMES_PER_SECOND)
+            : (int)codes_vec.size() * 5;
         T = ((T + cfg.patch_size - 1) / cfg.patch_size) * cfg.patch_size;
         int S = T / cfg.patch_size;
         int enc_S = 0;
