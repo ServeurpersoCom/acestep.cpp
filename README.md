@@ -20,6 +20,7 @@ cmake .. -DGGML_CUDA=ON
 cmake .. -DGGML_VULKAN=ON
 
 # CPU with OpenBLAS (recommended for CPU-only machines)
+apt install pkg-config libopenblas-dev  # Debian/Ubuntu
 cmake .. -DGGML_BLAS=ON
 
 # Combine as needed
@@ -27,10 +28,6 @@ cmake .. -DGGML_CUDA=ON -DGGML_BLAS=ON
 
 cmake --build . --config Release -j$(nproc)
 ```
-
-BLAS accelerates CPU matrix multiplications. On macOS, Accelerate is
-enabled by default. On Linux, install `libopenblas-dev` and pass
-`-DGGML_BLAS=ON`.
 
 Builds two binaries: `ace-qwen3` (LLM) and `dit-vae` (DiT + VAE).
 
