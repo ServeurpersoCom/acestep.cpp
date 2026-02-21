@@ -1,4 +1,4 @@
-[Request] Loaded request.json
+[Request] Loaded request0.json
 [Noise] Generating T=2200 (duration=88.0s)...
 [Noise] Generated rng_philox_seed42.bf16: [2200, 64] bf16 (281600 bytes)
 [Turbo] steps=8, shift=3.0 | acestep-v15-turbo-Q8_0.gguf
@@ -116,7 +116,7 @@ Using precomputed LM hints
   dit_step49_vt_cond                   0.957822
   dit_step49_vt                        0.926548
   dit_x0                               0.971857
-  vae_audio                            0.438633
+  vae_audio                            0.438634
   vae_audio (log spectral)             0.999527
 [SFT] Error growth GGML vs Python
   stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B

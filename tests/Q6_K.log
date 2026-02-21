@@ -43,7 +43,7 @@ Using precomputed LM hints
   dit_step6_xt                         0.984202
   dit_step7_vt                         0.956879
   dit_x0                               0.971752
-  vae_audio                            0.473676
+  vae_audio                            0.473677
   vae_audio (log spectral)             0.999727
 [Turbo] Error growth GGML vs Python
   stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B
@@ -116,7 +116,7 @@ Using precomputed LM hints
   dit_step49_vt_cond                   0.960600
   dit_step49_vt                        0.929860
   dit_x0                               0.974354
-  vae_audio                            0.459806
+  vae_audio                            0.459805
   vae_audio (log spectral)             0.999665
 [SFT] Error growth GGML vs Python
   stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B
