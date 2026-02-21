@@ -73,8 +73,9 @@ struct DiTGGMLLayer {
 
     // MLP
     struct ggml_tensor * mlp_norm;          // [hidden]
-    struct ggml_tensor * gate_proj;         // [hidden, intermediate]
-    struct ggml_tensor * up_proj;           // [hidden, intermediate]
+    struct ggml_tensor * gate_up;           // [hidden, 2*intermediate] fused (or NULL)
+    struct ggml_tensor * gate_proj;         // [hidden, intermediate] (fallback if types differ)
+    struct ggml_tensor * up_proj;           // [hidden, intermediate] (fallback if types differ)
     struct ggml_tensor * down_proj;         // [intermediate, hidden]
 
     // AdaLN scale-shift table: [6*hidden] (6 rows of [hidden])
@@ -217,10 +218,18 @@ static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg
         ly.ca_k_norm = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_norm.weight");
         ly.ca_o_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.o_proj.weight");
 
-        // MLP
+        // MLP: try gate+up fusion (same input, same pattern as QKV)
         ly.mlp_norm  = gf_load_tensor(&m->wctx, gf, p + ".mlp_norm.weight");
-        ly.gate_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.gate_proj.weight");
-        ly.up_proj   = gf_load_tensor(&m->wctx, gf, p + ".mlp.up_proj.weight");
+        ly.gate_up = gf_load_pair_fused(&m->wctx, gf,
+                        p + ".mlp.gate_proj.weight",
+                        p + ".mlp.up_proj.weight");
+        if (ly.gate_up) {
+            if (i == 0) fprintf(stderr, "[DiT] MLP: gate+up fused\n");
+        } else {
+            ly.gate_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.gate_proj.weight");
+            ly.up_proj   = gf_load_tensor(&m->wctx, gf, p + ".mlp.up_proj.weight");
+            if (i == 0) fprintf(stderr, "[DiT] MLP: gate+up separate (types differ)\n");
+        }
         ly.down_proj = gf_load_tensor(&m->wctx, gf, p + ".mlp.down_proj.weight");
 
         // AdaLN scale_shift_table [1, 6, hidden] in GGUF
@@ -506,12 +515,17 @@ static struct ggml_tensor * dit_ggml_build_mlp(
         struct ggml_tensor * norm_ffn,
         int S) {
 
-    // Gate + Up projections: [H, S] -> [I, S]
-    struct ggml_tensor * gate = dit_ggml_linear(ctx, ly->gate_proj, norm_ffn);
-    struct ggml_tensor * up   = dit_ggml_linear(ctx, ly->up_proj, norm_ffn);
-
-    // SwiGLU: silu(gate) * up
-    struct ggml_tensor * ff = ggml_swiglu_split(ctx, gate, up);
+    struct ggml_tensor * ff;
+    if (ly->gate_up) {
+        // Fused: single matmul [H, 2*I] x [H, S, N] -> [2*I, S, N], then swiglu splits ne[0]
+        struct ggml_tensor * gu = dit_ggml_linear(ctx, ly->gate_up, norm_ffn);
+        ff = ggml_swiglu(ctx, gu);
+    } else {
+        // Separate: two matmuls + split swiglu
+        struct ggml_tensor * gate = dit_ggml_linear(ctx, ly->gate_proj, norm_ffn);
+        struct ggml_tensor * up   = dit_ggml_linear(ctx, ly->up_proj, norm_ffn);
+        ff = ggml_swiglu_split(ctx, gate, up);
+    }
 
     // Down projection: [I, S] -> [H, S]
     return dit_ggml_linear(ctx, ly->down_proj, ff);
