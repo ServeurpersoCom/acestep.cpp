@@ -52,6 +52,10 @@ struct VAEGGML {
     struct ggml_tensor  * graph_input;
     struct ggml_tensor  * graph_output;
     int                   graph_T;     // cached T_latent (0 = no cache)
+
+    // Scratch buffers (reused across tiles, grown as needed)
+    std::vector<float> scratch_in;     // transposed input [64 * T]
+    std::vector<float> scratch_tile;   // tile audio output [2 * max_tile_audio]
 };
 
 // Load helpers
@@ -317,16 +321,18 @@ static struct ggml_tensor * vae_ggml_build_graph(
 }
 
 // Decode API
-// Decode latent [T_latent, out_ch] -> audio [2, T_audio]
-// Input layout matches DiT output: [T, Oc] time-major (Oc contiguous per frame).
-// Returns T_audio (or -1 on error).
+// Decode latent window [win_start..win_start+T_latent) from full latent -> audio [2, T_audio]
+// Input layout: full_latent is [T_full, 64] time-major (DiT output layout).
+// If full_latent==NULL, latent_or_full is already a [T_latent, 64] standalone buffer.
 // Graph is cached in VAEGGML and reused when T_latent matches.
+// Returns T_audio (or -1 on error).
 static int vae_ggml_decode(
         VAEGGML * m,
-        const float * latent,   // [T_latent, 64] flat time-major (DiT output layout)
+        const float * latent,   // [T_latent, 64] or [T_full, 64] if windowed
         int T_latent,
-        float * audio_out,      // [2, T_audio] flat (caller allocs T_latent*1920*2 floats)
-        int max_T_audio) {
+        float * audio_out,      // [2, T_audio] flat
+        int max_T_audio,
+        int win_start = 0) {    // offset into latent (0 = no windowing)
 
     int T_audio = T_latent * 1920;
     if (T_audio > max_T_audio) {
@@ -372,22 +378,23 @@ static int vae_ggml_decode(
                 ggml_graph_n_nodes(m->graph), T_latent);
     }
 
-    // Set input: transpose [T, 64] time-major -> ggml ne=[T, 64] channel-major
-    std::vector<float> transposed(64 * T_latent);
-    for (int t = 0; t < T_latent; t++)
-        for (int c = 0; c < 64; c++)
-            transposed[c * T_latent + t] = latent[t * 64 + c];
+    // Extract window + transpose in one pass: [T, 64] time-major -> ggml [T, 64] channel-major
+    // Loop order: c-outer for sequential writes (stride-64 reads are prefetcher-friendly)
+    size_t in_size = 64 * T_latent;
+    if (m->scratch_in.size() < in_size)
+        m->scratch_in.resize(in_size);
+    for (int c = 0; c < 64; c++)
+        for (int t = 0; t < T_latent; t++)
+            m->scratch_in[c * T_latent + t] = latent[(win_start + t) * 64 + c];
     ggml_backend_tensor_set(m->graph_input,
-                            transposed.data(), 0, transposed.size() * sizeof(float));
+                            m->scratch_in.data(), 0, in_size * sizeof(float));
 
     // Compute
     ggml_backend_sched_graph_compute(m->sched, m->graph);
 
-    // Read output
+    // Read output directly into audio_out (ggml layout is already [ch0..., ch1...])
     int T_out = (int)m->graph_output->ne[0];
-    std::vector<float> raw(T_out * 2);
-    ggml_backend_tensor_get(m->graph_output, raw.data(), 0, raw.size() * sizeof(float));
-    memcpy(audio_out, raw.data(), T_out * 2 * sizeof(float));
+    ggml_backend_tensor_get(m->graph_output, audio_out, 0, T_out * 2 * sizeof(float));
 
     fprintf(stderr, "[VAE] Decoded: T_latent=%d -> T_audio=%d (%.2fs @ 48kHz)\n",
             T_latent, T_out, (float)T_out / 48000.0f);
@@ -428,9 +435,9 @@ static int vae_ggml_decode_tiled(
     // Temp buffer for one tile output (max tile = chunk_size + 2*overlap latent frames)
     int max_win = chunk_size + 2 * overlap;
     int max_tile_audio = max_win * 1920 + 1920;  // margin for conv padding
-    std::vector<float> tile_audio(2 * max_tile_audio);
-    // Temp latent slice [win_len, 64] time-major
-    std::vector<float> tile_latent(64 * max_win);
+    if ((int)m->scratch_tile.size() < 2 * max_tile_audio)
+        m->scratch_tile.resize(2 * max_tile_audio);
+    float * tile_audio = m->scratch_tile.data();
 
     float upsample_factor = 0.0f;
     int audio_write_pos = 0;
@@ -448,15 +455,9 @@ static int vae_ggml_decode_tiled(
         if (win_end > T_latent) win_end = T_latent;
         int win_len = win_end - win_start;
 
-        // Extract latent window: [T_latent, 64] -> [win_len, 64] time-major
-        // Element (t, c) in full = latent[t * 64 + c]
-        for (int t = 0; t < win_len; t++)
-            for (int c = 0; c < 64; c++)
-                tile_latent[t * 64 + c] = latent[(win_start + t) * 64 + c];
-
-        // Decode tile
-        int tile_T = vae_ggml_decode(m, tile_latent.data(), win_len,
-                                     tile_audio.data(), max_tile_audio);
+        // Decode tile (extract+transpose fused inside vae_ggml_decode via win_start)
+        int tile_T = vae_ggml_decode(m, latent, win_len,
+                                     tile_audio, max_tile_audio, win_start);
         if (tile_T < 0) {
             fprintf(stderr, "[VAE] FATAL: tile %d decode failed\n", i);
             return -1;
@@ -486,10 +487,10 @@ static int vae_ggml_decode_tiled(
 
         // Append core audio: tile_audio is [2, tile_T] = ch0[0..tile_T-1] ch1[tile_T..2*tile_T-1]
         memcpy(audio_out + audio_write_pos,
-               tile_audio.data() + trim_start,
+               tile_audio + trim_start,
                core_len * sizeof(float));
         memcpy(audio_out + max_T_audio + audio_write_pos,
-               tile_audio.data() + tile_T + trim_start,
+               tile_audio + tile_T + trim_start,
                core_len * sizeof(float));
         audio_write_pos += core_len;
     }
