@@ -24,6 +24,7 @@ struct WeightCtx {
         struct ggml_tensor * tensor;
         const void * src;
         size_t nbytes;
+        size_t offset;  // byte offset into dst tensor (0 for regular loads)
     };
     std::vector<PendingCopy> pending;
 };
@@ -52,7 +53,7 @@ static bool wctx_alloc(WeightCtx * wctx, ggml_backend_t backend) {
     ggml_backend_buffer_set_usage(wctx->buffer, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
     size_t total = 0;
     for (auto & pc : wctx->pending) {
-        ggml_backend_tensor_set(pc.tensor, pc.src, 0, pc.nbytes);
+        ggml_backend_tensor_set(pc.tensor, pc.src, pc.offset, pc.nbytes);
         total += pc.nbytes;
     }
     fprintf(stderr, "[WeightCtx] Loaded %zu tensors, %.1f MB into backend\n",

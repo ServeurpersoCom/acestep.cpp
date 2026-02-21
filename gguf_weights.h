@@ -162,7 +162,7 @@ static struct ggml_tensor * gf_load_tensor(
     const void * data = gf.mapping + gf.data_offset + offset;
     size_t nbytes = ggml_nbytes(src);
 
-    wctx->pending.push_back({tensor, data, nbytes});
+    wctx->pending.push_back({tensor, data, nbytes, 0});
     return tensor;
 }
 
@@ -184,6 +184,82 @@ static const void * gf_get_data(const GGUFModel & gf, const char * name) {
     if (idx < 0) return NULL;
     size_t offset = gguf_get_tensor_offset(gf.gguf, idx);
     return gf.mapping + gf.data_offset + offset;
+}
+
+// Fuse Q, K, V projection weights into a single tensor [ne0, q_ne1 + k_ne1 + v_ne1].
+// Works for any quantized type since quantization is per-row (along ne[0]).
+// The fused tensor data is q rows || k rows || v rows (contiguous).
+static struct ggml_tensor * gf_load_qkv_fused(
+        WeightCtx * wctx,
+        const GGUFModel & gf,
+        const std::string & q_name,
+        const std::string & k_name,
+        const std::string & v_name) {
+    struct ggml_tensor * q_src = ggml_get_tensor(gf.meta, q_name.c_str());
+    struct ggml_tensor * k_src = ggml_get_tensor(gf.meta, k_name.c_str());
+    struct ggml_tensor * v_src = ggml_get_tensor(gf.meta, v_name.c_str());
+    if (!q_src || !k_src || !v_src) {
+        fprintf(stderr, "[GGUF] FATAL: QKV tensor not found: %s / %s / %s\n",
+                q_name.c_str(), k_name.c_str(), v_name.c_str());
+        exit(1);
+    }
+    // All must share ne[0] (input dim) and type - otherwise can't fuse
+    GGML_ASSERT(q_src->ne[0] == k_src->ne[0] && k_src->ne[0] == v_src->ne[0]);
+    if (q_src->type != k_src->type || k_src->type != v_src->type) {
+        return NULL;  // caller should fall back to separate loads
+    }
+
+    int64_t ne0 = q_src->ne[0];
+    int64_t fused_ne1 = q_src->ne[1] + k_src->ne[1] + v_src->ne[1];
+    int64_t ne[2] = { ne0, fused_ne1 };
+    struct ggml_tensor * fused = ggml_new_tensor(wctx->ctx, q_src->type, 2, ne);
+
+    size_t row_size = ggml_row_size(q_src->type, ne0);
+    size_t q_bytes = q_src->ne[1] * row_size;
+    size_t k_bytes = k_src->ne[1] * row_size;
+    size_t v_bytes = v_src->ne[1] * row_size;
+
+    auto get_data = [&](const std::string & name) -> const void * {
+        int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
+        size_t off = gguf_get_tensor_offset(gf.gguf, idx);
+        return gf.mapping + gf.data_offset + off;
+    };
+
+    wctx->pending.push_back({fused, get_data(q_name), q_bytes, 0});
+    wctx->pending.push_back({fused, get_data(k_name), k_bytes, q_bytes});
+    wctx->pending.push_back({fused, get_data(v_name), v_bytes, q_bytes + k_bytes});
+    return fused;
+}
+
+// Fuse two projection weights [ne0, a_ne1 + b_ne1] when types match.
+// Returns NULL if types differ.
+static struct ggml_tensor * gf_load_pair_fused(
+        WeightCtx * wctx,
+        const GGUFModel & gf,
+        const std::string & a_name,
+        const std::string & b_name) {
+    struct ggml_tensor * a_src = ggml_get_tensor(gf.meta, a_name.c_str());
+    struct ggml_tensor * b_src = ggml_get_tensor(gf.meta, b_name.c_str());
+    if (!a_src || !b_src) return NULL;
+    if (a_src->ne[0] != b_src->ne[0] || a_src->type != b_src->type) return NULL;
+
+    int64_t ne0 = a_src->ne[0];
+    int64_t ne[2] = { ne0, a_src->ne[1] + b_src->ne[1] };
+    struct ggml_tensor * fused = ggml_new_tensor(wctx->ctx, a_src->type, 2, ne);
+
+    size_t row_size = ggml_row_size(a_src->type, ne0);
+    size_t a_bytes = a_src->ne[1] * row_size;
+    size_t b_bytes = b_src->ne[1] * row_size;
+
+    auto get_data = [&](const std::string & name) -> const void * {
+        int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
+        size_t off = gguf_get_tensor_offset(gf.gguf, idx);
+        return gf.mapping + gf.data_offset + off;
+    };
+
+    wctx->pending.push_back({fused, get_data(a_name), a_bytes, 0});
+    wctx->pending.push_back({fused, get_data(b_name), b_bytes, a_bytes});
+    return fused;
 }
 
 // Read a uint32 KV value (returns 0 if not found)

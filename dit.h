@@ -51,18 +51,22 @@ struct DiTGGMLTembWeights {
 struct DiTGGMLLayer {
     // Self-attention
     struct ggml_tensor * self_attn_norm;    // [hidden]
-    struct ggml_tensor * sa_q_proj;         // [hidden, n_heads*head_dim]
-    struct ggml_tensor * sa_k_proj;         // [hidden, n_kv_heads*head_dim]
-    struct ggml_tensor * sa_v_proj;         // [hidden, n_kv_heads*head_dim]
+    struct ggml_tensor * sa_qkv;            // [hidden, (Nh+2*Nkv)*D] full fused (or NULL)
+    struct ggml_tensor * sa_qk;             // [hidden, (Nh+Nkv)*D] partial QK fused (or NULL)
+    struct ggml_tensor * sa_q_proj;         // separate fallback (NULL when any fusion active)
+    struct ggml_tensor * sa_k_proj;
+    struct ggml_tensor * sa_v_proj;
     struct ggml_tensor * sa_q_norm;         // [head_dim]
     struct ggml_tensor * sa_k_norm;         // [head_dim]
     struct ggml_tensor * sa_o_proj;         // [n_heads*head_dim, hidden]
 
     // Cross-attention
     struct ggml_tensor * cross_attn_norm;   // [hidden]
-    struct ggml_tensor * ca_q_proj;         // [hidden, n_heads*head_dim]
-    struct ggml_tensor * ca_k_proj;         // [hidden, n_kv_heads*head_dim]
-    struct ggml_tensor * ca_v_proj;         // [hidden, n_kv_heads*head_dim]
+    struct ggml_tensor * ca_qkv;            // [hidden, (Nh+2*Nkv)*D] full fused (or NULL)
+    struct ggml_tensor * ca_q_proj;         // separate (always for cross-attn with mixed types)
+    struct ggml_tensor * ca_kv;             // [hidden, 2*Nkv*D] fused KV (or NULL)
+    struct ggml_tensor * ca_k_proj;
+    struct ggml_tensor * ca_v_proj;
     struct ggml_tensor * ca_q_norm;         // [head_dim]
     struct ggml_tensor * ca_k_norm;         // [head_dim]
     struct ggml_tensor * ca_o_proj;         // [n_heads*head_dim, hidden]
@@ -145,7 +149,7 @@ static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg
     wctx_init(&m->wctx, n_tensors);
 
     // Timestep embeddings
-    dit_ggml_load_temb(&m->time_embed,   &m->wctx, gf, "decoder.time_embed");
+    dit_ggml_load_temb(&m->time_embed,  &m->wctx, gf, "decoder.time_embed");
     dit_ggml_load_temb(&m->time_embed_r, &m->wctx, gf, "decoder.time_embed_r");
 
     // proj_in: Conv1d weight [hidden, in_ch, patch_size]
@@ -164,23 +168,54 @@ static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg
         std::string p(prefix);
         DiTGGMLLayer & ly = m->layers[i];
 
-        // Self-attention
+        // Self-attention: try full QKV, partial QK, separate
         ly.self_attn_norm = gf_load_tensor(&m->wctx, gf, p + ".self_attn_norm.weight");
-        ly.sa_q_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_proj.weight");
-        ly.sa_k_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_proj.weight");
-        ly.sa_v_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
-        ly.sa_q_norm      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_norm.weight");
-        ly.sa_k_norm      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_norm.weight");
-        ly.sa_o_proj      = gf_load_tensor(&m->wctx, gf, p + ".self_attn.o_proj.weight");
+        ly.sa_qkv = gf_load_qkv_fused(&m->wctx, gf,
+                        p + ".self_attn.q_proj.weight",
+                        p + ".self_attn.k_proj.weight",
+                        p + ".self_attn.v_proj.weight");
+        if (!ly.sa_qkv) {
+            // Try Q+K fusion (same input, often same type in K-quants)
+            ly.sa_qk = gf_load_pair_fused(&m->wctx, gf,
+                            p + ".self_attn.q_proj.weight",
+                            p + ".self_attn.k_proj.weight");
+            if (ly.sa_qk) {
+                ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
+                if (i == 0) fprintf(stderr, "[DiT] Self-attn: Q+K fused, V separate\n");
+            } else {
+                ly.sa_q_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_proj.weight");
+                ly.sa_k_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_proj.weight");
+                ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
+                if (i == 0) fprintf(stderr, "[DiT] Self-attn: all separate (3 types differ)\n");
+            }
+        }
+        ly.sa_q_norm = gf_load_tensor(&m->wctx, gf, p + ".self_attn.q_norm.weight");
+        ly.sa_k_norm = gf_load_tensor(&m->wctx, gf, p + ".self_attn.k_norm.weight");
+        ly.sa_o_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.o_proj.weight");
 
-        // Cross-attention
+        // Cross-attention: try full QKV, K+V fused, separate
         ly.cross_attn_norm = gf_load_tensor(&m->wctx, gf, p + ".cross_attn_norm.weight");
-        ly.ca_q_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_proj.weight");
-        ly.ca_k_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_proj.weight");
-        ly.ca_v_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.v_proj.weight");
-        ly.ca_q_norm       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_norm.weight");
-        ly.ca_k_norm       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_norm.weight");
-        ly.ca_o_proj       = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.o_proj.weight");
+        ly.ca_qkv = gf_load_qkv_fused(&m->wctx, gf,
+                        p + ".cross_attn.q_proj.weight",
+                        p + ".cross_attn.k_proj.weight",
+                        p + ".cross_attn.v_proj.weight");
+        if (!ly.ca_qkv) {
+            ly.ca_q_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_proj.weight");
+            // Try K+V fusion (same input enc, may share type)
+            ly.ca_kv = gf_load_pair_fused(&m->wctx, gf,
+                            p + ".cross_attn.k_proj.weight",
+                            p + ".cross_attn.v_proj.weight");
+            if (ly.ca_kv) {
+                if (i == 0) fprintf(stderr, "[DiT] Cross-attn: Q separate, K+V fused\n");
+            } else {
+                ly.ca_k_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_proj.weight");
+                ly.ca_v_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.v_proj.weight");
+                if (i == 0) fprintf(stderr, "[DiT] Cross-attn: all separate\n");
+            }
+        }
+        ly.ca_q_norm = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.q_norm.weight");
+        ly.ca_k_norm = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.k_norm.weight");
+        ly.ca_o_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.o_proj.weight");
 
         // MLP
         ly.mlp_norm  = gf_load_tensor(&m->wctx, gf, p + ".mlp_norm.weight");
@@ -247,8 +282,8 @@ static struct ggml_tensor * dit_ggml_f32(
 // Helper: RMSNorm + weight multiply
 static struct ggml_tensor * dit_ggml_rms_norm_weighted(
         struct ggml_context * ctx,
-        struct ggml_tensor * x,          // [H, S]
-        struct ggml_tensor * weight,     // [H]
+        struct ggml_tensor * x,         // [H, S]
+        struct ggml_tensor * weight,    // [H]
         float eps) {
     struct ggml_tensor * norm = ggml_rms_norm(ctx, x, eps);
     return ggml_mul(ctx, norm, dit_ggml_f32(ctx, weight));
@@ -368,9 +403,9 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
         struct ggml_context * ctx,
         DiTGGML * m,
         DiTGGMLLayer * ly,
-        struct ggml_tensor * norm_sa,    // [H, S, N] pre-normalized + AdaLN-modulated
-        struct ggml_tensor * positions,  // [S*N] int32 position indices for RoPE
-        struct ggml_tensor * mask,       // [S, S] or NULL (sliding window mask)
+        struct ggml_tensor * norm_sa,   // [H, S, N] pre-normalized + AdaLN-modulated
+        struct ggml_tensor * positions, // [S*N] int32 position indices for RoPE
+        struct ggml_tensor * mask,      // [S, S] or NULL (sliding window mask)
         int S, int N, int layer_idx = -1) {
 
     DiTGGMLConfig & c = m->cfg;
@@ -378,15 +413,27 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     int Nh = c.n_heads;
     int Nkv = c.n_kv_heads;
 
-    // 1) QKV projections
-    // Q: [H, S, N] -> [Nh*D, S, N]
-    struct ggml_tensor * q = dit_ggml_linear(ctx, ly->sa_q_proj, norm_sa);
-    // K: [H, S, N] -> [Nkv*D, S, N]
-    struct ggml_tensor * k = dit_ggml_linear(ctx, ly->sa_k_proj, norm_sa);
-    // V: [H, S, N] -> [Nkv*D, S, N]
-    struct ggml_tensor * v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
+    // 1) QKV projections (full fused, QK partial, separate)
+    struct ggml_tensor * q, * k, * v;
+    int q_dim  = Nh * D;
+    int kv_dim = Nkv * D;
+    if (ly->sa_qkv) {
+        struct ggml_tensor * qkv = dit_ggml_linear(ctx, ly->sa_qkv, norm_sa);
+        q = ggml_cont(ctx, ggml_view_3d(ctx, qkv, q_dim, S, N, qkv->nb[1], qkv->nb[2], 0));
+        k = ggml_cont(ctx, ggml_view_3d(ctx, qkv, kv_dim, S, N, qkv->nb[1], qkv->nb[2], q_dim * sizeof(float)));
+        v = ggml_cont(ctx, ggml_view_3d(ctx, qkv, kv_dim, S, N, qkv->nb[1], qkv->nb[2], (q_dim + kv_dim) * sizeof(float)));
+    } else if (ly->sa_qk) {
+        struct ggml_tensor * qk = dit_ggml_linear(ctx, ly->sa_qk, norm_sa);
+        q = ggml_cont(ctx, ggml_view_3d(ctx, qk, q_dim, S, N, qk->nb[1], qk->nb[2], 0));
+        k = ggml_cont(ctx, ggml_view_3d(ctx, qk, kv_dim, S, N, qk->nb[1], qk->nb[2], q_dim * sizeof(float)));
+        v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
+    } else {
+        q = dit_ggml_linear(ctx, ly->sa_q_proj, norm_sa);
+        k = dit_ggml_linear(ctx, ly->sa_k_proj, norm_sa);
+        v = dit_ggml_linear(ctx, ly->sa_v_proj, norm_sa);
+    }
 
-    // 3) Reshape to heads: [Nh*D, S, N] -> [D, Nh, S, N]
+    // 2) Reshape to heads: [Nh*D, S, N] -> [D, Nh, S, N]
     //    Rope merges S*N then restores 4D. Permute to flash_attn layout after rope.
     q = ggml_reshape_4d(ctx, q, D, Nh, S, N);
     k = ggml_reshape_4d(ctx, k, D, Nkv, S, N);
@@ -478,9 +525,9 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(
         struct ggml_context * ctx,
         DiTGGML * m,
         DiTGGMLLayer * ly,
-        struct ggml_tensor * norm_ca,    // [H, S, N]
-        struct ggml_tensor * enc,        // [H, enc_S, N]
-        struct ggml_tensor * positions,  // unused, kept for consistency
+        struct ggml_tensor * norm_ca,   // [H, S, N]
+        struct ggml_tensor * enc,       // [H, enc_S, N]
+        struct ggml_tensor * positions, // unused, kept for consistency
         int S, int enc_S, int N) {
 
     DiTGGMLConfig & c = m->cfg;
@@ -490,10 +537,31 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(
 
     (void)positions;  // cross-attn has no RoPE
 
-    // Q from hidden, K/V from encoder
-    struct ggml_tensor * q = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);  // [Nh*D, S, N]
-    struct ggml_tensor * k = dit_ggml_linear(ctx, ly->ca_k_proj, enc);      // [Nkv*D, enc_S, N]
-    struct ggml_tensor * v = dit_ggml_linear(ctx, ly->ca_v_proj, enc);      // [Nkv*D, enc_S, N]
+    // Q from hidden, KV from encoder (full fused, Q+KV partial, separate)
+    int q_dim  = Nh * D;
+    int kv_dim = Nkv * D;
+    struct ggml_tensor * q, * k, * v;
+    if (ly->ca_qkv) {
+        // Full QKV fused: split Q from hidden, KV from enc via weight views
+        struct ggml_tensor * w_q  = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], q_dim,
+                                                  ly->ca_qkv->nb[1], 0);
+        struct ggml_tensor * w_kv = ggml_view_2d(ctx, ly->ca_qkv, ly->ca_qkv->ne[0], 2 * kv_dim,
+                                                  ly->ca_qkv->nb[1], (size_t)q_dim * ly->ca_qkv->nb[1]);
+        q = ggml_mul_mat(ctx, w_q, norm_ca);
+        struct ggml_tensor * kv = ggml_mul_mat(ctx, w_kv, enc);
+        k = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
+        v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], kv_dim * sizeof(float)));
+    } else if (ly->ca_kv) {
+        // Q separate, K+V fused
+        q = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
+        struct ggml_tensor * kv = ggml_mul_mat(ctx, ly->ca_kv, enc);
+        k = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], 0));
+        v = ggml_cont(ctx, ggml_view_3d(ctx, kv, kv_dim, enc_S, N, kv->nb[1], kv->nb[2], kv_dim * sizeof(float)));
+    } else {
+        q = dit_ggml_linear(ctx, ly->ca_q_proj, norm_ca);
+        k = dit_ggml_linear(ctx, ly->ca_k_proj, enc);
+        v = dit_ggml_linear(ctx, ly->ca_v_proj, enc);
+    }
 
     // reshape to [D, heads, seq, N] then permute to [D, seq, heads, N]
     q = ggml_reshape_4d(ctx, q, D, Nh, S, N);
@@ -534,11 +602,11 @@ static struct ggml_tensor * dit_ggml_build_layer(
         struct ggml_context * ctx,
         DiTGGML * m,
         int layer_idx,
-        struct ggml_tensor * hidden,     // [H, S, N]
-        struct ggml_tensor * tproj,      // [6H] f32 combined temb projection
-        struct ggml_tensor * enc,        // [H, enc_S, N] or NULL
-        struct ggml_tensor * positions,  // [S] int32
-        struct ggml_tensor * sw_mask,    // [S, S] or NULL
+        struct ggml_tensor * hidden,    // [H, S, N]
+        struct ggml_tensor * tproj,     // [6H] f32 combined temb projection
+        struct ggml_tensor * enc,       // [H, enc_S, N] or NULL
+        struct ggml_tensor * positions, // [S] int32
+        struct ggml_tensor * sw_mask,   // [S, S] or NULL
         int S, int enc_S, int N) {
 
     DiTGGMLConfig & c = m->cfg;
@@ -629,14 +697,14 @@ static struct ggml_tensor * dit_ggml_build_layer(
 static struct ggml_cgraph * dit_ggml_build_graph(
         DiTGGML * m,
         struct ggml_context * ctx,
-        int T,                  // temporal length (before patching)
-        int enc_S,              // encoder sequence length
-        int N,                  // batch size
-        struct ggml_tensor ** p_input,      // [out] input tensor to fill
-        struct ggml_tensor ** p_output) {   // [out] output tensor to read
+        int T,                 // temporal length (before patching)
+        int enc_S,             // encoder sequence length
+        int N,                 // batch size
+        struct ggml_tensor ** p_input,     // [out] input tensor to fill
+        struct ggml_tensor ** p_output) {  // [out] output tensor to read
 
     DiTGGMLConfig & c = m->cfg;
-    int S = T / c.patch_size;   // sequence length after patching
+    int S = T / c.patch_size;  // sequence length after patching
     int H = c.hidden_size;
     int P = c.patch_size;
 
@@ -783,7 +851,6 @@ static struct ggml_cgraph * dit_ggml_build_graph(
 
 // APG (Adaptive Projected Guidance) for DiT CFG
 // Matches Python ACE-Step-1.5 acestep/models/base/apg_guidance.py
-
 struct APGMomentumBuffer {
     double momentum;
     std::vector<double> running_average;
