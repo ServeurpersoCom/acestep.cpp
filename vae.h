@@ -72,7 +72,13 @@ static void vae_fuse_wn(struct ggml_tensor * dst, const GGUFModel & gf, const st
             w[d * fan + i] = vv * s;
         }
     }
-    ggml_backend_tensor_set(dst, w.data(), 0, w.size() * sizeof(float));
+    if (dst->type == GGML_TYPE_F16) {
+        std::vector<ggml_fp16_t> w16(w.size());
+        ggml_fp32_to_fp16_row(w.data(), w16.data(), (int)w.size());
+        ggml_backend_tensor_set(dst, w16.data(), 0, w16.size() * sizeof(ggml_fp16_t));
+    } else {
+        ggml_backend_tensor_set(dst, w.data(), 0, w.size() * sizeof(float));
+    }
 }
 
 // Load bf16 snake param [1,C,1] -> exp -> f32 [1, C]
@@ -83,6 +89,17 @@ static void vae_load_snake(struct ggml_tensor * dst, const GGUFModel & gf, const
     std::vector<float> d(C);
     for (int i = 0; i < C; i++)
         d[i] = expf(ggml_bf16_to_fp32(*(const ggml_bf16_t *)&raw[i]));
+    ggml_backend_tensor_set(dst, d.data(), 0, C * sizeof(float));
+}
+
+// Load bf16 snake param [1,C,1] -> 1/exp -> f32 [1, C] (reciprocal for mul fusion)
+static void vae_load_snake_inv(struct ggml_tensor * dst, const GGUFModel & gf, const std::string & name) {
+    struct ggml_tensor * mt = ggml_get_tensor(gf.meta, name.c_str());
+    int C = (int)mt->ne[1];
+    const uint16_t * raw = (const uint16_t *)gf_get_data(gf, name.c_str());
+    std::vector<float> d(C);
+    for (int i = 0; i < C; i++)
+        d[i] = 1.0f / expf(ggml_bf16_to_fp32(*(const ggml_bf16_t *)&raw[i]));
     ggml_backend_tensor_set(dst, d.data(), 0, C * sizeof(float));
 }
 
@@ -116,7 +133,7 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->weight_ctx = ggml_init(p);
     struct ggml_context * ctx = m->weight_ctx;
 
-    m->c1w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, 64, 2048);
+    m->c1w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 7, 64, 2048);
     m->c1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 2048);
 
     for (int i = 0; i < 5; i++) {
@@ -135,17 +152,17 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
             ru.dilation = dilations[r];
             ru.s1a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
             ru.s1b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
-            ru.c1w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, C, C);
+            ru.c1w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 7, C, C);
             ru.c1b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
             ru.s2a = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
             ru.s2b = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, C);
-            ru.c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, C, C);
+            ru.c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 1, C, C);
             ru.c2b = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, C);
         }
     }
     m->sa  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
     m->sb  = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 1, 128);
-    m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 7, 128, 2);
+    m->c2w = ggml_new_tensor_3d(ctx, GGML_TYPE_F16, 7, 128, 2);
 
     // Phase 2: allocate backend buffer on GPU (im2col grid Y fix enables long-sequence conv1d)
     BackendPair bp = backend_init("VAE");
@@ -165,24 +182,24 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
         VAEBlock & b = m->blk[i];
         std::string blk_pfx = "decoder.block." + std::to_string(i);
         vae_load_snake(b.sa, gf, blk_pfx + ".snake1.alpha");
-        vae_load_snake(b.sb, gf, blk_pfx + ".snake1.beta");
+        vae_load_snake_inv(b.sb, gf, blk_pfx + ".snake1.beta");
         vae_fuse_wn(b.ctw, gf, blk_pfx + ".conv_t1");
         vae_load_bias(b.ctb, gf, blk_pfx + ".conv_t1.bias");
         for (int r = 0; r < 3; r++) {
             VAEResUnit & ru = b.ru[r];
             std::string rp = blk_pfx + ".res_unit" + std::to_string(r + 1);
             vae_load_snake(ru.s1a, gf, rp + ".snake1.alpha");
-            vae_load_snake(ru.s1b, gf, rp + ".snake1.beta");
+            vae_load_snake_inv(ru.s1b, gf, rp + ".snake1.beta");
             vae_fuse_wn(ru.c1w, gf, rp + ".conv1");
             vae_load_bias(ru.c1b, gf, rp + ".conv1.bias");
             vae_load_snake(ru.s2a, gf, rp + ".snake2.alpha");
-            vae_load_snake(ru.s2b, gf, rp + ".snake2.beta");
+            vae_load_snake_inv(ru.s2b, gf, rp + ".snake2.beta");
             vae_fuse_wn(ru.c2w, gf, rp + ".conv2");
             vae_load_bias(ru.c2b, gf, rp + ".conv2.bias");
         }
     }
     vae_load_snake(m->sa, gf, "decoder.snake1.alpha");
-    vae_load_snake(m->sb, gf, "decoder.snake1.beta");
+    vae_load_snake_inv(m->sb, gf, "decoder.snake1.beta");
     vae_fuse_wn(m->c2w, gf, "decoder.conv2");
 
     fprintf(stderr, "[VAE] Loaded: 5 blocks, upsample=1920x\n");
@@ -190,30 +207,28 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
 }
 
 // Graph building
-// Snake activation: x + sin^2(exp_a * x) / exp_b
-// x: [T, C], exp_a: [1, C], exp_b: [1, C]
+// Snake activation: x + sin^2(exp_a * x) * inv_b
+// x: [T, C], exp_a: [1, C], inv_b: [1, C] (pre-computed 1/exp(b))
 static struct ggml_tensor * vae_snake(
         struct ggml_context * ctx,
         struct ggml_tensor * x,
         struct ggml_tensor * exp_a,
-        struct ggml_tensor * exp_b) {
+        struct ggml_tensor * inv_b) {
     struct ggml_tensor * ax = ggml_mul(ctx, x, exp_a);      // [T, C] (broadcast 1->T)
     struct ggml_tensor * s  = ggml_sin(ctx, ax);             // sin(e^a * x)
     struct ggml_tensor * s2 = ggml_sqr(ctx, s);              // sin^2
-    struct ggml_tensor * d  = ggml_div(ctx, s2, exp_b);      // / e^b
+    struct ggml_tensor * d  = ggml_mul(ctx, s2, inv_b);      // * 1/e^b
     return ggml_add(ctx, x, d);                              // x + ...
 }
 
 // Conv1d + bias: data [T, IC] -> [T_out, OC]
 static struct ggml_tensor * vae_conv1d(
         struct ggml_context * ctx,
-        struct ggml_tensor * w,    // [K, IC, OC]
+        struct ggml_tensor * w,    // [K, IC, OC] (F16, pre-cast at load)
         struct ggml_tensor * b,    // [OC] or NULL
         struct ggml_tensor * x,    // [T, IC]
         int stride, int padding, int dilation) {
-    // ggml_conv_1d im2col requires F16 kernel
-    struct ggml_tensor * wf16 = ggml_cast(ctx, w, GGML_TYPE_F16);
-    struct ggml_tensor * y = ggml_conv_1d(ctx, wf16, x, stride, padding, dilation);
+    struct ggml_tensor * y = ggml_conv_1d(ctx, w, x, stride, padding, dilation);
     // ggml_conv_1d returns [OL, OC, N=1], squeeze to 2d
     y = ggml_reshape_2d(ctx, y, y->ne[0], y->ne[1]);
     if (b) {
