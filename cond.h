@@ -103,8 +103,8 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
 
     // Lyric encoder
     m->lyric_embed_w = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.weight");
-    m->lyric_embed_b = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.bias");
-    m->lyric_norm    = gf_load_tensor(&m->wctx, gf, "encoder.lyric_encoder.norm.weight");
+    m->lyric_embed_b = gf_load_tensor_f32(&m->wctx, gf, "encoder.lyric_encoder.embed_tokens.bias");
+    m->lyric_norm    = gf_load_tensor_f32(&m->wctx, gf, "encoder.lyric_encoder.norm.weight");
     for (int i = 0; i < m->lyric_cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "encoder.lyric_encoder.layers.%d", i);
@@ -113,8 +113,8 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
 
     // Timbre encoder
     m->timbre_embed_w = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.weight");
-    m->timbre_embed_b = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.bias");
-    m->timbre_norm    = gf_load_tensor(&m->wctx, gf, "encoder.timbre_encoder.norm.weight");
+    m->timbre_embed_b = gf_load_tensor_f32(&m->wctx, gf, "encoder.timbre_encoder.embed_tokens.bias");
+    m->timbre_norm    = gf_load_tensor_f32(&m->wctx, gf, "encoder.timbre_encoder.norm.weight");
     for (int i = 0; i < m->timbre_cfg.n_layers; i++) {
         char prefix[128];
         snprintf(prefix, sizeof(prefix), "encoder.timbre_encoder.layers.%d", i);

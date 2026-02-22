@@ -176,6 +176,55 @@ static struct ggml_tensor * gf_try_load_tensor(
     return gf_load_tensor(wctx, gf, name);
 }
 
+// Load tensor, converting to F32 at load time (eliminates runtime cast nodes).
+// Best for small tensors: norms [H], QK-norms [D], scale_shift_table [H,6], biases.
+static struct ggml_tensor * gf_load_tensor_f32(
+        WeightCtx * wctx,
+        const GGUFModel & gf,
+        const std::string & name) {
+    int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
+    if (idx < 0) {
+        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
+        exit(1);
+    }
+    struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
+    int n_dims = ggml_n_dims(src);
+    int64_t ne[4] = {1, 1, 1, 1};
+    for (int i = 0; i < n_dims; i++) ne[i] = src->ne[i];
+
+    // If already F32, just load normally
+    if (src->type == GGML_TYPE_F32) {
+        return gf_load_tensor(wctx, gf, name);
+    }
+
+    // Create F32 tensor
+    struct ggml_tensor * tensor = ggml_new_tensor(wctx->ctx, GGML_TYPE_F32, n_dims, ne);
+    ggml_set_name(tensor, name.c_str());
+
+    // Convert data into staging buffer
+    size_t n = ggml_nelements(src);
+    wctx->staging.emplace_back(n);
+    std::vector<float> & buf = wctx->staging.back();
+
+    size_t offset = gguf_get_tensor_offset(gf.gguf, idx);
+    const void * raw = gf.mapping + gf.data_offset + offset;
+
+    if (src->type == GGML_TYPE_BF16) {
+        const uint16_t * p = (const uint16_t *)raw;
+        for (size_t i = 0; i < n; i++)
+            buf[i] = ggml_bf16_to_fp32(*(const ggml_bf16_t *)&p[i]);
+    } else if (src->type == GGML_TYPE_F16) {
+        ggml_fp16_to_fp32_row((const ggml_fp16_t *)raw, buf.data(), (int)n);
+    } else {
+        fprintf(stderr, "[GGUF] WARNING: gf_load_tensor_f32 unsupported type %d for '%s', loading as-is\n",
+                src->type, name.c_str());
+        return gf_load_tensor(wctx, gf, name);
+    }
+
+    wctx->pending.push_back({tensor, buf.data(), n * sizeof(float), 0});
+    return tensor;
+}
+
 // Get raw pointer to tensor data in the mmapped file.
 // Useful for CPU-side operations (e.g. bf16 embed lookup for lyrics).
 // Returns NULL if not found.

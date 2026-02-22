@@ -27,6 +27,9 @@ struct WeightCtx {
         size_t offset;  // byte offset into dst tensor (0 for regular loads)
     };
     std::vector<PendingCopy> pending;
+
+    // Staging buffers for type-converted data (kept alive until wctx_alloc)
+    std::vector<std::vector<float>> staging;
 };
 
 static void wctx_init(WeightCtx * wctx, int n_tensors) {
@@ -59,6 +62,7 @@ static bool wctx_alloc(WeightCtx * wctx, ggml_backend_t backend) {
     fprintf(stderr, "[WeightCtx] Loaded %zu tensors, %.1f MB into backend\n",
             wctx->pending.size(), (float)total / (1024 * 1024));
     wctx->pending.clear();
+    wctx->staging.clear();
     return true;
 }
 

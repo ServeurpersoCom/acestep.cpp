@@ -228,7 +228,7 @@ static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int
     wctx_init(&m->wctx, n_tensors);
 
     m->embed_tokens = gf_load_tensor(&m->wctx, gf, "model.embed_tokens.weight");
-    m->final_norm   = gf_load_tensor(&m->wctx, gf, "model.norm.weight");
+    m->final_norm   = gf_load_tensor_f32(&m->wctx, gf, "model.norm.weight");
 
     for (int i = 0; i < c.n_layers; i++) {
         char prefix[64];

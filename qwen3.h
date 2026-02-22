@@ -209,14 +209,14 @@ static struct ggml_tensor * qwen3_build_layers(
 // Loading
 static void qwen3_load_layer(WeightCtx * wctx, const GGUFModel & gf,
                                Qwen3Layer * ly, const std::string & prefix) {
-    ly->input_layernorm      = gf_load_tensor(wctx, gf, prefix + ".input_layernorm.weight");
-    ly->post_attn_layernorm  = gf_load_tensor(wctx, gf, prefix + ".post_attention_layernorm.weight");
+    ly->input_layernorm      = gf_load_tensor_f32(wctx, gf, prefix + ".input_layernorm.weight");
+    ly->post_attn_layernorm  = gf_load_tensor_f32(wctx, gf, prefix + ".post_attention_layernorm.weight");
     ly->q_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.q_proj.weight");
     ly->k_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.k_proj.weight");
     ly->v_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.v_proj.weight");
     ly->o_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.o_proj.weight");
-    ly->q_norm = gf_load_tensor(wctx, gf, prefix + ".self_attn.q_norm.weight");
-    ly->k_norm = gf_load_tensor(wctx, gf, prefix + ".self_attn.k_norm.weight");
+    ly->q_norm = gf_load_tensor_f32(wctx, gf, prefix + ".self_attn.q_norm.weight");
+    ly->k_norm = gf_load_tensor_f32(wctx, gf, prefix + ".self_attn.k_norm.weight");
     ly->gate_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.gate_proj.weight");
     ly->up_proj   = gf_load_tensor(wctx, gf, prefix + ".mlp.up_proj.weight");
     ly->down_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.down_proj.weight");
@@ -256,7 +256,7 @@ static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * gguf_path) {
     wctx_init(&m->wctx, n_tensors);
 
     m->embed_tokens = gf_load_tensor(&m->wctx, gf, "embed_tokens.weight");
-    m->final_norm   = gf_load_tensor(&m->wctx, gf, "norm.weight");
+    m->final_norm   = gf_load_tensor_f32(&m->wctx, gf, "norm.weight");
 
     for (int i = 0; i < m->cfg.n_layers; i++) {
         char prefix[64];
