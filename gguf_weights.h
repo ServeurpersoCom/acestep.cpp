@@ -197,6 +197,13 @@ static struct ggml_tensor * gf_load_tensor_f32(
         return gf_load_tensor(wctx, gf, name);
     }
 
+    // Bail early on unsupported types (before creating tensor in ctx)
+    if (src->type != GGML_TYPE_BF16 && src->type != GGML_TYPE_F16) {
+        fprintf(stderr, "[GGUF] WARNING: gf_load_tensor_f32 unsupported type %d for '%s', loading as-is\n",
+                src->type, name.c_str());
+        return gf_load_tensor(wctx, gf, name);
+    }
+
     // Create F32 tensor
     struct ggml_tensor * tensor = ggml_new_tensor(wctx->ctx, GGML_TYPE_F32, n_dims, ne);
     ggml_set_name(tensor, name.c_str());
@@ -213,12 +220,8 @@ static struct ggml_tensor * gf_load_tensor_f32(
         const uint16_t * p = (const uint16_t *)raw;
         for (size_t i = 0; i < n; i++)
             buf[i] = ggml_bf16_to_fp32(*(const ggml_bf16_t *)&p[i]);
-    } else if (src->type == GGML_TYPE_F16) {
-        ggml_fp16_to_fp32_row((const ggml_fp16_t *)raw, buf.data(), (int)n);
     } else {
-        fprintf(stderr, "[GGUF] WARNING: gf_load_tensor_f32 unsupported type %d for '%s', loading as-is\n",
-                src->type, name.c_str());
-        return gf_load_tensor(wctx, gf, name);
+        ggml_fp16_to_fp32_row((const ggml_fp16_t *)raw, buf.data(), (int)n);
     }
 
     wctx->pending.push_back({tensor, buf.data(), n * sizeof(float), 0});

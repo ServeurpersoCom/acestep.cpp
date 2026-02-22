@@ -144,6 +144,10 @@ static struct ggml_tensor * dit_load_proj_in_w(
         WeightCtx * wctx, const GGUFModel & gf, const std::string & name,
         int H, int in_ch, int P) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
+    if (idx < 0) {
+        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
+        exit(1);
+    }
     struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
     size_t offset = gguf_get_tensor_offset(gf.gguf, idx);
     const void * raw = gf.mapping + gf.data_offset + offset;
@@ -157,19 +161,25 @@ static struct ggml_tensor * dit_load_proj_in_w(
 
     // src ggml [P, in_ch, H]: elem(p, ic, h) = raw[h*P*in_ch + ic*P + p]
     // dst ggml [in_ch*P, H]:  elem(j, h)     = buf[h*in_ch*P + j]  where j = p*in_ch + ic
+    auto cvt = [&](auto read_fn) {
+        for (int h = 0; h < H; h++)
+            for (int ic = 0; ic < in_ch; ic++)
+                for (int p = 0; p < P; p++)
+                    buf[h*in_ch*P + p*in_ch + ic] = read_fn(h*P*in_ch + ic*P + p);
+    };
     if (src->type == GGML_TYPE_BF16) {
         const uint16_t * s = (const uint16_t *)raw;
-        for (int h = 0; h < H; h++)
-            for (int ic = 0; ic < in_ch; ic++)
-                for (int p = 0; p < P; p++)
-                    buf[h*in_ch*P + p*in_ch + ic] =
-                        ggml_bf16_to_fp32(*(const ggml_bf16_t *)&s[h*P*in_ch + ic*P + p]);
-    } else {
+        cvt([&](int i) { return ggml_bf16_to_fp32(*(const ggml_bf16_t *)&s[i]); });
+    } else if (src->type == GGML_TYPE_F16) {
+        const ggml_fp16_t * s = (const ggml_fp16_t *)raw;
+        cvt([&](int i) { return ggml_fp16_to_fp32(s[i]); });
+    } else if (src->type == GGML_TYPE_F32) {
         const float * s = (const float *)raw;
-        for (int h = 0; h < H; h++)
-            for (int ic = 0; ic < in_ch; ic++)
-                for (int p = 0; p < P; p++)
-                    buf[h*in_ch*P + p*in_ch + ic] = s[h*P*in_ch + ic*P + p];
+        cvt([&](int i) { return s[i]; });
+    } else {
+        fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_in pre-permute\n",
+                src->type, name.c_str());
+        exit(1);
     }
     wctx->pending.push_back({dst, buf.data(), n * sizeof(float), 0});
     return dst;
@@ -181,6 +191,10 @@ static struct ggml_tensor * dit_load_proj_out_w(
         WeightCtx * wctx, const GGUFModel & gf, const std::string & name,
         int H, int out_ch, int P) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
+    if (idx < 0) {
+        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
+        exit(1);
+    }
     struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
     size_t offset = gguf_get_tensor_offset(gf.gguf, idx);
     const void * raw = gf.mapping + gf.data_offset + offset;
@@ -194,19 +208,25 @@ static struct ggml_tensor * dit_load_proj_out_w(
 
     // src ggml [P, out_ch, H]: elem(p, oc, h) = raw[h*P*out_ch + oc*P + p]
     // dst ggml [H, out_ch*P]:  elem(h, j)     = buf[j*H + h]  where j = p*out_ch + oc
+    auto cvt = [&](auto read_fn) {
+        for (int h = 0; h < H; h++)
+            for (int oc = 0; oc < out_ch; oc++)
+                for (int p = 0; p < P; p++)
+                    buf[(p*out_ch + oc)*H + h] = read_fn(h*P*out_ch + oc*P + p);
+    };
     if (src->type == GGML_TYPE_BF16) {
         const uint16_t * s = (const uint16_t *)raw;
-        for (int h = 0; h < H; h++)
-            for (int oc = 0; oc < out_ch; oc++)
-                for (int p = 0; p < P; p++)
-                    buf[(p*out_ch + oc)*H + h] =
-                        ggml_bf16_to_fp32(*(const ggml_bf16_t *)&s[h*P*out_ch + oc*P + p]);
-    } else {
+        cvt([&](int i) { return ggml_bf16_to_fp32(*(const ggml_bf16_t *)&s[i]); });
+    } else if (src->type == GGML_TYPE_F16) {
+        const ggml_fp16_t * s = (const ggml_fp16_t *)raw;
+        cvt([&](int i) { return ggml_fp16_to_fp32(s[i]); });
+    } else if (src->type == GGML_TYPE_F32) {
         const float * s = (const float *)raw;
-        for (int h = 0; h < H; h++)
-            for (int oc = 0; oc < out_ch; oc++)
-                for (int p = 0; p < P; p++)
-                    buf[(p*out_ch + oc)*H + h] = s[h*P*out_ch + oc*P + p];
+        cvt([&](int i) { return s[i]; });
+    } else {
+        fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_out pre-permute\n",
+                src->type, name.c_str());
+        exit(1);
     }
     wctx->pending.push_back({dst, buf.data(), n * sizeof(float), 0});
     return dst;
