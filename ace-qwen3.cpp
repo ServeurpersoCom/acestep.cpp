@@ -44,41 +44,72 @@ struct TokenProb {
     float prob;
 };
 
-static int sample_top_p(float * logits, int vocab_size, float temperature, float top_p, std::mt19937 & rng) {
-    for (int i = 0; i < vocab_size; i++)
-        logits[i] /= temperature;
-    float max_val = *std::max_element(logits, logits + vocab_size);
+// Sampling: top_k -> top_p (on raw logits) -> temperature -> softmax -> multinomial
+// Matches Python: _apply_top_k_filter -> _apply_top_p_filter -> _sample_tokens
+static int sample_top_k_p(float * logits, int V, float temperature, float top_p, int top_k, std::mt19937 & rng) {
+    // 1. top_k: keep top K values, set rest to -inf
+    if (top_k > 0 && top_k < V) {
+        // partial sort to find k-th largest value
+        std::vector<float> tmp(logits, logits + V);
+        std::nth_element(tmp.begin(), tmp.begin() + top_k, tmp.end(), std::greater<float>());
+        float threshold = tmp[top_k];
+        for (int i = 0; i < V; i++)
+            if (logits[i] < threshold) logits[i] = -INFINITY;
+    }
+
+    // 2. top_p: nucleus filter on raw logits (softmax WITHOUT temperature, matches Python)
+    if (top_p > 0.0f && top_p < 1.0f) {
+        // sort descending by logit value
+        std::vector<TokenProb> sorted(V);
+        for (int i = 0; i < V; i++) sorted[i] = {i, logits[i]};
+        std::sort(sorted.begin(), sorted.end(),
+                  [](const TokenProb & a, const TokenProb & b) { return a.prob > b.prob; });
+
+        // softmax of sorted raw logits (no temperature) for cumsum
+        float max_val = sorted[0].prob;
+        float sum = 0.0f;
+        std::vector<float> probs(V);
+        for (int i = 0; i < V; i++) {
+            probs[i] = expf(sorted[i].prob - max_val);
+            sum += probs[i];
+        }
+        float inv = 1.0f / sum;
+
+        // cumulative sum, mask where cumprob > top_p (Python shift-right trick)
+        float cum = 0.0f;
+        for (int i = 0; i < V; i++) {
+            cum += probs[i] * inv;
+            if (i > 0 && cum > top_p)  // i>0: always keep at least first token
+                logits[sorted[i].id] = -INFINITY;
+        }
+    }
+
+    // 3. temperature -> softmax -> multinomial
+    if (temperature <= 0.0f) {
+        // greedy
+        return (int)(std::max_element(logits, logits + V) - logits);
+    }
+
+    float inv_temp = 1.0f / temperature;
+    float max_val = -INFINITY;
+    for (int i = 0; i < V; i++) {
+        logits[i] *= inv_temp;
+        if (logits[i] > max_val) max_val = logits[i];
+    }
     float sum = 0.0f;
-    for (int i = 0; i < vocab_size; i++) {
+    for (int i = 0; i < V; i++) {
         logits[i] = expf(logits[i] - max_val);
         sum += logits[i];
     }
-    float inv_sum = 1.0f / sum;
-    for (int i = 0; i < vocab_size; i++)
-        logits[i] *= inv_sum;
-    std::vector<TokenProb> candidates;
-    float threshold = 1.0f / (float)vocab_size * 0.01f;
-    for (int i = 0; i < vocab_size; i++)
-        if (logits[i] > threshold) candidates.push_back({i, logits[i]});
-    std::sort(candidates.begin(), candidates.end(),
-              [](const TokenProb & a, const TokenProb & b) { return a.prob > b.prob; });
-    float cum = 0.0f;
-    int n_keep = 0;
-    for (size_t i = 0; i < candidates.size(); i++) {
-        cum += candidates[i].prob;
-        n_keep = (int)i + 1;
-        if (cum >= top_p) break;
-    }
-    float renorm_sum = 0.0f;
-    for (int i = 0; i < n_keep; i++) renorm_sum += candidates[i].prob;
-    std::uniform_real_distribution<float> dist(0.0f, renorm_sum);
+
+    std::uniform_real_distribution<float> dist(0.0f, sum);
     float r = dist(rng);
     float acc = 0.0f;
-    for (int i = 0; i < n_keep; i++) {
-        acc += candidates[i].prob;
-        if (acc >= r) return candidates[i].id;
+    for (int i = 0; i < V; i++) {
+        acc += logits[i];
+        if (acc >= r) return i;
     }
-    return candidates[0].id;
+    return 0;
 }
 
 //
@@ -727,7 +758,7 @@ static void parse_phase1_into_aces(
 static std::vector<std::string> generate_phase1_batch(
         Qwen3LM * m, BPETokenizer * bpe,
         const std::vector<int> & prompt_tokens,
-        int max_new_tokens, float temperature, float top_p,
+        int max_new_tokens, float temperature, float top_p, int top_k,
         int base_seed, int N,
         MetadataFSM * fsm_template,
         bool lyrics_mode,
@@ -787,7 +818,7 @@ static std::vector<std::string> generate_phase1_batch(
         if (fsm_template && fsm_template->enabled)
             seqs[i].fsm.apply_mask(lg.data());
 
-        int tok = sample_top_p(lg.data(), V, temperature, top_p, seqs[i].rng);
+        int tok = sample_top_k_p(lg.data(), V, temperature, top_p, top_k, seqs[i].rng);
 
         if (tok == TOKEN_IM_END) {
             seqs[i].done = true;
@@ -870,7 +901,7 @@ static std::vector<std::string> generate_phase1_batch(
                     if (v != TOKEN_IM_END) lc[v] = -1e9f;
             }
 
-            int tok = sample_top_p(lc, V, temperature, top_p, seqs[i].rng);
+            int tok = sample_top_k_p(lc, V, temperature, top_p, top_k, seqs[i].rng);
 
             if (tok == TOKEN_IM_END) {
                 seqs[i].done = true;
@@ -918,7 +949,7 @@ static std::vector<std::string> generate_phase1_batch(
 // Returns N code strings. Seeds = base_seed + 0, 1, ..., N-1.
 static std::vector<std::string> run_phase2_batch(
         Qwen3LM * m, BPETokenizer & bpe, const std::vector<AcePrompt> & aces,
-        float temperature, float top_p, int base_seed, int N,
+        float temperature, float top_p, int top_k, int base_seed, int N,
         float cfg_scale, const char * negative_prompt) {
 
     int V = m->cfg.vocab_size;
@@ -1005,7 +1036,7 @@ static std::vector<std::string> run_phase2_batch(
         for (int v = 0; v < AUDIO_CODE_BASE; v++)
             if (v != TOKEN_IM_END) lg[v] = -1e9f;
 
-        int tok = sample_top_p(lg.data(), V, temperature, top_p, seqs[i].rng);
+        int tok = sample_top_k_p(lg.data(), V, temperature, top_p, top_k, seqs[i].rng);
         seqs[i].last_token = tok;
 
         if (tok == TOKEN_IM_END) {
@@ -1076,7 +1107,7 @@ static std::vector<std::string> run_phase2_batch(
             for (int v = 0; v < AUDIO_CODE_BASE; v++)
                 if (v != TOKEN_IM_END) lc[v] = -1e9f;
 
-            int tok = sample_top_p(lc, V, temperature, top_p, seqs[i].rng);
+            int tok = sample_top_k_p(lc, V, temperature, top_p, top_k, seqs[i].rng);
             seqs[i].last_token = tok;
 
             if (tok == TOKEN_IM_END) {
@@ -1203,6 +1234,7 @@ int main(int argc, char ** argv) {
     // Generation params from request
     float temperature      = req.lm_temperature;
     float top_p            = req.lm_top_p;
+    int   top_k            = req.lm_top_k;
     float cfg_scale        = req.lm_cfg_scale;
     const char * neg_prompt = req.lm_negative_prompt.c_str();
 
@@ -1265,7 +1297,7 @@ int main(int argc, char ** argv) {
                 prompt.size(), batch_size, seed, seed + batch_size - 1);
 
         auto phase1_texts = generate_phase1_batch(
-            &model, &bpe, prompt, 2048, temperature, 1.0f,
+            &model, &bpe, prompt, 2048, temperature, 1.0f, 0,
             seed, batch_size, use_fsm ? &fsm : nullptr, true);
 
         parse_phase1_into_aces(phase1_texts, ace, aces, seed, "Simple", true);
@@ -1290,7 +1322,7 @@ int main(int argc, char ** argv) {
 
         fsm.reset();
         auto phase1_texts = generate_phase1_batch(
-            &model, &bpe, prompt, 2048, temperature, top_p,
+            &model, &bpe, prompt, 2048, temperature, top_p, top_k,
             seed, batch_size, use_fsm ? &fsm : nullptr, false,
             cfg_scale, uncond.empty() ? nullptr : &uncond, true);
 
@@ -1337,7 +1369,7 @@ int main(int argc, char ** argv) {
     std::vector<std::string> batch_codes(batch_size);
     if (need_lm_codes) {
         batch_codes = run_phase2_batch(&model, bpe, aces,
-            temperature, top_p, seed, batch_size, cfg_scale, neg_prompt);
+            temperature, top_p, top_k, seed, batch_size, cfg_scale, neg_prompt);
     } else {
         fprintf(stderr, "[Skip] %s, no code generation\n",
                 user_has_codes ? "user codes present" : "thinking=false");

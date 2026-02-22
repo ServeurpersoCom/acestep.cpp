@@ -26,6 +26,7 @@ void request_init(AceRequest * r) {
     r->lm_temperature     = 0.85f;
     r->lm_cfg_scale       = 2.0f;
     r->lm_top_p           = 0.9f;
+    r->lm_top_k           = 0;
     r->lm_negative_prompt = "NO USER INPUT";
     r->audio_codes        = "";
     r->inference_steps    = 8;
@@ -237,6 +238,7 @@ bool request_parse(AceRequest * r, const char * path) {
         else if (k == "lm_temperature")     r->lm_temperature     = (float)atof(v.c_str());
         else if (k == "lm_cfg_scale")       r->lm_cfg_scale       = (float)atof(v.c_str());
         else if (k == "lm_top_p")           r->lm_top_p           = (float)atof(v.c_str());
+        else if (k == "lm_top_k")           r->lm_top_k           = atoi(v.c_str());
         else if (k == "inference_steps")    r->inference_steps    = atoi(v.c_str());
         else if (k == "guidance_scale")     r->guidance_scale     = (float)atof(v.c_str());
         else if (k == "shift")              r->shift              = (float)atof(v.c_str());
@@ -274,6 +276,7 @@ bool request_write(const AceRequest * r, const char * path) {
     fprintf(f, "  \"lm_temperature\": %.2f,\n",       r->lm_temperature);
     fprintf(f, "  \"lm_cfg_scale\": %.1f,\n",         r->lm_cfg_scale);
     fprintf(f, "  \"lm_top_p\": %.2f,\n",             r->lm_top_p);
+    fprintf(f, "  \"lm_top_k\": %d,\n",               r->lm_top_k);
     fprintf(f, "  \"lm_negative_prompt\": \"%s\",\n", json_escape(r->lm_negative_prompt).c_str());
     fprintf(f, "  \"inference_steps\": %d,\n",        r->inference_steps);
     fprintf(f, "  \"guidance_scale\": %.1f,\n",       r->guidance_scale);
@@ -296,8 +299,8 @@ void request_dump(const AceRequest * r, FILE * f) {
     fprintf(f, "  bpm=%d dur=%.0f key=%s ts=%s lang=%s\n",
             r->bpm, r->duration, r->keyscale.c_str(),
             r->timesignature.c_str(), r->vocal_language.c_str());
-    fprintf(f, "  lm: temp=%.2f cfg=%.1f top_p=%.2f\n",
-            r->lm_temperature, r->lm_cfg_scale, r->lm_top_p);
+    fprintf(f, "  lm: temp=%.2f cfg=%.1f top_p=%.2f top_k=%d\n",
+            r->lm_temperature, r->lm_cfg_scale, r->lm_top_p, r->lm_top_k);
     fprintf(f, "  dit: steps=%d guidance=%.1f shift=%.1f\n",
             r->inference_steps, r->guidance_scale, r->shift);
     fprintf(f, "  audio_codes: %s\n",
