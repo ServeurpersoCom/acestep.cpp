@@ -1,0 +1,819 @@
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.006 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple8  (1008)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal3  (5001)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 11453.25 MB
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] DiT backend: MTL0 (CPU threads: 5)
+[Load] Backend init: 18.8 ms
+[GGUF] ../models/acestep-v15-turbo-Q6_K.gguf: 678 tensors, data at offset 56864
+[DiT] MLP: gate+up fused
+[Load] null_condition_emb found (CFG available)
+[WeightCtx] Loaded 478 tensors, 1237.2 MB into backend
+[Load] DiT: 24 layers, H=2048, Nh=16/8, D=128
+[Load] DiT weight load: 1759.5 ms
+[GGUF] ../models/acestep-v15-turbo-Q6_K.gguf: 678 tensors, data at offset 56864
+[Load] silence_latent: [15000, 64] from GGUF
+[GGUF] ../models/vae-BF16.gguf: 365 tensors, data at offset 30048
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] VAE backend: MTL0 (CPU threads: 5)
+[VAE] Backend: MTL0, Weight buffer: 255.7 MB
+[VAE] Loaded: 5 blocks, upsample=1920x
+[Load] VAE weights: 335.9 ms
+[Request 1/1] ggml-turbo/request0.json (batch=1)
+[Request] parsed ggml-turbo/request0.json (18 fields)
+[Pipeline] WARNING: turbo model, forcing guidance_scale=1.0 (was 7.0)
+[Pipeline] seed=42, steps=8, guidance=1.0, shift=3.0, duration=88.0s
+[Pipeline] 434 audio codes (86.8s @ 5Hz)
+[Pipeline] T=2170, S=1085
+[BPE] Loaded from GGUF: 151643 vocab, 151387 merges
+[Load] BPE tokenizer: 42.1 ms
+[Pipeline] caption: 70 tokens, lyrics: 167 tokens
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] TextEncoder backend: MTL0 (CPU threads: 5)
+[GGUF] ../models/Qwen3-Embedding-0.6B-BF16.gguf: 310 tensors, data at offset 5337568
+[WeightCtx] Loaded 310 tensors, 1136.5 MB into backend
+[Load] TextEncoder: 28L, H=1024, Nh=16/8
+[Load] TextEncoder: 294.2 ms
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_bf16', name = 'kernel_get_rows_bf16'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_bf16                          0x13a80b9e0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rms_norm_mul_f32_4', name = 'kernel_rms_norm_mul_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_rms_norm_mul_f32_4                     0x13a80be40 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_bf16_f32', name = 'kernel_mul_mm_bf16_f32_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_bf16_f32_bci=0_bco=1            0x13a80c6b0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rope_neox_f32', name = 'kernel_rope_neox_f32_imrope=0'
+ggml_metal_library_compile_pipeline: loaded kernel_rope_neox_f32_imrope=0                 0x13a80cb30 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=1_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=1_ncpsg=64      0x13a80d3a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_blk', name = 'kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64      0x13a80d9d0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk128_dv128', name = 'kernel_flash_attn_ext_f32_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=1024_ns20=1024_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=1024_ns20=1024_nsg=4      0x13a80e2b0 | th_max =  576 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0      0x13a80e6c0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_swiglu_f32', name = 'kernel_swiglu_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_swiglu_f32                             0x13a80e920 | th_max = 1024 | th_width =   32
+[Encode] TextEncoder (70 tokens): 46.1 ms
+[Debug] text_hidden: [70, 1024] first4: 3.703506 2.446818 0.222721 -13.133463
+[GGUF] ../models/Qwen3-Embedding-0.6B-BF16.gguf: 310 tensors, data at offset 5337568
+[Encode] Lyric vocab lookup (167 tokens): 33.8 ms
+[Debug] lyric_embed: [167, 1024] first4: 0.029175 0.032227 -0.022339 -0.028809
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] CondEncoder backend: MTL0 (CPU threads: 5)
+[GGUF] ../models/acestep-v15-turbo-Q6_K.gguf: 678 tensors, data at offset 56864
+[WeightCtx] Loaded 140 tensors, 476.3 MB into backend
+[Load] CondEncoder: lyric(8L), timbre(4L), text_proj, null_cond
+[Load] ConditionEncoder: 652.0 ms
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q6_K_f32', name = 'kernel_mul_mm_q6_K_f32_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q6_K_f32_bci=0_bco=1            0x13a818c40 | th_max =  896 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=0_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=0_ncpsg=64      0x13a819080 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk128_dv128', name = 'kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=1024_ns20=1024_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=1024_ns20=1024_nsg=4      0x13a8197f0 | th_max =  640 | th_width =   32
+[Encode] Packed: lyric=167 + timbre=1 + text=70 = 238 tokens
+[Encode] ConditionEncoder: 146.8 ms, enc_S=238
+ggml_metal_free: deallocating
+ggml_metal_free: deallocating
+[Debug] enc_hidden: [238, 2048] first4: 1.752129 -0.050073 -0.134015 0.059631
+[GGUF] ../models/acestep-v15-turbo-Q6_K.gguf: 678 tensors, data at offset 56864
+[WeightCtx] Loaded 30 tensors, 82.2 MB into backend
+[Load] Detokenizer: FSQ(6->2048) + 2L encoder(S=5, 2048->64)
+[Load] Detokenizer: 125.6 ms
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_bf16_f32_short', name = 'kernel_mul_mv_bf16_f32_short_nsg=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_bf16_f32_short_nsg=1            0x13a817f60 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1      0x13a818470 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_q6_K_f32', name = 'kernel_mul_mv_q6_K_f32_nsg=2'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_q6_K_f32_nsg=2                  0x13a808aa0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_repeat_f32', name = 'kernel_repeat_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_repeat_f32                             0x13a808d00 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_ext_q6_K_f32_r1_5', name = 'kernel_mul_mv_ext_q6_K_f32_r1_5_nsg=2_nxpsg=8'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_ext_q6_K_f32_r1_5_nsg=2_nxpsg=8      0x13a81a190 | th_max =  640 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=0_ncpsg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=0_ncpsg=32      0x13a81a3f0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_vec_f32_dk128_dv128', name = 'kernel_flash_attn_ext_vec_f32_dk128_dv128_mask=0_sink=0_bias=0_scap=0_kvpad=1_ns10=1024_ns20=1024_nsg=1_nwg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_vec_f32_dk128_dv128_mask=0_sink=0_bias=0_scap=0_kvpad=1_ns10=1024_ns20=1024_nsg=1_nwg=32      0x13a81adc0 | th_max =  448 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_vec_reduce', name = 'kernel_flash_attn_ext_vec_reduce_dv=128_nwg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_vec_reduce_dv=128_nwg=32      0x13a81b250 | th_max = 1024 | th_width =   32
+[Context] Decoded: 434 codes -> 2170 frames (86.8s @ 25Hz)
+[Context] Detokenizer: 1009.6 ms
+[Debug] detok_output: [2170, 64] first4: -0.141063 1.454431 0.315142 -0.623566
+[Context] loaded noise from rng_philox_seed42.bf16: [2170, 64] bf16
+[Debug] noise: [2170, 64] first4: 0.194336 2.156250 -0.171875 0.847656
+[Debug] context: [2170, 128] first4: -0.141063 1.454431 0.315142 -0.623566
+[DiT] Starting: T=2170, S=1085, enc_S=238, steps=8, batch=1
+[DiT] Batch N=1, T=2170, S=1085, enc_S=238
+[DiT] Graph: 1841 nodes
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f32_f32', name = 'kernel_mul_mm_f32_f32_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f32_f32_bci=0_bco=1             0x13970a020 | th_max =  832 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_scale_f32', name = 'kernel_scale_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_scale_f32                              0x13970a280 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_timestep_embedding_f32', name = 'kernel_timestep_embedding_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_timestep_embedding_f32                 0x13970a4e0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_silu_f32_4', name = 'kernel_silu_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_silu_f32_4                             0x13970b610 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=1_nf=1_rb=1'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=1_nf=1_rb=1      0x13970be80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=1'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=1      0x13970c0e0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0      0x13970c7b0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_f32', name = 'kernel_cpy_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_f32                            0x13970cc30 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk128_dv128', name = 'kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=128_ns20=1024_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=128_ns20=1024_nsg=4      0x13970d300 | th_max =  640 | th_width =   32
+[Debug] tproj: [12288] first4: 0.261089 -0.161223 -0.098728 0.051901
+[Debug] temb: [2048] first4: 0.000236 -0.132397 -0.035348 0.064653
+[Debug] temb_t: [2048] first4: 0.001398 0.026957 -0.052741 0.063660
+[Debug] temb_r: [2048] first4: -0.001162 -0.159353 0.017394 0.000993
+[Debug] sinusoidal_t: [256] first4: 0.562407 0.789701 0.439822 -0.023583
+[Debug] sinusoidal_r: [256] first4: 1.000000 1.000000 1.000000 1.000000
+[Debug] temb_lin1_t: [2048] first4: -0.049071 -0.051112 -0.017769 -0.037193
+[Debug] temb_lin1_r: [2048] first4: -0.014408 -0.020609 -0.015729 0.003875
+[Debug] hidden_after_proj_in: [2048, 1085] first4: -1.037692 -0.956719 0.540867 0.451860
+[Debug] proj_in_input: [192, 2170] first4: -0.141063 1.454431 0.315142 -0.623566
+[Debug] enc_after_cond_emb: [2048, 238] first4: -0.167564 0.852700 0.309671 -0.538299
+[Debug] layer0_sa_input: [2048, 1085] first4: -0.716202 -0.756050 -0.048455 0.263529
+[Debug] layer0_q_after_rope: [128, 16] first4: -0.167564 0.852700 0.309671 -0.538299
+[Debug] layer0_k_after_rope: [128, 8] first4: -1.214772 -0.856039 -1.908578 -2.256124
+[Debug] layer0_sa_output: [2048, 1085] first4: -1.502833 0.209946 -0.367812 0.520536
+[Debug] layer0_attn_out: [2048, 1085] first4: -1.134820 -0.084089 -34.867664 -0.724257
+[Debug] layer0_after_self_attn: [2048, 1085] first4: -1.540231 -1.049932 0.181504 0.461969
+[Debug] layer0_after_cross_attn: [2048, 1085] first4: -1.609974 -0.819551 -0.333653 0.497179
+[Debug] hidden_after_layer0: [2048, 1085] first4: -9.196066 0.534182 52.334564 -0.880322
+[Debug] hidden_after_layer6: [2048, 1085] first4: -21.325979 -0.207006 34.129318 -4.337931
+[Debug] hidden_after_layer12: [2048, 1085] first4: -15.411194 -16.311844 76.549057 29.816362
+[Debug] hidden_after_layer18: [2048, 1085] first4: -28.025963 13.209218 65.994347 20.087559
+[Debug] hidden_after_layer23: [2048, 1085] first4: -19.575611 48.863052 201.092041 136.881271
+[Debug] dit_step0_vt: [2170, 64] first4: 0.099154 1.132388 0.349667 2.375307
+[Debug] dit_step0_xt: [2170, 64] first4: 0.189829 2.104778 -0.187769 0.739688
+[DiT] step 1/8 t=1.000
+[Debug] dit_step1_vt: [2170, 64] first4: -0.140258 1.329038 -0.173978 1.924904
+[Debug] dit_step1_xt: [2170, 64] first4: 0.197479 2.032285 -0.178279 0.634693
+[DiT] step 2/8 t=0.955
+[Debug] dit_step2_vt: [2170, 64] first4: 0.064148 1.236530 0.118618 2.406788
+[Debug] dit_step2_xt: [2170, 64] first4: 0.193203 1.949849 -0.186187 0.474240
+[DiT] step 3/8 t=0.900
+[Debug] dit_step3_vt: [2170, 64] first4: 0.305678 1.101620 0.246811 2.656265
+[Debug] dit_step3_xt: [2170, 64] first4: 0.167730 1.858048 -0.206755 0.252885
+[DiT] step 4/8 t=0.833
+[Debug] dit_step4_vt: [2170, 64] first4: 0.333444 1.032630 0.077940 2.735898
+[Debug] dit_step4_xt: [2170, 64] first4: 0.132004 1.747409 -0.215105 -0.040247
+[DiT] step 5/8 t=0.750
+[Debug] dit_step5_vt: [2170, 64] first4: 0.310135 0.905818 -0.324717 2.786166
+[Debug] dit_step5_xt: [2170, 64] first4: 0.087699 1.618006 -0.168717 -0.438271
+[DiT] step 6/8 t=0.643
+[Debug] dit_step6_vt: [2170, 64] first4: 0.184311 0.624224 -0.863634 2.781863
+[Debug] dit_step6_xt: [2170, 64] first4: 0.050836 1.493161 0.004009 -0.994643
+[DiT] step 7/8 t=0.500
+[Debug] dit_step7_vt: [2170, 64] first4: 0.049488 0.168290 -1.435298 3.015385
+[Debug] dit_x0: [2170, 64] first4: 0.035990 1.442675 0.434599 -1.899259
+[DiT] step 8/8 t=0.300
+[DiT] Total generation: 8015.7 ms (8015.7 ms/sample)
+[Debug] dit_output: [2170, 64] first4: 0.035990 1.442675 0.434599 -1.899259
+[VAE] Tiled decode: 17 tiles (chunk=256, overlap=64, stride=128)
+[VAE] Graph: 474 nodes, T_latent=192
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_im2col_f16', name = 'kernel_im2col_f16'
+ggml_metal_library_compile_pipeline: loaded kernel_im2col_f16                             0x13a81b7d0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f16', name = 'kernel_mul_mm_f16_f16_bci=0_bco=0'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f16_bci=0_bco=0             0x13a81c1a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=0      0x13a81c400 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=2_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=2_nf=1_rb=0      0x13a81ca90 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sin_f32_4', name = 'kernel_sin_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_sin_f32_4                              0x13a81ccf0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sqr_f32_4', name = 'kernel_sqr_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_sqr_f32_4                              0x13a81d4d0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_conv_transpose_1d_f32_f32', name = 'kernel_conv_transpose_1d_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_conv_transpose_1d_f32_f32              0x13a81da30 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f16_f16_4', name = 'kernel_mul_mv_f16_f16_4_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f16_f16_4_nsg=4                 0x13a81e910 | th_max = 1024 | th_width =   32
+[VAE] Upsample factor: 1920.00 (expected ~1920)
+[VAE] Graph: 474 nodes, T_latent=256
+[VAE] Graph: 474 nodes, T_latent=186
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f16', name = 'kernel_mul_mm_f16_f16_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f16_bci=0_bco=1             0x13a81eb70 | th_max =  896 | th_width =   32
+[VAE] Tiled decode done: 17 tiles -> T_audio=4166400 (86.80s @ 48kHz)
+[VAE Batch0] Decode: 609630.7 ms
+[Debug] vae_audio: [2, 4166400] first4: 0.000453 0.000980 0.000826 0.001209
+[VAE Batch0] Wrote ggml-turbo/request00.wav: 4166400 samples (86.80s @ 48kHz stereo)
+[Request 1/1] Done
+ggml_metal_free: deallocating
+ggml_metal_free: deallocating
+[Pipeline] All done
+ggml_metal_device_init: tensor API disabled for pre-M5 and pre-A19 devices
+ggml_metal_library_init: using embedded metal library
+ggml_metal_library_init: loaded in 0.006 sec
+ggml_metal_rsets_init: creating a residency set collection (keep_alive = 180 s)
+ggml_metal_device_init: GPU name:   MTL0
+ggml_metal_device_init: GPU family: MTLGPUFamilyApple8  (1008)
+ggml_metal_device_init: GPU family: MTLGPUFamilyCommon3 (3003)
+ggml_metal_device_init: GPU family: MTLGPUFamilyMetal3  (5001)
+ggml_metal_device_init: simdgroup reduction   = true
+ggml_metal_device_init: simdgroup matrix mul. = true
+ggml_metal_device_init: has unified memory    = true
+ggml_metal_device_init: has bfloat            = true
+ggml_metal_device_init: has tensor            = false
+ggml_metal_device_init: use residency sets    = true
+ggml_metal_device_init: use shared buffers    = true
+ggml_metal_device_init: recommendedMaxWorkingSetSize  = 11453.25 MB
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] DiT backend: MTL0 (CPU threads: 5)
+[Load] Backend init: 20.5 ms
+[GGUF] ../models/acestep-v15-sft-Q6_K.gguf: 678 tensors, data at offset 56800
+[DiT] MLP: gate+up fused
+[Load] null_condition_emb found (CFG available)
+[WeightCtx] Loaded 478 tensors, 1237.2 MB into backend
+[Load] DiT: 24 layers, H=2048, Nh=16/8, D=128
+[Load] DiT weight load: 1781.2 ms
+[GGUF] ../models/acestep-v15-sft-Q6_K.gguf: 678 tensors, data at offset 56800
+[Load] silence_latent: [15000, 64] from GGUF
+[GGUF] ../models/vae-BF16.gguf: 365 tensors, data at offset 30048
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] VAE backend: MTL0 (CPU threads: 5)
+[VAE] Backend: MTL0, Weight buffer: 255.7 MB
+[VAE] Loaded: 5 blocks, upsample=1920x
+[Load] VAE weights: 275.0 ms
+[Request 1/1] ggml-sft/request0.json (batch=1)
+[Request] parsed ggml-sft/request0.json (18 fields)
+[Pipeline] seed=42, steps=50, guidance=7.0, shift=1.0, duration=88.0s
+[Pipeline] 434 audio codes (86.8s @ 5Hz)
+[Pipeline] T=2170, S=1085
+[BPE] Loaded from GGUF: 151643 vocab, 151387 merges
+[Load] BPE tokenizer: 42.4 ms
+[Pipeline] caption: 70 tokens, lyrics: 167 tokens
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] TextEncoder backend: MTL0 (CPU threads: 5)
+[GGUF] ../models/Qwen3-Embedding-0.6B-BF16.gguf: 310 tensors, data at offset 5337568
+[WeightCtx] Loaded 310 tensors, 1136.5 MB into backend
+[Load] TextEncoder: 28L, H=1024, Nh=16/8
+[Load] TextEncoder: 361.7 ms
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_get_rows_bf16', name = 'kernel_get_rows_bf16'
+ggml_metal_library_compile_pipeline: loaded kernel_get_rows_bf16                          0x106006bc0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rms_norm_mul_f32_4', name = 'kernel_rms_norm_mul_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_rms_norm_mul_f32_4                     0x106007320 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_bf16_f32', name = 'kernel_mul_mm_bf16_f32_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_bf16_f32_bci=0_bco=1            0x106008160 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_rope_neox_f32', name = 'kernel_rope_neox_f32_imrope=0'
+ggml_metal_library_compile_pipeline: loaded kernel_rope_neox_f32_imrope=0                 0x1060083c0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=1_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=1_ncpsg=64      0x106008e40 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_blk', name = 'kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_blk_nqptg=8_ncpsg=64      0x1060093a0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk128_dv128', name = 'kernel_flash_attn_ext_f32_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=1024_ns20=1024_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk128_dv128_mask=1_sinks=0_bias=0_scap=0_kvpad=1_bcm=1_ns10=1024_ns20=1024_nsg=4      0x106009600 | th_max =  576 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=0      0x10600a090 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_swiglu_f32', name = 'kernel_swiglu_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_swiglu_f32                             0x10600a2f0 | th_max = 1024 | th_width =   32
+[Encode] TextEncoder (70 tokens): 45.5 ms
+[Debug] text_hidden: [70, 1024] first4: 3.703506 2.446818 0.222721 -13.133463
+[GGUF] ../models/Qwen3-Embedding-0.6B-BF16.gguf: 310 tensors, data at offset 5337568
+[Encode] Lyric vocab lookup (167 tokens): 35.7 ms
+[Debug] lyric_embed: [167, 1024] first4: 0.029175 0.032227 -0.022339 -0.028809
+ggml_metal_init: allocating
+ggml_metal_init: found device: Apple M2 Pro
+ggml_metal_init: picking default device: Apple M2 Pro
+ggml_metal_init: use fusion         = true
+ggml_metal_init: use concurrency    = true
+ggml_metal_init: use graph optimize = true
+[Load] CondEncoder backend: MTL0 (CPU threads: 5)
+[GGUF] ../models/acestep-v15-sft-Q6_K.gguf: 678 tensors, data at offset 56800
+[WeightCtx] Loaded 140 tensors, 476.3 MB into backend
+[Load] CondEncoder: lyric(8L), timbre(4L), text_proj, null_cond
+[Load] ConditionEncoder: 850.5 ms
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_q6_K_f32', name = 'kernel_mul_mm_q6_K_f32_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_q6_K_f32_bci=0_bco=1            0x120606720 | th_max =  896 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=0_ncpsg=64'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=0_ncpsg=64      0x120606ba0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk128_dv128', name = 'kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=1024_ns20=1024_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=1024_ns20=1024_nsg=4      0x1206071d0 | th_max =  640 | th_width =   32
+[Encode] Packed: lyric=167 + timbre=1 + text=70 = 238 tokens
+[Encode] ConditionEncoder: 151.8 ms, enc_S=238
+ggml_metal_free: deallocating
+ggml_metal_free: deallocating
+[Debug] enc_hidden: [238, 2048] first4: 1.752129 -0.050073 -0.134015 0.059631
+[GGUF] ../models/acestep-v15-sft-Q6_K.gguf: 678 tensors, data at offset 56800
+[WeightCtx] Loaded 30 tensors, 82.2 MB into backend
+[Load] Detokenizer: FSQ(6->2048) + 2L encoder(S=5, 2048->64)
+[Load] Detokenizer: 134.7 ms
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_bf16_f32_short', name = 'kernel_mul_mv_bf16_f32_short_nsg=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_bf16_f32_short_nsg=1            0x106012a70 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=0_nf=1_rb=1      0x106013260 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_q6_K_f32', name = 'kernel_mul_mv_q6_K_f32_nsg=2'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_q6_K_f32_nsg=2                  0x106013b60 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_repeat_f32', name = 'kernel_repeat_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_repeat_f32                             0x1060134c0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_ext_q6_K_f32_r1_5', name = 'kernel_mul_mv_ext_q6_K_f32_r1_5_nsg=2_nxpsg=8'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_ext_q6_K_f32_r1_5_nsg=2_nxpsg=8      0x1206079b0 | th_max =  640 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_pad', name = 'kernel_flash_attn_ext_pad_mask=0_ncpsg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_pad_mask=0_ncpsg=32      0x120608040 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_vec_f32_dk128_dv128', name = 'kernel_flash_attn_ext_vec_f32_dk128_dv128_mask=0_sink=0_bias=0_scap=0_kvpad=1_ns10=1024_ns20=1024_nsg=1_nwg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_vec_f32_dk128_dv128_mask=0_sink=0_bias=0_scap=0_kvpad=1_ns10=1024_ns20=1024_nsg=1_nwg=32      0x1206082a0 | th_max =  448 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_vec_reduce', name = 'kernel_flash_attn_ext_vec_reduce_dv=128_nwg=32'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_vec_reduce_dv=128_nwg=32      0x120608730 | th_max = 1024 | th_width =   32
+[Context] Decoded: 434 codes -> 2170 frames (86.8s @ 25Hz)
+[Context] Detokenizer: 1004.2 ms
+[Debug] detok_output: [2170, 64] first4: -0.141063 1.454431 0.315142 -0.623566
+[Context] loaded noise from rng_philox_seed42.bf16: [2170, 64] bf16
+[Debug] noise: [2170, 64] first4: 0.194336 2.156250 -0.171875 0.847656
+[Debug] context: [2170, 128] first4: -0.141063 1.454431 0.315142 -0.623566
+[DiT] Starting: T=2170, S=1085, enc_S=238, steps=50, batch=1
+[DiT] Batch N=1, T=2170, S=1085, enc_S=238
+[DiT] Graph: 1841 nodes
+[Debug] null_condition_emb: [2048] first4: 0.018066 -0.000360 0.005096 -0.000683
+[Debug] null_enc_hidden: [238, 2048] first4: 0.018066 -0.000360 0.005096 -0.000683
+[DiT] CFG enabled: guidance_scale=7.0, 2x forward per step, N=1
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f32_f32', name = 'kernel_mul_mm_f32_f32_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f32_f32_bci=0_bco=1             0x120608bb0 | th_max =  832 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_scale_f32', name = 'kernel_scale_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_scale_f32                              0x120608e10 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_timestep_embedding_f32', name = 'kernel_timestep_embedding_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_timestep_embedding_f32                 0x120609070 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_silu_f32_4', name = 'kernel_silu_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_silu_f32_4                             0x120609f80 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=1_nf=1_rb=1'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=1_nf=1_rb=1      0x12060a7f0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=1'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=1      0x12060aa50 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32_4', name = 'kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_4_op=2_nf=1_rb=0      0x12060b0d0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_cpy_f32_f32', name = 'kernel_cpy_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_cpy_f32_f32                            0x12060b550 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_flash_attn_ext_f32_dk128_dv128', name = 'kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=128_ns20=1024_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_flash_attn_ext_f32_dk128_dv128_mask=0_sinks=0_bias=0_scap=0_kvpad=1_bcm=0_ns10=128_ns20=1024_nsg=4      0x12060bc10 | th_max =  640 | th_width =   32
+[Debug] tproj: [12288] first4: 0.153861 -0.117528 -0.090110 0.080834
+[Debug] temb: [2048] first4: -0.002466 -0.176370 0.004369 -0.002069
+[Debug] temb_t: [2048] first4: -0.000999 0.003474 -0.013219 -0.002130
+[Debug] temb_r: [2048] first4: -0.001467 -0.179844 0.017589 0.000062
+[Debug] sinusoidal_t: [256] first4: 0.562407 0.789701 0.439822 -0.023583
+[Debug] sinusoidal_r: [256] first4: 1.000000 1.000000 1.000000 1.000000
+[Debug] temb_lin1_t: [2048] first4: -0.041140 0.030274 0.027836 -0.025460
+[Debug] temb_lin1_r: [2048] first4: 0.004272 0.006720 0.000208 -0.005103
+[Debug] hidden_after_proj_in: [2048, 1085] first4: -1.088484 -0.913424 0.502796 0.445566
+[Debug] proj_in_input: [192, 2170] first4: -0.141063 1.454431 0.315142 -0.623566
+[Debug] enc_after_cond_emb: [2048, 238] first4: -0.194042 0.920094 0.309464 -0.544236
+[Debug] layer0_sa_input: [2048, 1085] first4: -0.914448 -0.710483 -0.040214 0.295227
+[Debug] layer0_q_after_rope: [128, 16] first4: -0.194042 0.920094 0.309464 -0.544236
+[Debug] layer0_k_after_rope: [128, 8] first4: -1.341203 -0.993715 -1.828661 -2.252987
+[Debug] layer0_sa_output: [2048, 1085] first4: -1.651907 0.800758 -0.600550 0.531539
+[Debug] layer0_attn_out: [2048, 1085] first4: -1.094031 -0.025671 -33.031021 -0.629337
+[Debug] layer0_after_self_attn: [2048, 1085] first4: -1.804741 -1.365866 -0.176846 0.385942
+[Debug] layer0_after_cross_attn: [2048, 1085] first4: -1.975780 -1.029709 -0.454110 0.391604
+[Debug] hidden_after_layer0: [2048, 1085] first4: -9.417660 1.271689 57.716125 -1.718801
+[Debug] hidden_after_layer6: [2048, 1085] first4: -17.205166 2.402088 59.038250 -1.336451
+[Debug] hidden_after_layer12: [2048, 1085] first4: -10.471869 6.708532 -25.396618 -2.966099
+[Debug] hidden_after_layer18: [2048, 1085] first4: -4.594971 20.646416 -42.849018 -14.024486
+[Debug] hidden_after_layer23: [2048, 1085] first4: 34.838955 64.575096 51.865501 -11.288853
+[Debug] dit_step0_vt_cond: [2170, 64] first4: -0.621944 2.533786 -0.220703 1.441472
+[Debug] dit_step0_vt_uncond: [2170, 64] first4: -0.335422 2.090178 -0.712111 1.749312
+[Debug] dit_step0_vt: [2170, 64] first4: -0.817132 3.005553 0.060651 1.037697
+[Debug] dit_step0_xt: [2170, 64] first4: 0.210679 2.096139 -0.173088 0.826902
+[DiT] step 1/50 t=1.000
+[Debug] dit_step1_vt_cond: [2170, 64] first4: -0.663130 2.509250 -0.047312 1.284879
+[Debug] dit_step1_vt_uncond: [2170, 64] first4: -0.535073 2.303810 -0.132373 1.511020
+[Debug] dit_step1_vt: [2170, 64] first4: -0.505551 2.169540 -0.259578 1.319904
+[Debug] dit_step1_xt: [2170, 64] first4: 0.220790 2.052748 -0.167896 0.800504
+[DiT] step 2/50 t=0.980
+[Debug] dit_step2_vt_cond: [2170, 64] first4: -0.658958 2.478008 -0.004274 1.297306
+[Debug] dit_step2_vt_uncond: [2170, 64] first4: -0.555012 2.295219 -0.109707 1.445456
+[Debug] dit_step2_vt: [2170, 64] first4: -0.800255 2.877401 0.236257 0.991010
+[Debug] dit_step2_xt: [2170, 64] first4: 0.236795 1.995200 -0.172622 0.780684
+[DiT] step 3/50 t=0.960
+[Debug] dit_step3_vt_cond: [2170, 64] first4: -0.623685 2.405478 0.016157 1.310913
+[Debug] dit_step3_vt_uncond: [2170, 64] first4: -0.584147 2.331472 -0.052434 1.362097
+[Debug] dit_step3_vt: [2170, 64] first4: -0.460909 2.085223 -0.179917 1.477093
+[Debug] dit_step3_xt: [2170, 64] first4: 0.246013 1.953496 -0.169023 0.751142
+[DiT] step 4/50 t=0.940
+[Debug] dit_step4_vt_cond: [2170, 64] first4: -0.573136 2.336644 0.011644 1.310671
+[Debug] dit_step4_vt_uncond: [2170, 64] first4: -0.579254 2.305885 -0.063045 1.333517
+[Debug] dit_step4_vt: [2170, 64] first4: -0.615409 2.553339 0.248993 1.073298
+[Debug] dit_step4_xt: [2170, 64] first4: 0.258321 1.902429 -0.174003 0.729676
+[DiT] step 5/50 t=0.920
+[Debug] dit_step5_vt_cond: [2170, 64] first4: -0.517031 2.271256 -0.017464 1.306595
+[Debug] dit_step5_vt_uncond: [2170, 64] first4: -0.593495 2.274611 -0.028605 1.340369
+[Debug] dit_step5_vt: [2170, 64] first4: -0.226837 1.944980 -0.246283 1.356041
+[Debug] dit_step5_xt: [2170, 64] first4: 0.262858 1.863529 -0.169077 0.702555
+[DiT] step 6/50 t=0.900
+[Debug] dit_step6_vt_cond: [2170, 64] first4: -0.492334 2.237296 -0.030848 1.308453
+[Debug] dit_step6_vt_uncond: [2170, 64] first4: -0.559225 2.211779 -0.028865 1.356664
+[Debug] dit_step6_vt: [2170, 64] first4: -0.506265 2.451765 0.152689 1.063906
+[Debug] dit_step6_xt: [2170, 64] first4: 0.272983 1.814494 -0.172131 0.681277
+[DiT] step 7/50 t=0.880
+[Debug] dit_step7_vt_cond: [2170, 64] first4: -0.448929 2.166704 -0.051454 1.296641
+[Debug] dit_step7_vt_uncond: [2170, 64] first4: -0.516741 2.132911 -0.036027 1.347799
+[Debug] dit_step7_vt: [2170, 64] first4: -0.201648 1.970928 -0.247107 1.267663
+[Debug] dit_step7_xt: [2170, 64] first4: 0.277016 1.775075 -0.167189 0.655924
+[DiT] step 8/50 t=0.860
+[Debug] dit_step8_vt_cond: [2170, 64] first4: -0.412205 2.087660 -0.059856 1.279323
+[Debug] dit_step8_vt_uncond: [2170, 64] first4: -0.450006 2.049930 -0.047531 1.315284
+[Debug] dit_step8_vt: [2170, 64] first4: -0.455255 2.220170 0.079066 1.097043
+[Debug] dit_step8_xt: [2170, 64] first4: 0.286121 1.730672 -0.168770 0.633983
+[DiT] step 9/50 t=0.840
+[Debug] dit_step9_vt_cond: [2170, 64] first4: -0.378611 2.005139 -0.068357 1.261302
+[Debug] dit_step9_vt_uncond: [2170, 64] first4: -0.379138 1.976703 -0.055227 1.283708
+[Debug] dit_step9_vt: [2170, 64] first4: -0.302897 1.841593 -0.214058 1.239796
+[Debug] dit_step9_xt: [2170, 64] first4: 0.292179 1.693840 -0.164489 0.609187
+[DiT] step 10/50 t=0.820
+[Debug] dit_step10_vt_cond: [2170, 64] first4: -0.355196 1.928296 -0.064251 1.252096
+[Debug] dit_step10_vt_uncond: [2170, 64] first4: -0.318644 1.912086 -0.042776 1.279346
+[Debug] dit_step10_vt: [2170, 64] first4: -0.498521 1.941743 -0.002070 1.076981
+[Debug] dit_step10_xt: [2170, 64] first4: 0.302150 1.655005 -0.164448 0.587648
+[DiT] step 11/50 t=0.800
+[Debug] dit_step11_vt_cond: [2170, 64] first4: -0.335946 1.853130 -0.070414 1.240474
+[Debug] dit_step11_vt_uncond: [2170, 64] first4: -0.288372 1.862547 -0.022430 1.290233
+[Debug] dit_step11_vt: [2170, 64] first4: -0.354338 1.618477 -0.262413 1.094882
+[Debug] dit_step11_xt: [2170, 64] first4: 0.309236 1.622636 -0.159200 0.565750
+[DiT] step 12/50 t=0.780
+[Debug] dit_step12_vt_cond: [2170, 64] first4: -0.320539 1.785762 -0.070432 1.238213
+[Debug] dit_step12_vt_uncond: [2170, 64] first4: -0.262826 1.816614 -0.015609 1.306050
+[Debug] dit_step12_vt: [2170, 64] first4: -0.491342 1.658213 -0.091632 0.993836
+[Debug] dit_step12_xt: [2170, 64] first4: 0.319063 1.589471 -0.157367 0.545873
+[DiT] step 13/50 t=0.760
+[Debug] dit_step13_vt_cond: [2170, 64] first4: -0.304664 1.719325 -0.071341 1.231198
+[Debug] dit_step13_vt_uncond: [2170, 64] first4: -0.239698 1.764744 -0.021893 1.311546
+[Debug] dit_step13_vt: [2170, 64] first4: -0.399484 1.443110 -0.224588 1.008114
+[Debug] dit_step13_xt: [2170, 64] first4: 0.327053 1.560609 -0.152875 0.525711
+[DiT] step 14/50 t=0.740
+[Debug] dit_step14_vt_cond: [2170, 64] first4: -0.287200 1.663083 -0.055876 1.237650
+[Debug] dit_step14_vt_uncond: [2170, 64] first4: -0.221389 1.709672 -0.033314 1.310252
+[Debug] dit_step14_vt: [2170, 64] first4: -0.462595 1.498639 -0.013459 1.015139
+[Debug] dit_step14_xt: [2170, 64] first4: 0.336305 1.530637 -0.152606 0.505408
+[DiT] step 15/50 t=0.720
+[Debug] dit_step15_vt_cond: [2170, 64] first4: -0.268932 1.604917 -0.048117 1.238302
+[Debug] dit_step15_vt_uncond: [2170, 64] first4: -0.201852 1.656007 -0.050695 1.299129
+[Debug] dit_step15_vt: [2170, 64] first4: -0.405852 1.327548 -0.070650 1.046717
+[Debug] dit_step15_xt: [2170, 64] first4: 0.344422 1.504086 -0.151193 0.484474
+[DiT] step 16/50 t=0.700
+[Debug] dit_step16_vt_cond: [2170, 64] first4: -0.252512 1.546370 -0.039756 1.239714
+[Debug] dit_step16_vt_uncond: [2170, 64] first4: -0.180964 1.599575 -0.068729 1.281288
+[Debug] dit_step16_vt: [2170, 64] first4: -0.465245 1.345990 0.113584 1.099017
+[Debug] dit_step16_xt: [2170, 64] first4: 0.353727 1.477166 -0.153465 0.462493
+[DiT] step 17/50 t=0.680
+[Debug] dit_step17_vt_cond: [2170, 64] first4: -0.235390 1.484958 -0.035930 1.232975
+[Debug] dit_step17_vt_uncond: [2170, 64] first4: -0.159705 1.538287 -0.087686 1.257131
+[Debug] dit_step17_vt: [2170, 64] first4: -0.434245 1.219246 0.101116 1.128435
+[Debug] dit_step17_xt: [2170, 64] first4: 0.362412 1.452781 -0.155487 0.439925
+[DiT] step 18/50 t=0.660
+[Debug] dit_step18_vt_cond: [2170, 64] first4: -0.216501 1.424307 -0.036471 1.226410
+[Debug] dit_step18_vt_uncond: [2170, 64] first4: -0.139621 1.481410 -0.105683 1.236565
+[Debug] dit_step18_vt: [2170, 64] first4: -0.455215 1.183846 0.234644 1.168681
+[Debug] dit_step18_xt: [2170, 64] first4: 0.371516 1.429104 -0.160180 0.416551
+[DiT] step 19/50 t=0.640
+[Debug] dit_step19_vt_cond: [2170, 64] first4: -0.193781 1.365146 -0.052930 1.209294
+[Debug] dit_step19_vt_uncond: [2170, 64] first4: -0.117725 1.431031 -0.131161 1.210289
+[Debug] dit_step19_vt: [2170, 64] first4: -0.413012 1.059516 0.190559 1.170309
+[Debug] dit_step19_xt: [2170, 64] first4: 0.379776 1.407914 -0.163991 0.393145
+[DiT] step 20/50 t=0.620
+[Debug] dit_step20_vt_cond: [2170, 64] first4: -0.171132 1.297945 -0.074904 1.190113
+[Debug] dit_step20_vt_uncond: [2170, 64] first4: -0.094949 1.381890 -0.154719 1.182902
+[Debug] dit_step20_vt: [2170, 64] first4: -0.416916 0.961257 0.217113 1.187745
+[Debug] dit_step20_xt: [2170, 64] first4: 0.388114 1.388689 -0.168333 0.369390
+[DiT] step 21/50 t=0.600
+[Debug] dit_step21_vt_cond: [2170, 64] first4: -0.156818 1.217449 -0.102774 1.165961
+[Debug] dit_step21_vt_uncond: [2170, 64] first4: -0.076230 1.330654 -0.181784 1.153171
+[Debug] dit_step21_vt: [2170, 64] first4: -0.413541 0.733536 0.153392 1.169193
+[Debug] dit_step21_xt: [2170, 64] first4: 0.396385 1.374018 -0.171401 0.346006
+[DiT] step 22/50 t=0.580
+[Debug] dit_step22_vt_cond: [2170, 64] first4: -0.149490 1.124467 -0.129160 1.136317
+[Debug] dit_step22_vt_uncond: [2170, 64] first4: -0.066301 1.272416 -0.203485 1.126914
+[Debug] dit_step22_vt: [2170, 64] first4: -0.414485 0.550591 0.128185 1.113165
+[Debug] dit_step22_xt: [2170, 64] first4: 0.404675 1.363006 -0.173965 0.323743
+[DiT] step 23/50 t=0.560
+[Debug] dit_step23_vt_cond: [2170, 64] first4: -0.151829 1.034549 -0.154075 1.109805
+[Debug] dit_step23_vt_uncond: [2170, 64] first4: -0.064656 1.215351 -0.221178 1.104513
+[Debug] dit_step23_vt: [2170, 64] first4: -0.436045 0.335528 0.059138 1.081705
+[Debug] dit_step23_xt: [2170, 64] first4: 0.413396 1.356296 -0.175148 0.302109
+[DiT] step 24/50 t=0.540
+[Debug] dit_step24_vt_cond: [2170, 64] first4: -0.158201 0.930576 -0.174559 1.077020
+[Debug] dit_step24_vt_uncond: [2170, 64] first4: -0.070645 1.149243 -0.231212 1.077814
+[Debug] dit_step24_vt: [2170, 64] first4: -0.428632 0.115268 0.009393 1.014248
+[Debug] dit_step24_xt: [2170, 64] first4: 0.421968 1.353990 -0.175335 0.281824
+[DiT] step 25/50 t=0.520
+[Debug] dit_step25_vt_cond: [2170, 64] first4: -0.172706 0.820171 -0.187534 1.046402
+[Debug] dit_step25_vt_uncond: [2170, 64] first4: -0.084898 1.070370 -0.233334 1.052725
+[Debug] dit_step25_vt: [2170, 64] first4: -0.451610 -0.083828 -0.046615 0.975977
+[Debug] dit_step25_xt: [2170, 64] first4: 0.431001 1.355667 -0.174403 0.262304
+[DiT] step 26/50 t=0.500
+[Debug] dit_step26_vt_cond: [2170, 64] first4: -0.189538 0.693448 -0.199819 1.008348
+[Debug] dit_step26_vt_uncond: [2170, 64] first4: -0.101718 0.976297 -0.234447 1.021465
+[Debug] dit_step26_vt: [2170, 64] first4: -0.457462 -0.318421 -0.092668 0.902675
+[Debug] dit_step26_xt: [2170, 64] first4: 0.440150 1.362035 -0.172550 0.244251
+[DiT] step 27/50 t=0.480
+[Debug] dit_step27_vt_cond: [2170, 64] first4: -0.208769 0.570284 -0.208205 0.971380
+[Debug] dit_step27_vt_uncond: [2170, 64] first4: -0.121884 0.876404 -0.234553 0.991057
+[Debug] dit_step27_vt: [2170, 64] first4: -0.474894 -0.475314 -0.124745 0.852438
+[Debug] dit_step27_xt: [2170, 64] first4: 0.449648 1.371541 -0.170055 0.227202
+[DiT] step 28/50 t=0.460
+[Debug] dit_step28_vt_cond: [2170, 64] first4: -0.231451 0.438197 -0.217041 0.925335
+[Debug] dit_step28_vt_uncond: [2170, 64] first4: -0.142976 0.763591 -0.236660 0.951937
+[Debug] dit_step28_vt: [2170, 64] first4: -0.503044 -0.662942 -0.154526 0.775360
+[Debug] dit_step28_xt: [2170, 64] first4: 0.459709 1.384800 -0.166964 0.211695
+[DiT] step 29/50 t=0.440
+[Debug] dit_step29_vt_cond: [2170, 64] first4: -0.255602 0.305935 -0.225167 0.878463
+[Debug] dit_step29_vt_uncond: [2170, 64] first4: -0.161997 0.641782 -0.240440 0.915606
+[Debug] dit_step29_vt: [2170, 64] first4: -0.546771 -0.770888 -0.172051 0.693937
+[Debug] dit_step29_xt: [2170, 64] first4: 0.470644 1.400218 -0.163523 0.197816
+[DiT] step 30/50 t=0.420
+[Debug] dit_step30_vt_cond: [2170, 64] first4: -0.279856 0.166208 -0.230015 0.829064
+[Debug] dit_step30_vt_uncond: [2170, 64] first4: -0.179567 0.505654 -0.246080 0.880209
+[Debug] dit_step30_vt: [2170, 64] first4: -0.586251 -0.913478 -0.165068 0.591419
+[Debug] dit_step30_xt: [2170, 64] first4: 0.482369 1.418488 -0.160222 0.185988
+[DiT] step 31/50 t=0.400
+[Debug] dit_step31_vt_cond: [2170, 64] first4: -0.303020 0.026116 -0.234342 0.778238
+[Debug] dit_step31_vt_uncond: [2170, 64] first4: -0.194565 0.361688 -0.252981 0.842483
+[Debug] dit_step31_vt: [2170, 64] first4: -0.634687 -1.004404 -0.163206 0.505303
+[Debug] dit_step31_xt: [2170, 64] first4: 0.495063 1.438576 -0.156958 0.175882
+[DiT] step 32/50 t=0.380
+[Debug] dit_step32_vt_cond: [2170, 64] first4: -0.323948 -0.114179 -0.233989 0.723499
+[Debug] dit_step32_vt_uncond: [2170, 64] first4: -0.205043 0.215050 -0.257018 0.804404
+[Debug] dit_step32_vt: [2170, 64] first4: -0.683278 -1.112943 -0.143677 0.386194
+[Debug] dit_step32_xt: [2170, 64] first4: 0.508728 1.460835 -0.154084 0.168158
+[DiT] step 33/50 t=0.360
+[Debug] dit_step33_vt_cond: [2170, 64] first4: -0.343586 -0.257977 -0.227555 0.671680
+[Debug] dit_step33_vt_uncond: [2170, 64] first4: -0.213907 0.060018 -0.258127 0.766574
+[Debug] dit_step33_vt: [2170, 64] first4: -0.732613 -1.188033 -0.112312 0.307609
+[Debug] dit_step33_xt: [2170, 64] first4: 0.523381 1.484595 -0.151838 0.162006
+[DiT] step 34/50 t=0.340
+[Debug] dit_step34_vt_cond: [2170, 64] first4: -0.359997 -0.390317 -0.220456 0.624948
+[Debug] dit_step34_vt_uncond: [2170, 64] first4: -0.218993 -0.085222 -0.256678 0.732610
+[Debug] dit_step34_vt: [2170, 64] first4: -0.782051 -1.277164 -0.095120 0.209992
+[Debug] dit_step34_xt: [2170, 64] first4: 0.539022 1.510138 -0.149936 0.157806
+[DiT] step 35/50 t=0.320
+[Debug] dit_step35_vt_cond: [2170, 64] first4: -0.376117 -0.519578 -0.205748 0.575179
+[Debug] dit_step35_vt_uncond: [2170, 64] first4: -0.225790 -0.227651 -0.246590 0.695063
+[Debug] dit_step35_vt: [2170, 64] first4: -0.824555 -1.344921 -0.065901 0.128571
+[Debug] dit_step35_xt: [2170, 64] first4: 0.555513 1.537037 -0.148618 0.155234
+[DiT] step 36/50 t=0.300
+[Debug] dit_step36_vt_cond: [2170, 64] first4: -0.388908 -0.645821 -0.189103 0.531176
+[Debug] dit_step36_vt_uncond: [2170, 64] first4: -0.231184 -0.367522 -0.234059 0.657502
+[Debug] dit_step36_vt: [2170, 64] first4: -0.864100 -1.422112 -0.041499 0.066854
+[Debug] dit_step36_xt: [2170, 64] first4: 0.572795 1.565479 -0.147788 0.153897
+[DiT] step 37/50 t=0.280
+[Debug] dit_step37_vt_cond: [2170, 64] first4: -0.403025 -0.763416 -0.163423 0.484469
+[Debug] dit_step37_vt_uncond: [2170, 64] first4: -0.241143 -0.498980 -0.214114 0.616995
+[Debug] dit_step37_vt: [2170, 64] first4: -0.892219 -1.488433 0.005198 -0.010545
+[Debug] dit_step37_xt: [2170, 64] first4: 0.590639 1.595248 -0.147892 0.154108
+[DiT] step 38/50 t=0.260
+[Debug] dit_step38_vt_cond: [2170, 64] first4: -0.413133 -0.876420 -0.134134 0.440490
+[Debug] dit_step38_vt_uncond: [2170, 64] first4: -0.251082 -0.625665 -0.187976 0.573381
+[Debug] dit_step38_vt: [2170, 64] first4: -0.908542 -1.561219 0.031824 -0.045067
+[Debug] dit_step38_xt: [2170, 64] first4: 0.608810 1.626472 -0.148528 0.155009
+[DiT] step 39/50 t=0.240
+[Debug] dit_step39_vt_cond: [2170, 64] first4: -0.423588 -0.987294 -0.096889 0.393114
+[Debug] dit_step39_vt_uncond: [2170, 64] first4: -0.265262 -0.752590 -0.154346 0.525557
+[Debug] dit_step39_vt: [2170, 64] first4: -0.912287 -1.609328 0.086172 -0.106501
+[Debug] dit_step39_xt: [2170, 64] first4: 0.627056 1.658659 -0.150252 0.157140
+[DiT] step 40/50 t=0.220
+[Debug] dit_step40_vt_cond: [2170, 64] first4: -0.432563 -1.079476 -0.052369 0.343707
+[Debug] dit_step40_vt_uncond: [2170, 64] first4: -0.280351 -0.859098 -0.115334 0.472040
+[Debug] dit_step40_vt: [2170, 64] first4: -0.898876 -1.653373 0.143320 -0.117817
+[Debug] dit_step40_xt: [2170, 64] first4: 0.645033 1.691726 -0.153118 0.159496
+[DiT] step 41/50 t=0.200
+[Debug] dit_step41_vt_cond: [2170, 64] first4: -0.437202 -1.169207 -0.002996 0.295201
+[Debug] dit_step41_vt_uncond: [2170, 64] first4: -0.297226 -0.965837 -0.069953 0.414322
+[Debug] dit_step41_vt: [2170, 64] first4: -0.848467 -1.668746 0.201099 -0.128392
+[Debug] dit_step41_xt: [2170, 64] first4: 0.662003 1.725101 -0.157140 0.162064
+[DiT] step 42/50 t=0.180
+[Debug] dit_step42_vt_cond: [2170, 64] first4: -0.440767 -1.252195 0.052645 0.236928
+[Debug] dit_step42_vt_uncond: [2170, 64] first4: -0.315933 -1.066464 -0.015775 0.349839
+[Debug] dit_step42_vt: [2170, 64] first4: -0.805727 -1.702440 0.256392 -0.165544
+[Debug] dit_step42_xt: [2170, 64] first4: 0.678117 1.759150 -0.162268 0.165375
+[DiT] step 43/50 t=0.160
+[Debug] dit_step43_vt_cond: [2170, 64] first4: -0.441682 -1.322971 0.111570 0.178405
+[Debug] dit_step43_vt_uncond: [2170, 64] first4: -0.332472 -1.154346 0.037873 0.279796
+[Debug] dit_step43_vt: [2170, 64] first4: -0.752842 -1.718463 0.345657 -0.158267
+[Debug] dit_step43_xt: [2170, 64] first4: 0.693174 1.793519 -0.169181 0.168540
+[DiT] step 44/50 t=0.140
+[Debug] dit_step44_vt_cond: [2170, 64] first4: -0.436481 -1.389212 0.170327 0.116380
+[Debug] dit_step44_vt_uncond: [2170, 64] first4: -0.347603 -1.238272 0.093730 0.210065
+[Debug] dit_step44_vt: [2170, 64] first4: -0.673781 -1.742915 0.402893 -0.211575
+[Debug] dit_step44_xt: [2170, 64] first4: 0.706650 1.828377 -0.177239 0.172771
+[DiT] step 45/50 t=0.120
+[Debug] dit_step45_vt_cond: [2170, 64] first4: -0.432089 -1.448218 0.222042 0.052259
+[Debug] dit_step45_vt_uncond: [2170, 64] first4: -0.365667 -1.310638 0.145240 0.138891
+[Debug] dit_step45_vt: [2170, 64] first4: -0.598716 -1.780947 0.463354 -0.230193
+[Debug] dit_step45_xt: [2170, 64] first4: 0.718624 1.863996 -0.186506 0.177375
+[DiT] step 46/50 t=0.100
+[Debug] dit_step46_vt_cond: [2170, 64] first4: -0.419096 -1.509236 0.267908 -0.006720
+[Debug] dit_step46_vt_uncond: [2170, 64] first4: -0.381439 -1.387897 0.192344 0.071553
+[Debug] dit_step46_vt: [2170, 64] first4: -0.477449 -1.801432 0.493477 -0.266383
+[Debug] dit_step46_xt: [2170, 64] first4: 0.728173 1.900025 -0.196375 0.182703
+[DiT] step 47/50 t=0.080
+[Debug] dit_step47_vt_cond: [2170, 64] first4: -0.407120 -1.565253 0.302819 -0.051005
+[Debug] dit_step47_vt_uncond: [2170, 64] first4: -0.401163 -1.460867 0.230993 0.012604
+[Debug] dit_step47_vt: [2170, 64] first4: -0.369522 -1.829498 0.516088 -0.236691
+[Debug] dit_step47_xt: [2170, 64] first4: 0.735563 1.936615 -0.206697 0.187437
+[DiT] step 48/50 t=0.060
+[Debug] dit_step48_vt_cond: [2170, 64] first4: -0.382883 -1.607141 0.333374 -0.083609
+[Debug] dit_step48_vt_uncond: [2170, 64] first4: -0.407261 -1.531759 0.269964 -0.041764
+[Debug] dit_step48_vt: [2170, 64] first4: -0.250388 -1.766134 0.508857 -0.194591
+[Debug] dit_step48_xt: [2170, 64] first4: 0.740571 1.971938 -0.216874 0.191329
+[DiT] step 49/50 t=0.040
+[Debug] dit_step49_vt_cond: [2170, 64] first4: -0.416988 -1.643981 0.337042 -0.115695
+[Debug] dit_step49_vt_uncond: [2170, 64] first4: -0.434090 -1.549805 0.279877 -0.060649
+[Debug] dit_step49_vt: [2170, 64] first4: -0.398854 -1.970749 0.508508 -0.360412
+[Debug] dit_x0: [2170, 64] first4: 0.748548 2.011353 -0.227044 0.198537
+[DiT] step 50/50 t=0.020
+[DiT] Total generation: 99823.1 ms (99823.1 ms/sample)
+[Debug] dit_output: [2170, 64] first4: 0.748548 2.011353 -0.227044 0.198537
+[VAE] Tiled decode: 17 tiles (chunk=256, overlap=64, stride=128)
+[VAE] Graph: 474 nodes, T_latent=192
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_im2col_f16', name = 'kernel_im2col_f16'
+ggml_metal_library_compile_pipeline: loaded kernel_im2col_f16                             0x12060b7b0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f16', name = 'kernel_mul_mm_f16_f16_bci=0_bco=0'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f16_bci=0_bco=0             0x1206126e0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=0_nf=1_rb=0      0x120612940 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_bin_fuse_f32_f32_f32', name = 'kernel_bin_fuse_f32_f32_f32_op=2_nf=1_rb=0'
+ggml_metal_library_compile_pipeline: loaded kernel_bin_fuse_f32_f32_f32_op=2_nf=1_rb=0      0x120612fd0 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sin_f32_4', name = 'kernel_sin_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_sin_f32_4                              0x120613410 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_sqr_f32_4', name = 'kernel_sqr_f32_4'
+ggml_metal_library_compile_pipeline: loaded kernel_sqr_f32_4                              0x120613a10 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_conv_transpose_1d_f32_f32', name = 'kernel_conv_transpose_1d_f32_f32'
+ggml_metal_library_compile_pipeline: loaded kernel_conv_transpose_1d_f32_f32              0x120613f70 | th_max = 1024 | th_width =   32
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mv_f16_f16_4', name = 'kernel_mul_mv_f16_f16_4_nsg=4'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mv_f16_f16_4_nsg=4                 0x120614e50 | th_max = 1024 | th_width =   32
+[VAE] Upsample factor: 1920.00 (expected ~1920)
+[VAE] Graph: 474 nodes, T_latent=256
+[VAE] Graph: 474 nodes, T_latent=186
+ggml_metal_library_compile_pipeline: compiling pipeline: base = 'kernel_mul_mm_f16_f16', name = 'kernel_mul_mm_f16_f16_bci=0_bco=1'
+ggml_metal_library_compile_pipeline: loaded kernel_mul_mm_f16_f16_bci=0_bco=1             0x10600ac10 | th_max =  896 | th_width =   32
+[VAE] Tiled decode done: 17 tiles -> T_audio=4166400 (86.80s @ 48kHz)
+[VAE Batch0] Decode: 609612.5 ms
+[Debug] vae_audio: [2, 4166400] first4: -0.003173 -0.003180 -0.003117 -0.002677
+[VAE Batch0] Wrote ggml-sft/request00.wav: 4166400 samples (86.80s @ 48kHz stereo)
+[Request 1/1] Done
+ggml_metal_free: deallocating
+ggml_metal_free: deallocating
+[Pipeline] All done
+[Request] Loaded request0.json
+[Noise] Reusing existing rng_philox_seed42.bf16
+[Turbo] steps=8, shift=3.0 | acestep-v15-turbo-Q6_K.gguf
+[GGML] Running acestep-v15-turbo-Q6_K.gguf...
+[GGML] Done, 47 dump files
+[Turbo] Reusing existing Python dumps: python-turbo
+[Turbo] Cosine similarities GGML vs Python
+  stage                          GGML vs Python
+  text_hidden                          0.999813
+  lyric_embed                          1.000000
+  enc_hidden                           0.999631
+  detok_output                         0.999969
+  context                              0.999982
+  noise                                1.000000
+  temb_t                               0.999991
+  hidden_after_proj_in                 0.999987
+  enc_after_cond_emb                   0.999648
+  layer0_sa_output                     0.999791
+  hidden_after_layer0                  0.999898
+  hidden_after_layer6                  0.999877
+  hidden_after_layer12                 0.998721
+  hidden_after_layer18                 0.995721
+  hidden_after_layer23                 0.992012
+  dit_step0_vt                         0.970006
+  dit_step0_xt                         0.999934
+  dit_step1_vt                         0.973568
+  dit_step1_xt                         0.999795
+  dit_step2_vt                         0.976942
+  dit_step2_xt                         0.999458
+  dit_step3_vt                         0.977714
+  dit_step3_xt                         0.998700
+  dit_step4_vt                         0.976433
+  dit_step4_xt                         0.997003
+  dit_step5_vt                         0.973498
+  dit_step5_xt                         0.993187
+  dit_step6_vt                         0.970259
+  dit_step6_xt                         0.985910
+  dit_step7_vt                         0.963169
+  dit_x0                               0.975098
+  vae_audio                            0.894235
+  vae_audio (log spectral)             0.999805
+[Turbo] Error growth GGML vs Python
+  stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B
+  dit_step0_xt             0.999933   0.149343   0.007343  -0.002290   0.972926  -0.002342   0.972003
+  dit_step1_xt             0.999794   0.293469   0.012678  -0.005225   0.942670  -0.005313   0.941730
+  dit_step2_xt             0.999456   0.477608   0.019544  -0.009177   0.909085  -0.009311   0.908527
+  dit_step3_xt             0.998699   0.734476   0.028962  -0.014472   0.873547  -0.014577   0.873624
+  dit_step4_xt             0.997001   1.052176   0.042099  -0.021523   0.841546  -0.021660   0.841995
+  dit_step5_xt             0.993185   1.523836   0.061805  -0.031603   0.824654  -0.032109   0.824593
+  dit_step6_xt             0.985908   2.172513   0.091680  -0.045910   0.855362  -0.046482   0.855546
+[SFT] steps=50, shift=1.0, CFG=7.0 | acestep-v15-sft-Q6_K.gguf
+[GGML] Running acestep-v15-sft-Q6_K.gguf...
+[GGML] Done, 233 dump files
+[SFT] Reusing existing Python dumps: python-sft
+[SFT] Cosine similarities GGML vs Python
+  stage                          GGML vs Python
+  text_hidden                          0.999813
+  lyric_embed                          1.000000
+  enc_hidden                           0.999631
+  detok_output                         0.999969
+  context                              0.999982
+  noise                                1.000000
+  temb_t                               0.999973
+  hidden_after_proj_in                 0.999987
+  enc_after_cond_emb                   0.999652
+  layer0_sa_output                     0.999803
+  hidden_after_layer0                  0.999920
+  hidden_after_layer6                  0.999785
+  hidden_after_layer12                 0.999350
+  hidden_after_layer18                 0.998528
+  hidden_after_layer23                 0.998828
+  null_condition_emb                   1.000000
+  null_enc_hidden                      1.000000
+  dit_step0_vt_cond                    0.998729
+  dit_step0_vt_uncond                  0.998412
+  dit_step0_vt                         0.995061
+  dit_step0_xt                         0.999998
+  dit_step5_vt_cond                    0.999147
+  dit_step5_vt                         0.992746
+  dit_step5_xt                         0.999953
+  dit_step10_vt_cond                   0.997986
+  dit_step10_vt                        0.991731
+  dit_step10_xt                        0.999832
+  dit_step15_vt_cond                   0.995896
+  dit_step15_vt                        0.984377
+  dit_step15_xt                        0.999476
+  dit_step20_vt_cond                   0.992581
+  dit_step20_vt                        0.975428
+  dit_step20_xt                        0.998605
+  dit_step25_vt_cond                   0.986288
+  dit_step25_vt                        0.963191
+  dit_step25_xt                        0.996899
+  dit_step30_vt_cond                   0.979478
+  dit_step30_vt                        0.956129
+  dit_step30_xt                        0.994252
+  dit_step35_vt_cond                   0.972963
+  dit_step35_vt                        0.947489
+  dit_step35_xt                        0.991078
+  dit_step40_vt_cond                   0.968903
+  dit_step40_vt                        0.939482
+  dit_step40_xt                        0.987990
+  dit_step45_vt_cond                   0.973091
+  dit_step45_vt                        0.949768
+  dit_step45_xt                        0.985825
+  dit_step49_vt_cond                   0.979346
+  dit_step49_vt                        0.959720
+  dit_x0                               0.985104
+  vae_audio                            0.940564
+  vae_audio (log spectral)             0.999648
+[SFT] Error growth GGML vs Python
+  stage                         cos    max_err   mean_err     mean_A      std_A     mean_B      std_B
+  dit_step0_xt             0.999996   0.039016   0.002154  -0.001750   0.980178  -0.001741   0.980402
+  dit_step5_xt             0.999952   0.136674   0.006709  -0.006940   0.889822  -0.007143   0.887999
+  dit_step10_xt            0.999831   0.203842   0.011045  -0.012357   0.811533  -0.012603   0.811299
+  dit_step15_xt            0.999475   0.335757   0.017566  -0.017603   0.746439  -0.018114   0.745269
+  dit_step20_xt            0.998605   0.555654   0.026541  -0.022932   0.700822  -0.023808   0.699582
+  dit_step25_xt            0.996899   0.830926   0.037973  -0.028358   0.679564  -0.029311   0.679278
+  dit_step30_xt            0.994252   1.135793   0.051746  -0.033803   0.685565  -0.035027   0.685262
+  dit_step35_xt            0.991078   1.467212   0.067373  -0.039173   0.717556  -0.040716   0.717196
+  dit_step40_xt            0.987990   1.880554   0.084328  -0.044527   0.771174  -0.046462   0.771853
+  dit_step45_xt            0.985824   2.238589   0.100473  -0.050335   0.842316  -0.052475   0.843036
