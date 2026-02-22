@@ -287,6 +287,8 @@ static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg
                 ly.sa_v_proj = gf_load_tensor(&m->wctx, gf, p + ".self_attn.v_proj.weight");
                 if (i == 0) fprintf(stderr, "[DiT] Self-attn: all separate (3 types differ)\n");
             }
+        } else {
+            if (i == 0) fprintf(stderr, "[DiT] Self-attn: Q+K+V fused\n");
         }
         ly.sa_q_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn.q_norm.weight");
         ly.sa_k_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".self_attn.k_norm.weight");
@@ -311,6 +313,8 @@ static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg
                 ly.ca_v_proj = gf_load_tensor(&m->wctx, gf, p + ".cross_attn.v_proj.weight");
                 if (i == 0) fprintf(stderr, "[DiT] Cross-attn: all separate\n");
             }
+        } else {
+            if (i == 0) fprintf(stderr, "[DiT] Cross-attn: Q+K+V fused\n");
         }
         ly.ca_q_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn.q_norm.weight");
         ly.ca_k_norm = gf_load_tensor_f32(&m->wctx, gf, p + ".cross_attn.k_norm.weight");
