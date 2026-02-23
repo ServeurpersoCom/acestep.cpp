@@ -5,9 +5,9 @@ Run from tests/ directory. All paths relative to CWD.
 
 Usage:
     cd tests/
-    ./debug-dit-cossim.py                     # turbo BF16
-    ./debug-dit-cossim.py --quant Q6_K        # turbo Q6_K
-    ./debug-dit-cossim.py --mode sft           # SFT BF16
+    ./debug-dit-cossim.py              # turbo BF16
+    ./debug-dit-cossim.py --quant Q6_K # turbo Q6_K
+    ./debug-dit-cossim.py --mode sft   # SFT BF16
 """
 import os, sys, subprocess, struct, shutil, argparse, json
 import numpy as np
@@ -35,23 +35,6 @@ def load_request():
         req = json.load(f)
     print(f"[Request] Loaded request0.json")
     return req
-
-def generate_philox_noise(path, T, C=64):
-    try:
-        import torch
-    except ImportError:
-        print("[Noise] ERROR: PyTorch required")
-        return False
-    if not torch.cuda.is_available():
-        print("[Noise] ERROR: CUDA required for Philox RNG")
-        return False
-    gen = torch.Generator(device="cuda").manual_seed(SEED)
-    noise = torch.randn([1, C, T], generator=gen, device="cuda", dtype=torch.bfloat16)
-    raw = noise[0].cpu().contiguous().view(torch.uint8).numpy().tobytes()
-    with open(path, "wb") as f:
-        f.write(raw)
-    print(f"[Noise] Generated {path}: [{T}, {C}] bf16 ({len(raw)} bytes)")
-    return True
 
 def save_dump(path, data):
     import torch
@@ -93,18 +76,18 @@ def cos(a, b, shape_a=None, shape_b=None):
             return c_normal
     return _cos_flat(a, b)
 
-def log_spectral_cos(a, b, sr=48000, n_bands=128):
+def stft_cos(a, b, win=2048, hop=512):
     n = min(len(a), len(b))
-    sa = np.abs(np.fft.rfft(a[:n*2]))
-    sb = np.abs(np.fft.rfft(b[:n*2]))
-    edges = np.logspace(np.log10(1), np.log10(len(sa)), n_bands + 1).astype(int)
-    ba, bb = np.zeros(n_bands), np.zeros(n_bands)
-    for i in range(n_bands):
-        lo, hi = edges[i], edges[i+1]
-        if lo >= hi: hi = lo + 1
-        ba[i] = np.log1p(sa[lo:hi].mean())
-        bb[i] = np.log1p(sb[lo:hi].mean())
-    return _cos_flat(ba, bb)
+    a, b = a[:n], b[:n]
+    window = np.hanning(win)
+    frames = (n - win) // hop + 1
+    sa = np.zeros((frames, win // 2 + 1))
+    sb = np.zeros((frames, win // 2 + 1))
+    for i in range(frames):
+        s = i * hop
+        sa[i] = np.abs(np.fft.rfft(a[s:s+win] * window))
+        sb[i] = np.abs(np.fft.rfft(b[s:s+win] * window))
+    return _cos_flat(sa.flatten(), sb.flatten())
 
 def codes_to_python_format(codes_csv):
     """Convert '43316,18426,...' to '<|audio_code_43316|><|audio_code_18426|>...'"""
@@ -114,7 +97,7 @@ def codes_to_python_format(codes_csv):
 
 # GGML runner
 
-def run_ggml(dump_dir, req, cfg, gguf_path, noise_file):
+def run_ggml(dump_dir, req, cfg, gguf_path):
     ggml_bin = "../build/dit-vae"
     if not os.path.isfile(ggml_bin):
         print(f"[GGML] binary not found: {ggml_bin}")
@@ -140,8 +123,6 @@ def run_ggml(dump_dir, req, cfg, gguf_path, noise_file):
         "--request", request_json,
         "--dump", dump_dir,
     ]
-    if noise_file:
-        cmd += ["--noise-file", noise_file]
     print(f"[GGML] Running {os.path.basename(gguf_path)}...")
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     n = len([f for f in os.listdir(dump_dir) if f.endswith(".bin")])
@@ -393,10 +374,10 @@ def compare(dirs, stages, tag):
         if os.path.isfile(f):
             vae_data[label] = load_dump(f)
     if len(vae_data) >= 2:
-        print(f"  {'vae_audio (log spectral)':30s}", end="")
+        print(f"  {'vae_audio (STFT cosine)':30s}", end="")
         for a, b in pairs:
             if a in vae_data and b in vae_data:
-                c = log_spectral_cos(vae_data[a][0], vae_data[b][0])
+                c = stft_cos(vae_data[a][0], vae_data[b][0])
                 print(f" {c:>14.6f}", end="")
             else:
                 print(f" {'N/A':>14s}", end="")
@@ -440,7 +421,7 @@ def compare(dirs, stages, tag):
 
 # main
 
-def run_mode(mode_name, cfg, req, gguf_path, noise_file):
+def run_mode(mode_name, cfg, req, gguf_path):
     dump_ggml   = f"ggml-{mode_name}"
     dump_python = f"python-{mode_name}"
 
@@ -452,7 +433,7 @@ def run_mode(mode_name, cfg, req, gguf_path, noise_file):
 
     if os.path.isdir(dump_ggml):
         shutil.rmtree(dump_ggml)
-    if not run_ggml(dump_ggml, req, cfg, gguf_path, noise_file):
+    if not run_ggml(dump_ggml, req, cfg, gguf_path):
         print(f"[{tag}] GGML failed")
         return False
 
@@ -475,15 +456,6 @@ def main():
     args = ap.parse_args()
 
     req = load_request()
-    duration = req["duration"]
-
-    # Noise
-    T_noise = int(duration) * 25
-    noise_file = "rng_philox_seed42.bf16"
-    print(f"[Noise] Generating T={T_noise} (duration={duration}s)...")
-    if not generate_philox_noise(noise_file, T=T_noise):
-        print("[Noise] WARNING: cannot generate, GGML will use mt19937")
-        noise_file = None
 
     modes = ["turbo", "sft"] if args.mode == "both" else [args.mode]
     ok = True
@@ -494,7 +466,7 @@ def main():
             print(f"[Error] GGUF not found: {gguf_path}")
             ok = False
             continue
-        if not run_mode(m, cfg, req, gguf_path, noise_file):
+        if not run_mode(m, cfg, req, gguf_path):
             ok = False
 
     return 0 if ok else 1

@@ -10,6 +10,7 @@
 #include <vector>
 #include <chrono>
 #include <random>
+#include "philox.h"
 
 #include "ggml.h"
 #include "ggml-backend.h"
@@ -82,7 +83,6 @@ static void print_usage(const char * prog) {
         "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
         "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
         "Debug:\n"
-        "  --noise-file <path>     Load noise from bf16 file (Philox RNG dump, batch=1 only)\n"
         "  --dump <dir>            Dump intermediate tensors\n", prog);
 }
 
@@ -108,7 +108,6 @@ int main(int argc, char ** argv) {
     const char * dit_gguf      = NULL;
     const char * vae_gguf       = NULL;
     const char * dump_dir      = NULL;
-    const char * noise_file    = NULL;
     int batch_n                = 1;
     int vae_chunk              = 256;
     int vae_overlap            = 64;
@@ -122,7 +121,6 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_gguf = argv[++i];
         else if (strcmp(argv[i], "--dit") == 0 && i+1 < argc) dit_gguf = argv[++i];
         else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_gguf = argv[++i];
-        else if (strcmp(argv[i], "--noise-file") == 0 && i+1 < argc) noise_file = argv[++i];
         else if (strcmp(argv[i], "--dump") == 0 && i+1 < argc) dump_dir = argv[++i];
         else if (strcmp(argv[i], "--batch") == 0 && i+1 < argc) batch_n = atoi(argv[++i]);
         else if (strcmp(argv[i], "--vae-chunk") == 0 && i+1 < argc) vae_chunk = atoi(argv[++i]);
@@ -463,44 +461,13 @@ int main(int argc, char ** argv) {
             memcpy(context.data() + b * T * ctx_ch, context_single.data(),
                    T * ctx_ch * sizeof(float));
 
-        // Generate N noise samples
+        // Generate N noise samples (Philox4x32-10, matches torch.randn on CUDA with bf16)
         std::vector<float> noise(batch_n * Oc * T);
-
-        if (noise_file && batch_n == 1) {
-            // Load pre-generated Philox noise from bf16 file (batch=1 only)
-            FILE * nf = fopen(noise_file, "rb");
-            if (!nf) { fprintf(stderr, "FATAL: cannot open noise file %s\n", noise_file); return 1; }
-            fseek(nf, 0, SEEK_END);
-            int total_bf16 = (int)(ftell(nf) / sizeof(uint16_t));
-            fseek(nf, 0, SEEK_SET);
-            int T_file = total_bf16 / Oc;
-            if (T_file < T) {
-                fprintf(stderr, "FATAL: noise file too short: T_file=%d < T=%d\n", T_file, T);
-                fclose(nf); return 1;
-            }
-            std::vector<uint16_t> bf16_all(Oc * T);
-            if (fread(bf16_all.data(), sizeof(uint16_t), Oc * T, nf) != (size_t)(Oc * T)) {
-                fprintf(stderr, "FATAL: noise file read error\n");
-                fclose(nf); return 1;
-            }
-            fclose(nf);
-            for (int i = 0; i < Oc * T; i++) {
-                uint32_t w = (uint32_t)bf16_all[i] << 16;
-                float v; memcpy(&v, &w, 4);
-                noise[i] = v;
-            }
-            fprintf(stderr, "[Context] loaded noise from %s: [%d, %d] bf16\n",
-                    noise_file, T, Oc);
-        } else {
-            // Generate N noise samples with seeds: seed, seed+1, ..., seed+N-1
-            for (int b = 0; b < batch_n; b++) {
-                std::mt19937 rng((uint32_t)(seed + b));
-                std::normal_distribution<float> normal(0.0f, 1.0f);
-                float * dst = noise.data() + b * Oc * T;
-                for (int i = 0; i < Oc * T; i++)
-                    dst[i] = normal(rng);
-                fprintf(stderr, "[Context Batch%d] noise seed=%lld\n", b, seed + b);
-            }
+        for (int b = 0; b < batch_n; b++) {
+            float * dst = noise.data() + b * Oc * T;
+            philox_randn(seed + b, dst, Oc * T, /*bf16_round=*/true);
+            fprintf(stderr, "[Context Batch%d] Philox noise seed=%lld, [%d, %d]\n",
+                    b, seed + b, T, Oc);
         }
 
         // DiT Generate
