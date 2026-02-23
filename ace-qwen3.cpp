@@ -44,12 +44,21 @@ struct TokenProb {
     float prob;
 };
 
-// Sampling: top_k -> top_p (on raw logits) -> temperature -> softmax -> multinomial
-// Matches Python: _apply_top_k_filter -> _apply_top_p_filter -> _sample_tokens
+// Sampling: temperature -> top_k -> top_p -> softmax -> multinomial
+// Matches Python nano-vllm Sampler: div_(temperature) -> apply_top_k_top_p -> softmax -> sample
 static int sample_top_k_p(float * logits, int V, float temperature, float top_p, int top_k, std::mt19937 & rng) {
-    // 1. top_k: keep top K values, set rest to -inf
+    if (temperature <= 0.0f) {
+        // greedy
+        return (int)(std::max_element(logits, logits + V) - logits);
+    }
+
+    // 1. temperature (matches Python: logits.float().div_(temperatures))
+    float inv_temp = 1.0f / temperature;
+    for (int i = 0; i < V; i++)
+        logits[i] *= inv_temp;
+
+    // 2. top_k: keep top K values, set rest to -inf
     if (top_k > 0 && top_k < V) {
-        // partial sort to find k-th largest value
         std::vector<float> tmp(logits, logits + V);
         std::nth_element(tmp.begin(), tmp.begin() + top_k, tmp.end(), std::greater<float>());
         float threshold = tmp[top_k];
@@ -57,15 +66,14 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
             if (logits[i] < threshold) logits[i] = -INFINITY;
     }
 
-    // 2. top_p: nucleus filter on raw logits (softmax WITHOUT temperature, matches Python)
+    // 3. top_p: nucleus filter on temp-scaled logits (matches Python: softmax on scaled logits)
     if (top_p > 0.0f && top_p < 1.0f) {
-        // sort descending by logit value
         std::vector<TokenProb> sorted(V);
         for (int i = 0; i < V; i++) sorted[i] = {i, logits[i]};
         std::sort(sorted.begin(), sorted.end(),
                   [](const TokenProb & a, const TokenProb & b) { return a.prob > b.prob; });
 
-        // softmax of sorted raw logits (no temperature) for cumsum
+        // softmax of temp-scaled logits for cumsum
         float max_val = sorted[0].prob;
         float sum = 0.0f;
         std::vector<float> probs(V);
@@ -84,18 +92,10 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
         }
     }
 
-    // 3. temperature -> softmax -> multinomial
-    if (temperature <= 0.0f) {
-        // greedy
-        return (int)(std::max_element(logits, logits + V) - logits);
-    }
-
-    float inv_temp = 1.0f / temperature;
+    // 4. softmax -> multinomial (temperature already applied)
     float max_val = -INFINITY;
-    for (int i = 0; i < V; i++) {
-        logits[i] *= inv_temp;
+    for (int i = 0; i < V; i++)
         if (logits[i] > max_val) max_val = logits[i];
-    }
     float sum = 0.0f;
     for (int i = 0; i < V; i++) {
         logits[i] = expf(logits[i] - max_val);
