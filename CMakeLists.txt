@@ -46,7 +46,7 @@ macro(link_ggml_backends target)
 endmacro()
 
 # dit-vae: full pipeline (text-enc + cond + dit + vae + wav)
-add_executable(dit-vae dit-vae.cpp request.cpp)
+add_executable(dit-vae dit-vae.cpp request.cpp audio_loader.cpp)
 link_ggml_backends(dit-vae)
 
 # ace-qwen3: LLM inference (CoT + audio codes)

@@ -1,0 +1,44 @@
+# Validate that the project builds on Ubuntu and macOS (no model download).
+name: Build
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  build:
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build (Ubuntu)
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake build-essential pkg-config libopenblas-dev
+          mkdir build && cd build
+          cmake .. -DGGML_BLAS=ON
+          cmake --build . --config Release -j$(nproc)
+
+      - name: Build (macOS)
+        if: matrix.os == 'macos-latest'
+        run: |
+          mkdir build && cd build
+          cmake ..
+          cmake --build . --config Release -j$(sysctl -n hw.ncpu)
+
+      - name: Smoke test
+        run: |
+          ./build/ace-qwen3 --help 2>&1 | head -5
+          ./build/dit-vae --help 2>&1 | head -5
+          ./build/quantize --help 2>&1 | head -3

@@ -1,0 +1,11 @@
+{
+  "task_type": "text2music",
+  "caption": "Short CI test clip",
+  "lyrics": "",
+  "duration": 5,
+  "inference_steps": 4,
+  "guidance_scale": 1,
+  "shift": 3,
+  "seed": 42,
+  "audio_codes": ""
+}

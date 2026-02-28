@@ -1,0 +1,13 @@
+{
+    "task_type": "text2music",
+    "caption": "Calm acoustic guitar, soft male vocal, intimate",
+    "lyrics": "[Verse]\nQuiet strings and a gentle tune\n[Chorus]\nHold the moment in this room",
+    "duration": 30,
+    "seed": 42,
+    "inference_steps": 8,
+    "guidance_scale": 1.0,
+    "shift": 3.0,
+    "reference_audio": "reference.wav",
+    "audio_codes": "",
+    "audio_cover_strength": 1.0
+}

@@ -22,6 +22,7 @@
 #include "bpe.h"
 #include "debug.h"
 #include "request.h"
+#include "audio.h"
 
 struct Timer {
     std::chrono::steady_clock::time_point t;
@@ -249,6 +250,8 @@ int main(int argc, char ** argv) {
         int num_steps         = req.inference_steps > 0 ? req.inference_steps : 8;
         float guidance_scale  = req.guidance_scale > 0 ? req.guidance_scale : 7.0f;
         float shift           = req.shift > 0 ? req.shift : 1.0f;
+        float cover_strength  = req.audio_cover_strength >= 0 && req.audio_cover_strength <= 1
+            ? req.audio_cover_strength : 1.0f;
 
         if (is_turbo && guidance_scale > 1.0f) {
             fprintf(stderr, "[Pipeline] WARNING: turbo model, forcing guidance_scale=1.0 (was %.1f)\n",
@@ -386,16 +389,51 @@ int main(int argc, char ** argv) {
         }
         fprintf(stderr, "[Load] ConditionEncoder: %.1f ms\n", timer.ms());
 
-        // Silence feats for timbre input: first 750 frames (30s @ 25Hz)
+        // Timbre input: reference_audio (WAV or MP3 via VAE encoder) or silence (first 750 frames = 30s @ 25Hz)
         const int S_ref = 750;
-        std::vector<float> silence_feats(S_ref * 64);
-        memcpy(silence_feats.data(), silence_full.data(), S_ref * 64 * sizeof(float));
+        std::vector<float> timbre_feats(S_ref * 64);
+        const float * timbre_ptr = silence_full.data();
+        int S_ref_actual = S_ref;
+        if (!req.reference_audio.empty()) {
+            const std::string & ref_path = req.reference_audio;
+            if (ref_path.size() >= 4 && ref_path.compare(ref_path.size() - 4, 4, ".wav") == 0) {
+                std::vector<float> wav_stereo;
+                int n_samples = load_audio_48k_stereo(ref_path.c_str(), &wav_stereo);
+                if (n_samples > 0 && have_vae) {
+                    VAEEncoderGGML enc = {};
+                    if (vae_encoder_load(&enc, vae_gguf)) {
+                        int T_audio = n_samples;
+                        if (T_audio >= 1920) {
+                            int T_lat = T_audio / 1920;
+                            std::vector<float> enc_out((size_t)T_lat * 64);
+                            T_lat = vae_encoder_forward(&enc, wav_stereo.data(), T_audio, enc_out.data());
+                            if (T_lat > 0) {
+                                size_t copy_frames = (size_t)(T_lat < S_ref ? T_lat : S_ref);
+                                memcpy(timbre_feats.data(), enc_out.data(), copy_frames * 64 * sizeof(float));
+                                if (T_lat < S_ref)
+                                    memcpy(timbre_feats.data() + copy_frames * 64, silence_full.data(),
+                                           (S_ref - (int)copy_frames) * 64 * sizeof(float));
+                                S_ref_actual = (int)copy_frames;
+                                if (T_lat > S_ref) S_ref_actual = S_ref;
+                                timbre_ptr = timbre_feats.data();
+                                fprintf(stderr, "[Timbre] encoded %s -> %d frames (25Hz)\n", ref_path.c_str(), S_ref_actual);
+                            }
+                        }
+                        vae_encoder_free(&enc);
+                    }
+                } else if (n_samples <= 0) {
+                    fprintf(stderr, "[Timbre] WARNING: cannot load WAV %s, using silence\n", ref_path.c_str());
+                } else if (!have_vae) {
+                    fprintf(stderr, "[Timbre] WAV requires --vae (with encoder weights); using silence\n");
+                }
+            }
+        }
 
         timer.reset();
         std::vector<float> enc_hidden;
         cond_ggml_forward(&cond, text_hidden.data(), S_text,
                            lyric_embed.data(), S_lyric,
-                           silence_feats.data(), S_ref,
+                           timbre_ptr, S_ref_actual,
                            enc_hidden, &enc_S);
         fprintf(stderr, "[Encode] ConditionEncoder: %.1f ms, enc_S=%d\n", timer.ms(), enc_S);
 
@@ -438,15 +476,20 @@ int main(int argc, char ** argv) {
         }
 
         // Build single context: [T, ctx_ch] = src_latents[64] + mask_ones[64]
-        // src_latents = decoded_codes[0:decoded_T] + silence_latent[0:T-decoded_T]
-        // Padding reads silence from frame 0 (not from decoded_T), matching reference implementation
+        // src_latents = blend(decoded_codes, silence) for t<decoded_T, else silence; audio_cover_strength controls blend
         std::vector<float> context_single(T * ctx_ch);
         for (int t = 0; t < T; t++) {
-            const float * src = (t < decoded_T)
-                ? decoded_latents.data() + t * Oc
-                : silence_full.data() + (t - decoded_T) * Oc;
-            for (int c = 0; c < Oc; c++)
-                context_single[t * ctx_ch + c] = src[c];
+            for (int c = 0; c < Oc; c++) {
+                float v;
+                if (t < decoded_T) {
+                    float dec = decoded_latents[t * Oc + c];
+                    float sil = silence_full[c];  // frame 0 of silence
+                    v = (1.0f - cover_strength) * sil + cover_strength * dec;
+                } else {
+                    v = silence_full[(t - decoded_T) * Oc + c];
+                }
+                context_single[t * ctx_ch + c] = v;
+            }
             for (int c = 0; c < Oc; c++)
                 context_single[t * ctx_ch + Oc + c] = 1.0f;
         }

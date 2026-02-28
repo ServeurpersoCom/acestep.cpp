@@ -1,0 +1,72 @@
+# Build, download models (cached), and run short generation tests for various modes.
+# Runs on release (published) or manual trigger only. Uses short duration (5s) and few steps (4).
+name: Test generation
+
+on:
+  workflow_dispatch: {}
+  release:
+    types: [published]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Build
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake build-essential pkg-config libopenblas-dev
+          mkdir build && cd build
+          cmake .. -DGGML_BLAS=ON
+          cmake --build . --config Release -j$(nproc)
+
+      - name: Cache models
+        id: cache-models
+        uses: actions/cache@v4
+        with:
+          path: models
+          key: acestep-models-q8-${{ hashFiles('models.sh') }}
+          restore-keys: acestep-models-q8-
+
+      - name: Download models
+        if: steps.cache-models.outputs.cache-hit != 'true'
+        run: |
+          pip install -q hf
+          ./models.sh
+
+      - name: Test mode text2music (short)
+        run: |
+          ./build/dit-vae \
+            --request tests/fixtures/ci-text2music.json \
+            --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+            --dit models/acestep-v15-turbo-Q8_0.gguf \
+            --vae models/vae-BF16.gguf
+          test -f tests/fixtures/ci-text2music0.wav && echo "text2music WAV OK"
+
+      - name: Test mode cover with WAV reference (short)
+        run: |
+          ./build/dit-vae \
+            --request tests/fixtures/ci-cover.json \
+            --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+            --dit models/acestep-v15-turbo-Q8_0.gguf \
+            --vae models/vae-BF16.gguf
+          test -f tests/fixtures/ci-cover0.wav && echo "cover WAV OK"
+
+      - name: Test full pipeline (LLM + DiT, short)
+        run: |
+          ./build/ace-qwen3 \
+            --request tests/fixtures/ci-text2music.json \
+            --model models/acestep-5Hz-lm-4B-Q8_0.gguf
+          test -f request0.json
+          ./build/dit-vae \
+            --request request0.json \
+            --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+            --dit models/acestep-v15-turbo-Q8_0.gguf \
+            --vae models/vae-BF16.gguf
+          test -f request00.wav && echo "full pipeline WAV OK"

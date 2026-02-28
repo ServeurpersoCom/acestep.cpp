@@ -3,6 +3,8 @@ build/
 *.bf16
 
 tests/*/
+!tests/fixtures/
+!tests/fixtures/*.json
 
 checkpoints/
 models/
