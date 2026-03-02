@@ -248,27 +248,19 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     vae_load_snake_inv(m->sb, gf, "decoder.snake1.beta");
     vae_fuse_wn(m->c2w, gf, "decoder.conv2");
 
-    fprintf(stderr, "[VAE] Loaded: 5 blocks, upsample=1920x, BF16 activations\n");
+    fprintf(stderr, "[VAE] Loaded: 5 blocks, upsample=1920x, F32 activations\n");
     gf_close(&gf);
 }
 
 // Graph building
 // Snake activation (fused): y = x + sin^2(a * x) * inv_b
 // x: [T, C], exp_a: [1, C], inv_b: [1, C] (pre-computed at load)
-// Casts to BF16 before snake, back to F32 after.
 static struct ggml_tensor * vae_snake(
         struct ggml_context * ctx,
         struct ggml_tensor * x,
         struct ggml_tensor * exp_a,
         struct ggml_tensor * inv_b) {
-    if (x->type == GGML_TYPE_F32) {
-        x = ggml_cast(ctx, x, GGML_TYPE_BF16);
-    }
-    x = ggml_snake(ctx, x, exp_a, inv_b);
-    if (x->type != GGML_TYPE_F32) {
-        x = ggml_cast(ctx, x, GGML_TYPE_F32);
-    }
-    return x;
+    return ggml_snake(ctx, x, exp_a, inv_b);
 }
 
 // Conv1d + bias: data [T, IC] -> [T_out, OC]
@@ -306,21 +298,10 @@ static struct ggml_tensor * vae_conv_t1d(
     // w: [IC, K*OC]  xt: [IC, T_in]  ->  col: [K*OC, T_in]
     struct ggml_tensor * col = ggml_mul_mat(ctx, w, xt);
 
-    // Step 3: cast to BF16 before col2im_1d
-    if (col->type == GGML_TYPE_F32) {
-        col = ggml_cast(ctx, col, GGML_TYPE_BF16);
-    }
-
-    // Step 4: col2im - scatter-add columns to signal, fused padding crop
-    // [K*OC, T_in] -> [T_out, OC] where T_out = (T_in-1)*stride + K - 2*padding
+    // Step 3: col2im_1d scatter-add (F32 path, no BF16 casts)
     struct ggml_tensor * y = ggml_col2im_1d(ctx, col, stride, oc, padding);
 
-    // Step 5: cast back to F32
-    if (y->type != GGML_TYPE_F32) {
-        y = ggml_cast(ctx, y, GGML_TYPE_F32);
-    }
-
-    // Step 6: Add bias
+    // Step 4: Add bias
     if (b) {
         struct ggml_tensor * b2d = ggml_reshape_2d(ctx, b, 1, b->ne[0]);
         y = ggml_add(ctx, y, b2d);
@@ -389,6 +370,7 @@ static int vae_ggml_compute(
             ggml_free(m->graph_ctx);
             free(m->graph_buf);
         }
+
         // Graph context (generous fixed allocation)
         size_t ctx_size = ggml_tensor_overhead() * 1024 + ggml_graph_overhead_custom(8192, false);
         m->graph_buf = (uint8_t *)malloc(ctx_size);
@@ -407,7 +389,7 @@ static int vae_ggml_compute(
         ggml_build_forward_expand(m->graph, m->graph_output);
 
         if (!ggml_backend_sched_alloc_graph(m->sched, m->graph)) {
-            fprintf(stderr, "[VAE] FATAL: graph alloc failed\n");
+            fprintf(stderr, "[VAE] FATAL: graph alloc failed for T=%d\n", T_latent);
             ggml_free(ctx);
             free(m->graph_buf);
             m->graph_ctx = NULL;
@@ -415,6 +397,7 @@ static int vae_ggml_compute(
             m->graph_T = 0;
             return -1;
         }
+
         m->graph_ctx = ctx;
         m->graph_T = T_latent;
         fprintf(stderr, "[VAE] Graph: %d nodes, T_latent=%d\n",
@@ -462,11 +445,10 @@ static int vae_ggml_decode(
 }
 
 // Tiled decode: overlap-discard chunking for bounded VRAM usage.
-// Matches Python handler.py tiled_decode / _tiled_decode_gpu:
-//   stride = chunk_size - 2*overlap
-//   For each tile: decode latent window with overlap context, trim to core, concatenate.
-// Default chunk=256, overlap=64 matches Python handler.py fallback defaults.
-// Python auto-tunes chunk by VRAM: >=24GB->512, >=16GB->384, >=12GB->256, <12GB->128.
+// stride = chunk_size - 2*overlap
+// For each tile: decode latent window with overlap context, trim to core, concatenate.
+// Default chunk=256/overlap=64 matches reference code. Larger chunks (e.g. 1024)
+// reduce tile count and improve throughput; use --vae-chunk/--vae-overlap to tune.
 // Returns T_audio (total samples per channel) or -1 on error.
 static int vae_ggml_decode_tiled(
         VAEGGML * m,
