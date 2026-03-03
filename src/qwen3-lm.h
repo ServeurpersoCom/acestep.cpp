@@ -4,14 +4,11 @@
 #pragma once
 
 #include "qwen3-enc.h" // Qwen3Layer, Qwen3Config, layer build helpers
-#include "ggml-alloc.h"
-#include "bpe.h"
 
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <cmath>
-#include <string>
 #include <vector>
 
 // LM config (superset of encoder config)

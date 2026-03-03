@@ -10,10 +10,7 @@
 
 #include "dit.h"
 
-#include <cstdio>
-#include <cstdlib>
 #include <cmath>
-#include <vector>
 
 // Helper: ensure tensor is f32 (cast if bf16/f16)
 static struct ggml_tensor * dit_ggml_f32(

@@ -8,12 +8,8 @@
 #include "dit-graph.h"
 #include "debug.h"
 
-#include "ggml.h"
-#include "ggml-backend.h"
-#include "ggml-alloc.h"
 
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
 #include <cmath>
 #include <vector>

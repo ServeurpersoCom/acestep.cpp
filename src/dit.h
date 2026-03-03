@@ -10,17 +10,13 @@
 
 #include "ggml.h"
 #include "ggml-backend.h"
-#include "ggml-alloc.h"
 #include "gguf-weights.h"
 #include "backend.h"
 
-#include "debug.h"
 
 #include <cstdio>
 #include <cstdlib>
-#include <cstring>
 #include <string>
-#include <vector>
 
 // Config (mirrors dit.cuh DiTConfig)
 struct DiTGGMLConfig {

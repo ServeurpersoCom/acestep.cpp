@@ -11,10 +11,8 @@
 #include <string>
 #include <vector>
 #include <map>
-#include <unordered_map>
 #include <algorithm>
 #include <cstdio>
-#include <cstring>
 
 // Prefix tree for FSM constrained decoding
 struct PrefixTree {

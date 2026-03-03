@@ -6,13 +6,10 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <cmath>
 #include <vector>
 #include <random>
 #include "philox.h"
 
-#include "ggml.h"
-#include "ggml-backend.h"
 #include "dit-sampler.h"
 #include "vae.h"
 #include "qwen3-enc.h"
