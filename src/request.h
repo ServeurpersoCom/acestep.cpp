@@ -6,6 +6,7 @@
 // Aligned with Python GenerationParams (inference.py:39) and API /release_task.
 //
 
+#include <cstdint>
 #include <string>
 #include <cstdio>
 
