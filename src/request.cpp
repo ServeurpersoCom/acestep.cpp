@@ -13,9 +13,9 @@
 void request_init(AceRequest * r) {
     r->caption            = "";
     r->lyrics             = "";
-    r->instrumental       = false;
+
     r->bpm                = 0;
-    r->duration           = -1.0f;
+    r->duration           = 0.0f;
     r->keyscale           = "";
     r->timesignature      = "";
     r->vocal_language     = "unknown";
@@ -240,7 +240,6 @@ bool request_parse(AceRequest * r, const char * path) {
         else if (k == "shift")              r->shift              = (float)atof(v.c_str());
 
         // bools
-        else if (k == "instrumental")       r->instrumental       = (v == "true");
         // unknown keys: silently ignored (forward compat)
     }
 
@@ -258,8 +257,6 @@ bool request_write(const AceRequest * r, const char * path) {
     fprintf(f, "{\n");
     fprintf(f, "  \"caption\": \"%s\",\n",            json_escape(r->caption).c_str());
     fprintf(f, "  \"lyrics\": \"%s\",\n",             json_escape(r->lyrics).c_str());
-    if (r->instrumental)
-        fprintf(f, "  \"instrumental\": true,\n");
     fprintf(f, "  \"bpm\": %d,\n",                    r->bpm);
     fprintf(f, "  \"duration\": %.1f,\n",             r->duration);
     fprintf(f, "  \"keyscale\": \"%s\",\n",           json_escape(r->keyscale).c_str());

@@ -691,8 +691,7 @@ int main(int argc, char ** argv) {
                 "# Instruction\n"
                 "Expand the user's input into a more detailed"
                 " and specific musical description:\n";
-            std::string user_msg = ace.caption + "\n\ninstrumental: "
-                + std::string(req.instrumental ? "true" : "false");
+            std::string user_msg = ace.caption;
             prompt = build_custom_prompt(bpe, sys, user_msg.c_str());
         } else {
             prompt = build_lm_prompt(bpe, ace);

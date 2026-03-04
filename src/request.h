@@ -14,11 +14,10 @@ struct AceRequest {
     // text content
     std::string caption;            // ""
     std::string lyrics;             // ""
-    bool        instrumental;       // false
 
     // metadata (user-provided or LLM-enriched)
     int         bpm;                // 0 = unset
-    float       duration;           // -1 = unset
+    float       duration;           // 0 = unset
     std::string keyscale;           // "" = unset
     std::string timesignature;      // "" = unset
     std::string vocal_language;     // "unknown"
