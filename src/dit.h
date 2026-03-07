@@ -77,6 +77,19 @@ struct DiTGGMLLayer {
     // AdaLN scale-shift table: [6*hidden] (6 rows of [hidden])
     struct ggml_tensor * scale_shift_table; // [hidden, 6] in ggml layout
 
+    // Optional LoRA adapters (F32, applied when base projection is separate)
+    struct ggml_tensor * lora_sa_q_a, * lora_sa_q_b;
+    struct ggml_tensor * lora_sa_k_a, * lora_sa_k_b;
+    struct ggml_tensor * lora_sa_v_a, * lora_sa_v_b;
+    struct ggml_tensor * lora_sa_o_a, * lora_sa_o_b;
+    struct ggml_tensor * lora_ca_q_a, * lora_ca_q_b;
+    struct ggml_tensor * lora_ca_k_a, * lora_ca_k_b;
+    struct ggml_tensor * lora_ca_v_a, * lora_ca_v_b;
+    struct ggml_tensor * lora_ca_o_a, * lora_ca_o_b;
+    struct ggml_tensor * lora_gate_a, * lora_gate_b;
+    struct ggml_tensor * lora_up_a, * lora_up_b;
+    struct ggml_tensor * lora_down_a, * lora_down_b;
+
     int layer_type;  // 0=sliding, 1=full
 };
 
@@ -118,6 +131,8 @@ struct DiTGGML {
 
     // Weight storage
     WeightCtx wctx;
+    WeightCtx lora_wctx;     // optional LoRA adapter tensors (when lora_scale > 0)
+    float lora_scale;        // alpha/rank for LoRA (0 = no LoRA)
 
     // Pre-allocated constant for AdaLN (1+scale) fusion
     struct ggml_tensor * scalar_one;  // [1] = 1.0f, broadcast in ggml_add
@@ -385,9 +400,14 @@ static void dit_ggml_init_backend(DiTGGML * m) {
     m->use_flash_attn = (bp.backend != bp.cpu_backend);
 }
 
+// Load LoRA adapter from safetensors (e.g. adapter_model.safetensors).
+// scale = alpha/rank (typical 1.0). Call after dit_ggml_load. Returns false on error.
+bool dit_ggml_load_lora(DiTGGML * m, const char * lora_path, float scale);
+
 static void dit_ggml_free(DiTGGML * m) {
     if (m->sched) ggml_backend_sched_free(m->sched);
     backend_release(m->backend, m->cpu_backend);
     wctx_free(&m->wctx);
+    if (m->lora_wctx.ctx) wctx_free(&m->lora_wctx);
     *m = {};
 }

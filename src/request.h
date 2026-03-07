@@ -15,6 +15,10 @@ struct AceRequest {
     std::string caption;            // ""
     std::string lyrics;             // ""
 
+    // LoRA / style trigger (appended to caption for condition encoder when set)
+    std::string custom_tag;         // "" LoRA trigger word
+    std::string genre;              // "" LoRA genre
+
     // metadata (user-provided or LLM-enriched)
     int         bpm;                // 0 = unset
     float       duration;           // 0 = unset

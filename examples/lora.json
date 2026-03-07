@@ -1,0 +1,17 @@
+{
+  "task_type": "text2music",
+  "caption": "An energetic nu-disco track built on a foundation of a tight, funky slap bassline and a crisp, four-on-the-floor drum machine beat. The song opens with a distinctive, filtered wah-wah guitar riff that serves as a recurring motif. The arrangement is layered with shimmering synth pads, punchy synth stabs, and subtle arpeggiated synth textures that add movement. The track progresses through dynamic sections, including a brief atmospheric breakdown before rebuilding the main groove.",
+  "genre": "Nu-disco",
+  "lyrics": "[Instrumental]",
+  "bpm": 115,
+  "keyscale": "C# major",
+  "timesignature": "4",
+  "duration": 256,
+  "language": "unknown",
+  "instrumental": true,
+  "custom_tag": "crydamoure",
+  "inference_steps": 8,
+  "guidance_scale": 1,
+  "shift": 3,
+  "seed": -1
+}
