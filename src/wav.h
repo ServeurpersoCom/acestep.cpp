@@ -149,11 +149,19 @@ static bool write_wav(const char * path, const float * audio, int T_audio, int s
     fwrite(&bp, 2, 1, f);
     fwrite("data", 1, 4, f);
     fwrite(&data_size, 4, 1, f);
+    // peak-normalize to 0 dBFS: max amplitude, no clipping, best quality
+    float peak = 0.0f;
+    for (int i = 0; i < T_audio * 2; i++) {
+        float a = audio[i] < 0 ? -audio[i] : audio[i];
+        if (a > peak) {
+            peak = a;
+        }
+    }
+    float scale = peak > 0.0f ? 32767.0f / peak : 0.0f;
+
     for (int t = 0; t < T_audio; t++) {
         for (int c = 0; c < 2; c++) {
-            float s = audio[c * T_audio + t];
-            s       = s < -1.0f ? -1.0f : (s > 1.0f ? 1.0f : s);
-            short v = (short) (s * 32767.0f);
+            short v = (short) (audio[c * T_audio + t] * scale);
             fwrite(&v, 2, 1, f);
         }
     }
