@@ -322,6 +322,7 @@ static void parse_phase1_into_aces(
         if (!parsed.keyscale.empty() && base.keyscale.empty()) aces[i].keyscale = parsed.keyscale;
         if (!parsed.timesignature.empty() && base.timesignature.empty()) aces[i].timesignature = parsed.timesignature;
         if (!parsed.vocal_language.empty() && base.vocal_language.empty()) aces[i].vocal_language = parsed.vocal_language;
+        if (!parsed.caption.empty()) aces[i].caption = parsed.caption;
         // lyrics: only generated when user had none
         if (merge_lyrics && !parsed.lyrics.empty()) aces[i].lyrics = parsed.lyrics;
         if (aces[i].duration <= 0) aces[i].duration = 120.0f;
