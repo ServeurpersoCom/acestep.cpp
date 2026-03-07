@@ -12,6 +12,7 @@
 
 #include "dit-sampler.h"
 #include "vae.h"
+#include "vae-enc.h"
 #include "qwen3-enc.h"
 #include "fsq-detok.h"
 #include "cond-enc.h"
@@ -19,41 +20,7 @@
 #include "debug.h"
 #include "request.h"
 #include "timer.h"
-
-// Minimal WAV writer (16-bit PCM stereo)
-static bool write_wav(const char * path, const float * audio, int T_audio, int sr) {
-    FILE * f = fopen(path, "wb");
-    if (!f) return false;
-    int n_channels = 2;
-    int bits = 16;
-    int byte_rate = sr * n_channels * (bits / 8);
-    int block_align = n_channels * (bits / 8);
-    int data_size = T_audio * n_channels * (bits / 8);
-    int file_size = 36 + data_size;
-    fwrite("RIFF", 1, 4, f);
-    fwrite(&file_size, 4, 1, f);
-    fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f);
-    int fmt_size = 16; fwrite(&fmt_size, 4, 1, f);
-    short audio_fmt = 1; fwrite(&audio_fmt, 2, 1, f);
-    short nc = (short)n_channels; fwrite(&nc, 2, 1, f);
-    fwrite(&sr, 4, 1, f);
-    fwrite(&byte_rate, 4, 1, f);
-    short ba = (short)block_align; fwrite(&ba, 2, 1, f);
-    short bp = (short)bits; fwrite(&bp, 2, 1, f);
-    fwrite("data", 1, 4, f);
-    fwrite(&data_size, 4, 1, f);
-    for (int t = 0; t < T_audio; t++) {
-        for (int c = 0; c < 2; c++) {
-            float s = audio[c * T_audio + t];
-            s = s < -1.0f ? -1.0f : (s > 1.0f ? 1.0f : s);
-            short v = (short)(s * 32767.0f);
-            fwrite(&v, 2, 1, f);
-        }
-    }
-    fclose(f);
-    return true;
-}
+#include "wav.h"
 
 static void print_usage(const char * prog) {
     fprintf(stderr,
@@ -63,6 +30,8 @@ static void print_usage(const char * prog) {
         "  --text-encoder <gguf>   Text encoder GGUF file\n"
         "  --dit <gguf>            DiT GGUF file\n"
         "  --vae <gguf>            VAE GGUF file\n\n"
+        "Cover mode:\n"
+        "  --src-audio <wav>       Source audio for cover (48kHz stereo WAV)\n\n"
         "Batch:\n"
         "  --batch <N>             DiT variations per request (default: 1, max 9)\n\n"
         "Output naming: input.json -> input0.wav, input1.wav, ... (last digit = batch index)\n\n"
@@ -95,6 +64,7 @@ int main(int argc, char ** argv) {
     const char * text_enc_gguf = NULL;
     const char * dit_gguf      = NULL;
     const char * vae_gguf      = NULL;
+    const char * src_audio_path = NULL;
     const char * dump_dir      = NULL;
     bool use_fa                = true;
     int batch_n                = 1;
@@ -110,6 +80,7 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--text-encoder") == 0 && i+1 < argc) text_enc_gguf = argv[++i];
         else if (strcmp(argv[i], "--dit") == 0 && i+1 < argc) dit_gguf = argv[++i];
         else if (strcmp(argv[i], "--vae") == 0 && i+1 < argc) vae_gguf = argv[++i];
+        else if (strcmp(argv[i], "--src-audio") == 0 && i+1 < argc) src_audio_path = argv[++i];
         else if (strcmp(argv[i], "--dump") == 0 && i+1 < argc) dump_dir = argv[++i];
         else if (strcmp(argv[i], "--no-fa") == 0) use_fa = false;
         else if (strcmp(argv[i], "--batch") == 0 && i+1 < argc) batch_n = atoi(argv[++i]);
@@ -200,6 +171,46 @@ int main(int argc, char ** argv) {
         have_vae = true;
     }
 
+    // Cover mode: load VAE encoder and encode source audio
+    VAEEncoder vae_enc = {};
+    bool have_cover = false;
+    std::vector<float> cover_latents;  // [T_cover, 64] time-major
+    int T_cover = 0;
+    if (src_audio_path) {
+        if (!vae_gguf) {
+            fprintf(stderr, "ERROR: --src-audio requires --vae\n");
+            return 1;
+        }
+        timer.reset();
+        int T_audio = 0, wav_sr = 0;
+        float * wav_data = read_wav(src_audio_path, &T_audio, &wav_sr);
+        if (!wav_data) {
+            fprintf(stderr, "FATAL: cannot read --src-audio %s\n", src_audio_path);
+            return 1;
+        }
+        if (wav_sr != 48000)
+            fprintf(stderr, "[WARN] src_audio is %d Hz, VAE expects 48000. Resample with ffmpeg first.\n", wav_sr);
+        fprintf(stderr, "[Cover] Source audio: %.2fs\n", (float)T_audio / (float)(wav_sr > 0 ? wav_sr : 48000));
+
+        vae_enc_load(&vae_enc, vae_gguf);
+        int max_T_lat = (T_audio / 1920) + 64;
+        cover_latents.resize(max_T_lat * 64);
+
+        T_cover = vae_enc_encode_tiled(&vae_enc, wav_data, T_audio,
+                                        cover_latents.data(), max_T_lat,
+                                        vae_chunk, vae_overlap);
+        free(wav_data);
+        if (T_cover < 0) {
+            fprintf(stderr, "FATAL: VAE encode of src_audio failed\n");
+            vae_enc_free(&vae_enc);
+            return 1;
+        }
+        cover_latents.resize(T_cover * 64);
+        fprintf(stderr, "[Cover] Encoded: T_cover=%d (%.2fs), %.1f ms\n",
+                T_cover, (float)T_cover * 1920.0f / 48000.0f, timer.ms());
+        have_cover = true;
+    }
+
     // Process each request
     for (int ri = 0; ri < (int)request_paths.size(); ri++) {
         const char * rpath = request_paths[ri];
@@ -257,7 +268,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Pipeline] seed=%lld, steps=%d, guidance=%.1f, shift=%.1f, duration=%.1fs\n",
                 seed, num_steps, guidance_scale, shift, duration);
 
-        // Parse audio codes from request
+        // Audio codes from request JSON (passthrough mode only, NOT cover)
         std::vector<int> codes_vec = parse_codes_string(req.audio_codes);
         if (!codes_vec.empty())
             fprintf(stderr, "[Pipeline] %zu audio codes (%.1fs @ 5Hz)\n",
@@ -271,11 +282,15 @@ int main(int argc, char ** argv) {
         }
 
         // T = number of 25Hz latent frames for DiT
-        // When audio codes are present, T is determined by the codes.
-        // Otherwise, T is derived from the requested duration.
-        int T = codes_vec.empty()
-            ? (int)(duration * FRAMES_PER_SECOND)
-            : (int)codes_vec.size() * 5;
+        // Cover: from source audio. Codes: from code count. Else: from duration.
+        int T;
+        if (have_cover) {
+            T = T_cover;
+        } else if (!codes_vec.empty()) {
+            T = (int)codes_vec.size() * 5;
+        } else {
+            T = (int)(duration * FRAMES_PER_SECOND);
+        }
         T = ((T + cfg.patch_size - 1) / cfg.patch_size) * cfg.patch_size;
         int S = T / cfg.patch_size;
         int enc_S = 0;
@@ -300,7 +315,8 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Load] BPE tokenizer: %.1f ms\n", timer.ms());
 
         // 2. Build formatted prompts
-        const char * instruction = "Generate audio semantic tokens based on the given conditions:";
+        // Same instruction for all modes. Cover differs only by context content (audio vs silence).
+        const char * instruction = "Fill the audio semantic mask based on the given conditions:";
         char metas[512];
         snprintf(metas, sizeof(metas),
                  "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
@@ -379,10 +395,10 @@ int main(int argc, char ** argv) {
 
         debug_dump_2d(&dbg, "enc_hidden", enc_hidden.data(), enc_S, 2048);
 
-        // Decode audio codes if provided
+        // Decode audio codes if provided (passthrough mode only, NOT cover)
         int decoded_T = 0;
         std::vector<float> decoded_latents;
-        if (!codes_vec.empty()) {
+        if (!have_cover && !codes_vec.empty()) {
             timer.reset();
             DetokGGML detok = {};
             if (!detok_ggml_load(&detok, dit_gguf, model.backend, model.cpu_backend)) {
@@ -413,18 +429,31 @@ int main(int argc, char ** argv) {
             detok_ggml_free(&detok);
         }
 
-        // Build single context: [T, ctx_ch] = src_latents[64] + mask_ones[64]
-        // src_latents = decoded_codes[0:decoded_T] + silence_latent[0:T-decoded_T]
-        // Padding reads silence from frame 0 (not from decoded_T), matching reference implementation
+        // Build context: [T, ctx_ch] = src_latents[64] + mask_ones[64]
+        // Cover: VAE latents directly (matching Python: is_covers=False, raw latents as context)
+        // Passthrough: detokenized FSQ codes + silence padding
+        // Text2music: silence only
         std::vector<float> context_single(T * ctx_ch);
-        for (int t = 0; t < T; t++) {
-            const float * src = (t < decoded_T)
-                ? decoded_latents.data() + t * Oc
-                : silence_full.data() + (t - decoded_T) * Oc;
-            for (int c = 0; c < Oc; c++)
-                context_single[t * ctx_ch + c] = src[c];
-            for (int c = 0; c < Oc; c++)
-                context_single[t * ctx_ch + Oc + c] = 1.0f;
+        if (have_cover) {
+            for (int t = 0; t < T; t++) {
+                const float * src = (t < T_cover)
+                    ? cover_latents.data() + t * Oc
+                    : silence_full.data() + t * Oc;
+                for (int c = 0; c < Oc; c++)
+                    context_single[t * ctx_ch + c] = src[c];
+                for (int c = 0; c < Oc; c++)
+                    context_single[t * ctx_ch + Oc + c] = 1.0f;
+            }
+        } else {
+            for (int t = 0; t < T; t++) {
+                const float * src = (t < decoded_T)
+                    ? decoded_latents.data() + t * Oc
+                    : silence_full.data() + (t - decoded_T) * Oc;
+                for (int c = 0; c < Oc; c++)
+                    context_single[t * ctx_ch + c] = src[c];
+                for (int c = 0; c < Oc; c++)
+                    context_single[t * ctx_ch + Oc + c] = 1.0f;
+            }
         }
 
         // Replicate context for N batch samples (all identical)
@@ -432,6 +461,32 @@ int main(int argc, char ** argv) {
         for (int b = 0; b < batch_n; b++)
             memcpy(context.data() + b * T * ctx_ch, context_single.data(),
                    T * ctx_ch * sizeof(float));
+
+        // Cover mode: build silence context for audio_cover_strength switching
+        // When step >= cover_steps, DiT switches from cover context to silence context
+        std::vector<float> context_silence;
+        int cover_steps = -1;
+        if (have_cover) {
+            float cover_strength = req.audio_cover_strength;
+            if (cover_strength < 1.0f) {
+                // Build silence context: all frames use silence_latent
+                std::vector<float> silence_single(T * ctx_ch);
+                for (int t = 0; t < T; t++) {
+                    const float * src = silence_full.data() + t * Oc;
+                    for (int c = 0; c < Oc; c++)
+                        silence_single[t * ctx_ch + c] = src[c];
+                    for (int c = 0; c < Oc; c++)
+                        silence_single[t * ctx_ch + Oc + c] = 1.0f;
+                }
+                context_silence.resize(batch_n * T * ctx_ch);
+                for (int b = 0; b < batch_n; b++)
+                    memcpy(context_silence.data() + b * T * ctx_ch,
+                           silence_single.data(), T * ctx_ch * sizeof(float));
+                cover_steps = (int)((float)num_steps * cover_strength);
+                fprintf(stderr, "[Cover] audio_cover_strength=%.2f -> switch at step %d/%d\n",
+                        cover_strength, cover_steps, num_steps);
+            }
+        }
 
         // Generate N noise samples (Philox4x32-10, matches torch.randn on CUDA with bf16)
         std::vector<float> noise(batch_n * Oc * T);
@@ -449,13 +504,16 @@ int main(int argc, char ** argv) {
         debug_dump_2d(&dbg, "noise", noise.data(), T, Oc);
         debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
 
-        fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d\n",
-                T, S, enc_S, num_steps, batch_n);
+        fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n",
+                T, S, enc_S, num_steps, batch_n,
+                have_cover ? " (cover)" : "");
 
         timer.reset();
         dit_ggml_generate(&model, noise.data(), context.data(), enc_hidden.data(),
                           enc_S, T, batch_n, num_steps, schedule.data(), output.data(),
-                          guidance_scale, &dbg);
+                          guidance_scale, &dbg,
+                          context_silence.empty() ? nullptr : context_silence.data(),
+                          cover_steps);
         fprintf(stderr, "[DiT] Total generation: %.1f ms (%.1f ms/sample)\n",
                 timer.ms(), timer.ms() / batch_n);
 
@@ -513,6 +571,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Request %d/%d] Done\n", ri + 1, (int)request_paths.size());
     }
 
+    if (have_cover) vae_enc_free(&vae_enc);
     if (have_vae) vae_ggml_free(&vae);
     dit_ggml_free(&model);
     fprintf(stderr, "[Pipeline] All done\n");

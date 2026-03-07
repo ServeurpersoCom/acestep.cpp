@@ -40,6 +40,9 @@ struct AceRequest {
     int         inference_steps;    // 8
     float       guidance_scale;     // 7.0
     float       shift;              // 1.0
+
+    // cover mode (active when --src-audio is provided on CLI)
+    float       audio_cover_strength; // 0.5 (0-1, fraction of DiT steps using source context)
 };
 
 // Initialize all fields to defaults (matches Python GenerationParams defaults)
