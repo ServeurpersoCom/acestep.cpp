@@ -142,10 +142,39 @@ cd examples
 ./partial.sh          # caption + lyrics + duration
 ./full.sh             # all metadata provided
 ./dit-only.sh         # skip LLM, DiT from noise
+./lora.sh             # LoRA adapter (PEFT safetensors)
 ```
 
 Each example has a `-sft` variant (SFT model, 50 steps, CFG 7.0)
 alongside the turbo default (8 steps, no CFG).
+
+## LoRA
+
+`dit-vae` supports PEFT LoRA adapters in `adapter_model.safetensors` format.
+Pass `--lora <path>` and optionally `--lora-scale <float>` (default 1.0, typical alpha/rank):
+
+```bash
+./build/dit-vae \
+    --request request0.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --dit models/acestep-v15-turbo-Q8_0.gguf \
+    --vae models/vae-BF16.gguf \
+    --lora lora/adapter_model.safetensors \
+    --lora-scale 1.0
+```
+
+Use `custom_tag` in the request JSON to append a trigger word to the caption:
+
+```json
+{
+  "caption": "Nu-disco track with funky bassline",
+  "custom_tag": "crydamoure",
+  "inference_steps": 8,
+  "shift": 3
+}
+```
+
+See `examples/lora.sh` and `examples/lora.json` for a complete example.
 
 ## Generation modes
 

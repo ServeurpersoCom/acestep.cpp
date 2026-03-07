@@ -30,6 +30,9 @@ static void print_usage(const char * prog) {
         "  --text-encoder <gguf>   Text encoder GGUF file\n"
         "  --dit <gguf>            DiT GGUF file\n"
         "  --vae <gguf>            VAE GGUF file\n\n"
+        "LoRA:\n"
+        "  --lora <path>           LoRA adapter (adapter_model.safetensors)\n"
+        "  --lora-scale <float>    LoRA scale, e.g. alpha/rank (default: 1.0)\n\n"
         "Cover mode:\n"
         "  --src-audio <wav>       Source audio for cover (48kHz stereo WAV)\n\n"
         "Batch:\n"
@@ -66,6 +69,8 @@ int main(int argc, char ** argv) {
     const char * vae_gguf      = NULL;
     const char * src_audio_path = NULL;
     const char * dump_dir      = NULL;
+    const char * lora_path     = NULL;
+    float lora_scale           = 1.0f;
     bool use_fa                = true;
     int batch_n                = 1;
     int vae_chunk              = 256;
@@ -86,6 +91,8 @@ int main(int argc, char ** argv) {
         else if (strcmp(argv[i], "--batch") == 0 && i+1 < argc) batch_n = atoi(argv[++i]);
         else if (strcmp(argv[i], "--vae-chunk") == 0 && i+1 < argc) vae_chunk = atoi(argv[++i]);
         else if (strcmp(argv[i], "--vae-overlap") == 0 && i+1 < argc) vae_overlap = atoi(argv[++i]);
+        else if (strcmp(argv[i], "--lora") == 0 && i+1 < argc) lora_path = argv[++i];
+        else if (strcmp(argv[i], "--lora-scale") == 0 && i+1 < argc) lora_scale = (float)atof(argv[++i]);
         else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             print_usage(argv[0]); return 0;
         } else {
@@ -131,6 +138,16 @@ int main(int argc, char ** argv) {
         return 1;
     }
     fprintf(stderr, "[Load] DiT weight load: %.1f ms\n", timer.ms());
+
+    if (lora_path) {
+        timer.reset();
+        if (!dit_ggml_load_lora(&model, lora_path, lora_scale)) {
+            fprintf(stderr, "FATAL: failed to load LoRA from %s\n", lora_path);
+            dit_ggml_free(&model);
+            return 1;
+        }
+        fprintf(stderr, "[Load] LoRA: %.1f ms\n", timer.ms());
+    }
 
     // Read DiT GGUF metadata + silence_latent tensor (once)
     bool is_turbo = false;
@@ -237,8 +254,11 @@ int main(int argc, char ** argv) {
             continue;
         }
 
-        // Extract params
-        const char * caption  = req.caption.c_str();
+        // Extract params (append custom_tag to caption for LoRA/condition so trigger is in text)
+        std::string caption_for_cond = req.caption;
+        if (!req.custom_tag.empty())
+            caption_for_cond += ", " + req.custom_tag;
+        const char * caption  = caption_for_cond.c_str();
         const char * lyrics   = req.lyrics.c_str();
         char bpm_str[16] = "N/A";
         if (req.bpm > 0) snprintf(bpm_str, sizeof(bpm_str), "%d", req.bpm);

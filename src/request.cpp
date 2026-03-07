@@ -13,6 +13,8 @@
 void request_init(AceRequest * r) {
     r->caption            = "";
     r->lyrics             = "";
+    r->custom_tag         = "";
+    r->genre              = "";
 
     r->bpm                = 0;
     r->duration           = 0.0f;
@@ -218,13 +220,17 @@ bool request_parse(AceRequest * r, const char * path) {
         const std::string & v = kv.value;
 
         // strings
-        if      (k == "caption")              r->caption              = v;
-        else if (k == "lyrics")               r->lyrics               = v;
-        else if (k == "keyscale")             r->keyscale             = v;
-        else if (k == "timesignature")        r->timesignature        = v;
-        else if (k == "vocal_language")       r->vocal_language       = v;
-        else if (k == "audio_codes")          r->audio_codes          = v;
-        else if (k == "lm_negative_prompt")   r->lm_negative_prompt   = v;
+        if      (k == "caption")            r->caption            = v;
+        else if (k == "lyrics")             r->lyrics             = v;
+        else if (k == "formatted_lyrics")   r->lyrics             = v;  // alias for lyrics
+        else if (k == "custom_tag")         r->custom_tag         = v;
+        else if (k == "genre")              r->genre              = v;
+        else if (k == "keyscale")           r->keyscale           = v;
+        else if (k == "timesignature")      r->timesignature      = v;
+        else if (k == "vocal_language")     r->vocal_language     = v;
+        else if (k == "language")           r->vocal_language     = v;  // alias for vocal_language
+        else if (k == "audio_codes")        r->audio_codes        = v;
+        else if (k == "lm_negative_prompt") r->lm_negative_prompt = v;
 
         // ints
         else if (k == "bpm")                  r->bpm                  = atoi(v.c_str());
@@ -256,6 +262,10 @@ bool request_write(const AceRequest * r, const char * path) {
     fprintf(f, "{\n");
     fprintf(f, "  \"caption\": \"%s\",\n",            json_escape(r->caption).c_str());
     fprintf(f, "  \"lyrics\": \"%s\",\n",             json_escape(r->lyrics).c_str());
+    if (!r->custom_tag.empty())
+        fprintf(f, "  \"custom_tag\": \"%s\",\n",     json_escape(r->custom_tag).c_str());
+    if (!r->genre.empty())
+        fprintf(f, "  \"genre\": \"%s\",\n",          json_escape(r->genre).c_str());
     fprintf(f, "  \"bpm\": %d,\n",                    r->bpm);
     fprintf(f, "  \"duration\": %.1f,\n",             r->duration);
     fprintf(f, "  \"keyscale\": \"%s\",\n",           json_escape(r->keyscale).c_str());
@@ -285,6 +295,8 @@ void request_dump(const AceRequest * r, FILE * f) {
     fprintf(f, "  caption:    %.60s%s\n",
             r->caption.c_str(), r->caption.size() > 60 ? "..." : "");
     fprintf(f, "  lyrics:     %zu bytes\n", r->lyrics.size());
+    if (!r->custom_tag.empty())
+        fprintf(f, "  custom_tag: %s\n", r->custom_tag.c_str());
     fprintf(f, "  bpm=%d dur=%.0f key=%s ts=%s lang=%s\n",
             r->bpm, r->duration, r->keyscale.c_str(),
             r->timesignature.c_str(), r->vocal_language.c_str());
