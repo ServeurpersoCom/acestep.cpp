@@ -131,7 +131,9 @@ static void dit_ggml_generate(
         const float * schedule,
         float * output,
         float guidance_scale = 1.0f,
-        const DebugDumper * dbg = nullptr) {
+        const DebugDumper * dbg = nullptr,
+        const float * context_switch = nullptr,
+        int cover_steps = -1) {
 
     DiTGGMLConfig & c = model->cfg;
     int Oc    = c.out_channels;      // 64
@@ -288,8 +290,21 @@ static void dit_ggml_generate(
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
 
     // Flow matching loop
+    bool switched_cover = false;
     for (int step = 0; step < num_steps; step++) {
         float t_curr = schedule[step];
+
+        // Cover mode: switch context from cover to non-cover at cover_steps
+        if (context_switch && cover_steps >= 0 && step >= cover_steps && !switched_cover) {
+            switched_cover = true;
+            for (int b = 0; b < N; b++)
+                for (int t = 0; t < T; t++)
+                    memcpy(&input_buf[b * T * in_ch + t * in_ch],
+                           &context_switch[b * T * ctx_ch + t * ctx_ch],
+                           ctx_ch * sizeof(float));
+            fprintf(stderr, "[DiT] Cover: switched to non-cover context at step %d/%d\n",
+                    step, num_steps);
+        }
 
         // Set timestep (changes each step)
         if (t_t) {

@@ -19,6 +19,9 @@
 #define AUDIO_CODE_BASE     151669
 #define AUDIO_CODE_COUNT    65535
 
+// LM system instruction (same for all 4 prompt variants, the LM always generates audio tokens)
+static const char * LM_INSTRUCTION = "Generate audio semantic tokens based on the given conditions:";
+
 // ACE-Step prompt
 struct AcePrompt {
     std::string caption;
@@ -134,7 +137,7 @@ static std::vector<int> build_lm_prompt(BPETokenizer & bpe, const AcePrompt & pr
         ids.insert(ids.end(), t.begin(), t.end());
     };
     ids.push_back(TOKEN_IM_START);
-    append("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
+    append(std::string("system\n# Instruction\n") + LM_INSTRUCTION + "\n\n");
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);
@@ -154,7 +157,7 @@ static std::vector<int> build_lm_prompt_uncond(BPETokenizer & bpe, const AceProm
         ids.insert(ids.end(), t.begin(), t.end());
     };
     ids.push_back(TOKEN_IM_START);
-    append("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
+    append(std::string("system\n# Instruction\n") + LM_INSTRUCTION + "\n\n");
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);
@@ -220,7 +223,7 @@ static std::vector<int> build_lm_prompt_with_cot(BPETokenizer & bpe, const AcePr
         ids.insert(ids.end(), t.begin(), t.end());
     };
     ids.push_back(TOKEN_IM_START);
-    append("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
+    append(std::string("system\n# Instruction\n") + LM_INSTRUCTION + "\n\n");
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);
@@ -247,7 +250,7 @@ static std::vector<int> build_lm_prompt_uncond_with_cot(BPETokenizer & bpe, cons
         ids.insert(ids.end(), t.begin(), t.end());
     };
     ids.push_back(TOKEN_IM_START);
-    append("system\n# Instruction\nGenerate audio semantic tokens based on the given conditions:\n\n");
+    append(std::string("system\n# Instruction\n") + LM_INSTRUCTION + "\n\n");
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);

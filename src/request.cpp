@@ -31,6 +31,7 @@ void request_init(AceRequest * r) {
     r->inference_steps    = 8;
     r->guidance_scale     = 0.0f;
     r->shift              = 3.0f;
+    r->audio_cover_strength = 0.5f;
 }
 
 // JSON string escape / unescape
@@ -232,21 +233,19 @@ bool request_parse(AceRequest * r, const char * path) {
         else if (k == "lm_negative_prompt") r->lm_negative_prompt = v;
 
         // ints
-        else if (k == "bpm")                r->bpm                = atoi(v.c_str());
-        else if (k == "seed")               r->seed               = strtoll(v.c_str(), nullptr, 10);
+        else if (k == "bpm")                  r->bpm                  = atoi(v.c_str());
+        else if (k == "seed")                 r->seed                 = strtoll(v.c_str(), nullptr, 10);
 
         // floats
-        else if (k == "duration")           r->duration           = (float)atof(v.c_str());
-        else if (k == "lm_temperature")     r->lm_temperature     = (float)atof(v.c_str());
-        else if (k == "lm_cfg_scale")       r->lm_cfg_scale       = (float)atof(v.c_str());
-        else if (k == "lm_top_p")           r->lm_top_p           = (float)atof(v.c_str());
-        else if (k == "lm_top_k")           r->lm_top_k           = atoi(v.c_str());
-        else if (k == "inference_steps")    r->inference_steps    = atoi(v.c_str());
-        else if (k == "guidance_scale")     r->guidance_scale     = (float)atof(v.c_str());
-        else if (k == "shift")              r->shift              = (float)atof(v.c_str());
-
-        // bools
-        // unknown keys: silently ignored (forward compat)
+        else if (k == "duration")             r->duration             = (float)atof(v.c_str());
+        else if (k == "lm_temperature")       r->lm_temperature       = (float)atof(v.c_str());
+        else if (k == "lm_cfg_scale")         r->lm_cfg_scale         = (float)atof(v.c_str());
+        else if (k == "lm_top_p")             r->lm_top_p             = (float)atof(v.c_str());
+        else if (k == "lm_top_k")             r->lm_top_k             = atoi(v.c_str());
+        else if (k == "inference_steps")      r->inference_steps      = atoi(v.c_str());
+        else if (k == "guidance_scale")       r->guidance_scale       = (float)atof(v.c_str());
+        else if (k == "shift")                r->shift                = (float)atof(v.c_str());
+        else if (k == "audio_cover_strength") r->audio_cover_strength = (float)atof(v.c_str());
     }
 
     fprintf(stderr, "[Request] parsed %s (%zu fields)\n", path, pairs.size());
@@ -281,6 +280,7 @@ bool request_write(const AceRequest * r, const char * path) {
     fprintf(f, "  \"inference_steps\": %d,\n",        r->inference_steps);
     fprintf(f, "  \"guidance_scale\": %.1f,\n",       r->guidance_scale);
     fprintf(f, "  \"shift\": %.1f,\n",                r->shift);
+    fprintf(f, "  \"audio_cover_strength\": %.2f,\n", r->audio_cover_strength);
     // audio_codes last (no trailing comma)
     fprintf(f, "  \"audio_codes\": \"%s\"\n",         json_escape(r->audio_codes).c_str());
     fprintf(f, "}\n");
@@ -304,6 +304,8 @@ void request_dump(const AceRequest * r, FILE * f) {
             r->lm_temperature, r->lm_cfg_scale, r->lm_top_p, r->lm_top_k);
     fprintf(f, "  dit: steps=%d guidance=%.1f shift=%.1f\n",
             r->inference_steps, r->guidance_scale, r->shift);
+    if (r->audio_cover_strength != 0.5f)
+        fprintf(f, "  cover: strength=%.2f\n", r->audio_cover_strength);
     fprintf(f, "  audio_codes: %s\n",
             r->audio_codes.empty() ? "(none)" : "(present)");
 }
