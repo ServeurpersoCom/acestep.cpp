@@ -33,6 +33,7 @@ macro(link_ggml_backends target)
     )
     target_include_directories(${target} SYSTEM PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty
     )
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /wd4100 /wd4505)

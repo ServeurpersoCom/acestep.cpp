@@ -25,6 +25,7 @@
 //   neural-codec --vae model.gguf --encode --q4 -i song.wav -o song.nac4
 //   neural-codec --vae model.gguf --decode -i song.nac4 -o song.wav
 
+#include "audio.h"
 #include "vae-enc.h"
 #include "vae.h"
 #include "wav.h"
@@ -279,14 +280,17 @@ static void print_usage(const char * prog) {
             "Usage: %s --vae <gguf> --encode|--decode -i <input> [-o <output>] [--q8|--q4]\n\n"
             "Required:\n"
             "  --vae <path>            VAE GGUF file\n"
-            "  --encode | --decode     Encode WAV to latent, or decode latent to WAV\n"
-            "  -i <path>               Input (WAV for encode, latent for decode)\n\n"
+            "  --encode | --decode     Encode audio to latent, or decode latent to WAV\n"
+            "  -i <path>               Input (WAV or MP3 for encode, latent for decode)\n\n"
             "Output:\n"
             "  -o <path>               Output file (auto-named if omitted)\n"
             "  --q8                    Quantize latent to int8 (~13 kbit/s)\n"
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n\n"
-            "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
+            "Output naming: song.wav/song.mp3 -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
             "               song.latent -> song.wav\n\n"
+            "Input audio:\n"
+            "  WAV and MP3 files are supported. Any sample rate is accepted and\n"
+            "  automatically resampled to 48 kHz stereo (required by the VAE).\n\n"
             "VAE tiling (memory control):\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -384,13 +388,13 @@ int main(int argc, char ** argv) {
 
     // ENCODE
     if (mode == 0) {
-        int     T_audio = 0, sr = 0;
-        float * audio = read_wav(input_path, &T_audio, &sr);
+        int     T_audio = 0, n_ch = 0;
+        float * audio = read_audio(input_path, &T_audio, &n_ch);
         if (!audio) {
             return 1;
         }
-        if (sr != 48000) {
-            fprintf(stderr, "[WARN] Input is %d Hz, VAE expects 48000. Resample with ffmpeg first.\n", sr);
+        if (n_ch != 2) {
+            fprintf(stderr, "[WARN] Input has %d channel(s); VAE encoder expects stereo (2ch).\n", n_ch);
         }
 
         VAEEncoder enc = {};
@@ -399,8 +403,7 @@ int main(int argc, char ** argv) {
         int                max_T = (T_audio / 1920) + 64;
         std::vector<float> latent((size_t) max_T * 64);
 
-        fprintf(stderr, "\n[VAE] Encoding %d samples (%.2fs)...\n", T_audio,
-                (float) T_audio / (float) (sr > 0 ? sr : 48000));
+        fprintf(stderr, "\n[VAE] Encoding %d frames (%.2fs)...\n", T_audio, (float) T_audio / 48000.0f);
         int T_latent = vae_enc_encode_tiled(&enc, audio, T_audio, latent.data(), max_T, chunk_size, overlap);
         free(audio);
         if (T_latent < 0) {

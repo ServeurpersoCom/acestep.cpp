@@ -3,6 +3,7 @@
 // Usage: ./dit-vae [options]
 // See --help for full option list.
 
+#include "audio.h"
 #include "bpe.h"
 #include "cond-enc.h"
 #include "debug.h"
@@ -31,7 +32,8 @@ static void print_usage(const char * prog) {
             "  --dit <gguf>            DiT GGUF file\n"
             "  --vae <gguf>            VAE GGUF file\n\n"
             "Reference audio:\n"
-            "  --src-audio <wav>       Source audio (48kHz stereo WAV)\n\n"
+            "  --src-audio <file>      Source audio for cover mode: WAV or MP3,\n"
+            "                          any sample rate (auto-converted to 48 kHz)\n\n"
             "Batch:\n"
             "  --batch <N>             DiT variations per request (default: 1, max 9)\n\n"
             "Output naming: input.json -> input0.wav, input1.wav, ... (last digit = batch index)\n\n"
@@ -210,16 +212,16 @@ int main(int argc, char ** argv) {
             return 1;
         }
         timer.reset();
-        int     T_audio = 0, wav_sr = 0;
-        float * wav_data = read_wav(src_audio_path, &T_audio, &wav_sr);
+        int     T_audio = 0, wav_n_ch = 0;
+        float * wav_data = read_audio(src_audio_path, &T_audio, &wav_n_ch);
         if (!wav_data) {
             fprintf(stderr, "[Cover] FATAL: cannot read --src-audio %s\n", src_audio_path);
             return 1;
         }
-        if (wav_sr != 48000) {
-            fprintf(stderr, "[WARN] src_audio is %d Hz, VAE expects 48000. Resample with ffmpeg first.\n", wav_sr);
+        if (wav_n_ch != 2) {
+            fprintf(stderr, "[WARN] --src-audio has %d channel(s); VAE encoder expects stereo (2ch).\n", wav_n_ch);
         }
-        fprintf(stderr, "[Cover] Source audio: %.2fs\n", (float) T_audio / (float) (wav_sr > 0 ? wav_sr : 48000));
+        fprintf(stderr, "[Cover] Source audio: %.2fs\n", (float) T_audio / 48000.0f);
 
         vae_enc_load(&vae_enc, vae_gguf);
         int max_T_lat = (T_audio / 1920) + 64;
