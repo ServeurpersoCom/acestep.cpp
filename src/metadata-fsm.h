@@ -378,7 +378,8 @@ static void parse_phase1_into_aces(const std::vector<std::string> & texts,
                                    std::vector<AcePrompt> &         aces,
                                    long long                        base_seed,
                                    const char *                     label,
-                                   bool                             merge_lyrics) {
+                                   bool                             merge_lyrics,
+                                   bool                             use_cot_caption = true) {
     int N = (int) texts.size();
     aces.resize(N);
     for (int i = 0; i < N; i++) {
@@ -389,12 +390,24 @@ static void parse_phase1_into_aces(const std::vector<std::string> & texts,
         }
         aces[i] = base;
         // gap fill: only write fields the user left empty
-        if (parsed.bpm > 0 && base.bpm <= 0) aces[i].bpm = parsed.bpm;
-        if (parsed.duration > 0 && base.duration <= 0) aces[i].duration = parsed.duration;
-        if (!parsed.keyscale.empty() && base.keyscale.empty()) aces[i].keyscale = parsed.keyscale;
-        if (!parsed.timesignature.empty() && base.timesignature.empty()) aces[i].timesignature = parsed.timesignature;
-        if (!parsed.vocal_language.empty() && base.vocal_language.empty()) aces[i].vocal_language = parsed.vocal_language;
-        if (!parsed.caption.empty()) aces[i].caption = parsed.caption;
+        if (parsed.bpm > 0 && base.bpm <= 0) {
+            aces[i].bpm = parsed.bpm;
+        }
+        if (parsed.duration > 0 && base.duration <= 0) {
+            aces[i].duration = parsed.duration;
+        }
+        if (!parsed.keyscale.empty() && base.keyscale.empty()) {
+            aces[i].keyscale = parsed.keyscale;
+        }
+        if (!parsed.timesignature.empty() && base.timesignature.empty()) {
+            aces[i].timesignature = parsed.timesignature;
+        }
+        if (!parsed.vocal_language.empty() && (base.vocal_language.empty() || base.vocal_language == "unknown")) {
+            aces[i].vocal_language = parsed.vocal_language;
+        }
+        if (!parsed.caption.empty() && use_cot_caption) {
+            aces[i].caption = parsed.caption;
+        }
         // lyrics: only generated when user had none
         if (merge_lyrics && !parsed.lyrics.empty()) {
             aces[i].lyrics = parsed.lyrics;

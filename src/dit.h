@@ -12,6 +12,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "lora-merge.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -249,7 +250,11 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
 }
 
 // Load full DiT model from GGUF
-static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg) {
+static bool dit_ggml_load(DiTGGML *     m,
+                          const char *  gguf_path,
+                          DiTGGMLConfig cfg,
+                          const char *  lora_path  = nullptr,
+                          float         lora_scale = 1.0f) {
     m->cfg = cfg;
 
     GGUFModel gf;
@@ -380,6 +385,11 @@ static bool dit_ggml_load(DiTGGML * m, const char * gguf_path, DiTGGMLConfig cfg
     static const float one_val = 1.0f;
     m->scalar_one              = ggml_new_tensor_1d(m->wctx.ctx, GGML_TYPE_F32, 1);
     m->wctx.pending.push_back({ m->scalar_one, &one_val, sizeof(float), 0 });
+
+    // Merge LoRA deltas into projection weights (before GPU upload and QKV fusion)
+    if (lora_path) {
+        lora_merge(&m->wctx, gf, lora_path, lora_scale);
+    }
 
     // Allocate backend buffer and copy weights
     if (!wctx_alloc(&m->wctx, m->backend)) {

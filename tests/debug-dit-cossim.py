@@ -97,7 +97,7 @@ def codes_to_python_format(codes_csv):
 
 # GGML runner
 
-def run_ggml(dump_dir, req, cfg, gguf_path):
+def run_ggml(dump_dir, req, cfg, gguf_path, lora_dir=None):
     ggml_bin = "../build/dit-vae"
     if not os.path.isfile(ggml_bin):
         print(f"[GGML] binary not found: {ggml_bin}")
@@ -123,6 +123,8 @@ def run_ggml(dump_dir, req, cfg, gguf_path):
         "--request", request_json,
         "--dump", dump_dir,
     ]
+    if lora_dir:
+        cmd += ["--lora", lora_dir]
     print(f"[GGML] Running {os.path.basename(gguf_path)}...")
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
     n = len([f for f in os.listdir(dump_dir) if f.endswith(".bin")])
@@ -139,7 +141,7 @@ def run_ggml(dump_dir, req, cfg, gguf_path):
 
 # Python runner
 
-def run_python(dump_dir, req, cfg):
+def run_python(dump_dir, req, cfg, lora_dir=None):
     sys.path.insert(0, "../../ACE-Step-1.5")
     from acestep.handler import AceStepHandler
 
@@ -159,6 +161,11 @@ def run_python(dump_dir, req, cfg):
         config_path=cfg["config_path"],
         device="cuda",
     )
+
+    if lora_dir:
+        lr = handler.add_lora(lora_dir)
+        print(f"[Python] LoRA: {lr}")
+
     model = handler.model
     _dumps = {}
 
@@ -421,7 +428,7 @@ def compare(dirs, stages, tag):
 
 # main
 
-def run_mode(mode_name, cfg, req, gguf_path):
+def run_mode(mode_name, cfg, req, gguf_path, lora_dir=None):
     dump_ggml   = f"ggml-{mode_name}"
     dump_python = f"python-{mode_name}"
 
@@ -433,13 +440,13 @@ def run_mode(mode_name, cfg, req, gguf_path):
 
     if os.path.isdir(dump_ggml):
         shutil.rmtree(dump_ggml)
-    if not run_ggml(dump_ggml, req, cfg, gguf_path):
+    if not run_ggml(dump_ggml, req, cfg, gguf_path, lora_dir):
         print(f"[{tag}] GGML failed")
         return False
 
     if os.path.isdir(dump_python):
         shutil.rmtree(dump_python)
-    if not run_python(dump_python, req, cfg):
+    if not run_python(dump_python, req, cfg, lora_dir):
         print(f"[{tag}] Python failed")
         return False
 
@@ -453,6 +460,8 @@ def main():
                     help="which model(s) to test (default: turbo)")
     ap.add_argument("--quant", default="BF16",
                     help="quantization suffix for GGUF (default: BF16, e.g. Q6_K, Q8_0)")
+    ap.add_argument("--lora", default=None,
+                    help="path to LoRA adapter directory (optional)")
     args = ap.parse_args()
 
     req = load_request()
@@ -466,7 +475,7 @@ def main():
             print(f"[Error] GGUF not found: {gguf_path}")
             ok = False
             continue
-        if not run_mode(m, cfg, req, gguf_path):
+        if not run_mode(m, cfg, req, gguf_path, args.lora):
             ok = False
 
     return 0 if ok else 1

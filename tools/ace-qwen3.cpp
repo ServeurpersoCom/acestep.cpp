@@ -814,7 +814,7 @@ int main(int argc, char ** argv) {
                                                   batch_size, use_fsm ? &fsm : nullptr, need_lyrics, fill_cfg,
                                                   uncond.empty() ? nullptr : &uncond, !need_lyrics);
 
-        parse_phase1_into_aces(phase1_texts, ace, aces, seed, "Fill", need_lyrics);
+        parse_phase1_into_aces(phase1_texts, ace, aces, seed, "Fill", need_lyrics, req.use_cot_caption);
 
         int n_kv_reset = (fill_cfg > 1.0f) ? 2 * batch_size : batch_size;
         for (int i = 0; i < n_kv_reset; i++) {

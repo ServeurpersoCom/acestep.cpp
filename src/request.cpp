@@ -19,13 +19,14 @@ void request_init(AceRequest * r) {
     r->duration             = 0.0f;
     r->keyscale             = "";
     r->timesignature        = "";
-    r->vocal_language       = "unknown";
+    r->vocal_language       = "";
     r->seed                 = -1;
     r->lm_temperature       = 0.85f;
     r->lm_cfg_scale         = 2.0f;
     r->lm_top_p             = 0.9f;
     r->lm_top_k             = 0;
     r->lm_negative_prompt   = "";
+    r->use_cot_caption      = true;
     r->audio_codes          = "";
     r->inference_steps      = 8;
     r->guidance_scale       = 0.0f;
@@ -306,6 +307,8 @@ bool request_parse(AceRequest * r, const char * path) {
             r->lm_top_p = (float) atof(v.c_str());
         } else if (k == "lm_top_k") {
             r->lm_top_k = atoi(v.c_str());
+        } else if (k == "use_cot_caption") {
+            r->use_cot_caption = (v == "true" || v == "1");
         } else if (k == "inference_steps") {
             r->inference_steps = atoi(v.c_str());
         } else if (k == "guidance_scale") {
@@ -346,6 +349,7 @@ bool request_write(const AceRequest * r, const char * path) {
     fprintf(f, "  \"lm_top_p\": %.2f,\n", r->lm_top_p);
     fprintf(f, "  \"lm_top_k\": %d,\n", r->lm_top_k);
     fprintf(f, "  \"lm_negative_prompt\": \"%s\",\n", json_escape(r->lm_negative_prompt).c_str());
+    fprintf(f, "  \"use_cot_caption\": %s,\n", r->use_cot_caption ? "true" : "false");
     fprintf(f, "  \"inference_steps\": %d,\n", r->inference_steps);
     fprintf(f, "  \"guidance_scale\": %.1f,\n", r->guidance_scale);
     fprintf(f, "  \"shift\": %.1f,\n", r->shift);

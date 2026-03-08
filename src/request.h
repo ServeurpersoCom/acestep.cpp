@@ -19,7 +19,7 @@ struct AceRequest {
     float       duration;        // 0 = unset
     std::string keyscale;        // "" = unset
     std::string timesignature;   // "" = unset
-    std::string vocal_language;  // "unknown"
+    std::string vocal_language;  // "" = unset
 
     // generation
     int64_t seed;  // -1 = random
@@ -30,6 +30,7 @@ struct AceRequest {
     float       lm_top_p;            // 0.9
     int         lm_top_k;            // 0 = disabled (matches Python None)
     std::string lm_negative_prompt;  // ""
+    bool        use_cot_caption;     // true = LLM enriches caption via CoT
 
     // codes (Python-compatible string: "3101,11837,27514,...")
     // empty = text2music (silence context), non-empty = cover mode
@@ -37,8 +38,8 @@ struct AceRequest {
 
     // DiT control (Python: inference_steps, guidance_scale, shift)
     int   inference_steps;  // 8
-    float guidance_scale;   // 7.0
-    float shift;            // 1.0
+    float guidance_scale;   // 0.0
+    float shift;            // 3.0
 
     // cover mode (active when --src-audio is provided on CLI)
     float audio_cover_strength;  // 0.5 (0-1, fraction of DiT steps using source context)

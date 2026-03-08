@@ -94,7 +94,7 @@ cat > /tmp/request.json << 'EOF'
 }
 EOF
 
-# LLM: request.json -> request0.json (enriched with lyrics + codes)
+# LLM: request.json -> request0.json (enriched with metadata + lyrics + codes)
 ./build/ace-qwen3 \
     --request /tmp/request.json \
     --model models/acestep-5Hz-lm-4B-Q8_0.gguf
@@ -105,6 +105,17 @@ EOF
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
     --vae models/vae-BF16.gguf
+```
+
+With a LoRA adapter (PEFT safetensors):
+
+```bash
+./build/dit-vae \
+    --request /tmp/request0.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --dit models/acestep-v15-turbo-Q8_0.gguf \
+    --vae models/vae-BF16.gguf \
+    --lora /path/to/lora-adapter
 ```
 
 Generate multiple songs at once with `--batch`:
@@ -174,18 +185,18 @@ All modes always output numbered files (`request0.json` .. `requestN-1.json`).
 The input JSON is never modified.
 
 **Caption only** (`lyrics=""`): two LLM passes. Phase 1 uses the "Expand"
-prompt to generate lyrics and metadata (bpm, keyscale, timesignature,
-duration) via CoT. Phase 2 reinjects the CoT and generates audio codes using
-the "Generate tokens" prompt. CFG is forced to 1.0 in phase 1 (free
-sampling); `lm_cfg_scale` only applies in phase 2. With `--batch N`, each
-element runs its own phase 1 from a different seed, producing N completely
-different songs. See `examples/simple.json`.
+prompt to generate an enriched caption, lyrics, and metadata (bpm, keyscale,
+timesignature, duration, vocal_language) via CoT. Phase 2 reinjects the CoT
+and generates audio codes using the "Generate tokens" prompt. CFG is forced
+to 1.0 in phase 1 (free sampling); `lm_cfg_scale` only applies in phase 2.
+With `--batch N`, each element runs its own phase 1 from a different seed,
+producing N completely different songs. See `examples/simple.json`.
 
 **Caption + lyrics (+ optional metadata)**: single LLM pass. The "Generate
-tokens" prompt is used directly. Missing metadata is filled via CoT, then
-audio codes are generated. User-provided fields are never overwritten.
-`lm_cfg_scale` applies to both CoT and code generation. See
-`examples/partial.json`.
+tokens" prompt is used directly. Missing metadata is filled via CoT, the
+caption is enriched, and audio codes are generated. User-provided metadata
+fields are never overwritten. `lm_cfg_scale` applies to both CoT and code
+generation. See `examples/partial.json`.
 
 **Everything provided** (caption, lyrics, bpm, duration, keyscale,
 timesignature): the LLM skips CoT and generates audio codes directly.
@@ -250,13 +261,14 @@ the LLM fills them, or a sensible runtime default is applied.
     "duration":             0,
     "keyscale":             "",
     "timesignature":        "",
-    "vocal_language":       "unknown",
+    "vocal_language":       "",
     "seed":                 -1,
     "lm_temperature":       0.85,
     "lm_cfg_scale":         2.0,
     "lm_top_p":             0.9,
     "lm_top_k":             0,
     "lm_negative_prompt":   "",
+    "use_cot_caption":      true,
     "audio_codes":          "",
     "inference_steps":      8,
     "guidance_scale":       0.0,
@@ -298,10 +310,12 @@ Musical key and scale, e.g. `"C major"`, `"F# minor"`. LLM fills if empty.
 Time signature numerator as a string, e.g. `"4"` for 4/4, `"3"` for 3/4.
 LLM fills if empty.
 
-**`vocal_language`** (string, default `"unknown"`)
-BCP-47 language code for lyrics, e.g. `"en"`, `"fr"`, `"ja"`. When set and
-lyrics are being generated, the FSM constrains the LLM output to that language.
-`"unknown"` lets the LLM decide.
+**`vocal_language`** (string, default `""` = unset)
+BCP-47 language code for lyrics, e.g. `"en"`, `"fr"`, `"ja"`. Three states:
+- `""`: LLM detects the language via CoT and fills this field.
+- `"unknown"`: explicit "no specific language" signal to the DiT.
+- Any language code: used as-is. When lyrics are being generated, the FSM
+  constrains the LLM output to that language.
 
 ### Generation control
 
@@ -351,6 +365,13 @@ Top-K sampling. `0` disables hard top-K (top_p still applies).
 **`lm_negative_prompt`** (string, default `""`)
 Negative caption for CFG in phase 2. Empty string falls back to a
 caption-less unconditional prompt.
+
+**`use_cot_caption`** (bool, default `true`)
+When `true`, the LLM enriches the user caption via CoT and the enriched
+version is written to the output JSON (and fed to the DiT). When `false`,
+the user caption is preserved verbatim. Only matters when the LLM runs
+phase 1 (i.e. some metadata is missing). When all metadata is provided
+phase 1 is skipped and the caption is never touched regardless of this flag.
 
 ### DiT flow matching (dit-vae)
 
@@ -412,6 +433,10 @@ Required:
 Reference audio:
   --src-audio <wav>       Source audio (48kHz stereo WAV)
 
+LoRA:
+  --lora <path>           LoRA safetensors file or directory
+  --lora-scale <float>    LoRA scaling factor (default: 1.0)
+
 Batch:
   --batch <N>             DiT variations per request (default: 1, max 9)
 
@@ -427,6 +452,16 @@ Debug:
 ```
 
 Models are loaded once and reused across all requests.
+
+When `--lora` is provided, LoRA deltas are merged into the DiT projection
+weights at load time (before QKV fusion and GPU upload). The safetensors
+file is parsed directly, each lora_A/lora_B pair is multiplied
+(`alpha/rank * scale * B @ A`), and the result is added to the base weight
+in F32 before requantizing back to the original GGUF type. This is a
+static merge: inference runs at full speed with no adapter overhead.
+`--lora` accepts either a safetensors file or a directory containing
+`adapter_model.safetensors` and `adapter_config.json` (PEFT format).
+
 When `--src-audio` is provided, the source WAV is VAE-encoded once and
 injected as DiT context for every request. `audio_cover_strength` in the
 JSON controls how many steps use the source (default 0.5).
@@ -435,7 +470,7 @@ JSON controls how many steps use the source (default 0.5).
 
 GGML-native neural audio codec based on the Oobleck VAE encoder and decoder.
 Serves two purposes: validating the precision of the full VAE chain (encode +
-decode roundtrip), and compressing music at ~850 B/s with no perceptible
+decode roundtrip), and compressing music at 6.8 kbit/s with no perceptible
 difference from the original.
 
 ```
@@ -511,6 +546,7 @@ dit-vae
   Qwen3-Embedding (28L text encoder)
   CondEncoder (lyric 8L + timbre 4L + text_proj)
   FSQ detokenizer (audio codes -> flow matching source latents)
+  LoRA merge (optional: safetensors delta -> dequant/merge/requant at load)
   DiT (24L flow matching, Euler steps)
   VAE (AutoencoderOobleck, tiled decode)
   WAV stereo 48kHz
@@ -518,36 +554,22 @@ dit-vae
 
 ## Roadmap
 
-This project started from a simple idea: a Telegram bot using llama.cpp to
-prompt a music generator, and the desire to make GGML sing. No more, no less.
-No cloud, no black box, scriptable and nothing between you and the model.
+Started as "can GGML even sing?". It can. Now make it do more.
 
-### ace-qwen3
-- [ ] Remaining modes: Understand, Rewrite (single-pass, no audio codes)
+- [ ] **Understand mode**: audio codes -> metadata + lyrics (reverse of generation)
+- [x] **LoRA**: adapter loading for fine-tuned DiT models
+- [ ] **JSON HTTP server**: minimal API, stable contract
+- [ ] **Audio I/O**: built-in MP3 encode/decode if a clean MIT library exists, otherwise ffmpeg does the job
+- [ ] **Documentation split**: README (user guide) + ARCHITECTURE.md (internals) when a UI exists
+- [ ] **ACE-Step 2.0**: evaluate architecture delta, add headers/weights as needed
 
-### dit-vae
-- [x] Reference audio input: `--src-audio` + `audio_cover_strength`
-- [x] Repaint: selective region regeneration (repainting_start/end)
+### Community UIs
 
-### Audio I/O
-The binaries read and write 48kHz stereo 16-bit PCM WAV. No codec library,
-no resampling, no normalization. If you need MP3, FLAC, OGG, or any other
-format, pipe through ffmpeg. The binary does what GGML does best (inference),
-not what ffmpeg already does perfectly.
+Third-party interfaces (under active development, waiting for API and codec to stabilize):
 
-### API and interface
-- [ ] JSON HTTP server (minimal, well-documented, stable contract)
-- [ ] Web interface on top - vibecodeable by anyone, API stays simple
-Goal: document the internals and how the model actually works,
-not reproduce the Python spaghetti. Expert-first, no commercial fluff.
-
-### Documentation
-Current README is technical study + API reference, intentional.
-- [ ] Split when a user-facing interface exists: README (user) + ARCHITECTURE.md (internals)
-
-### Future models
-- [ ] ACE-Step 2.0: evaluate architecture delta, add headers/weights as needed
-No commitment, easy to adapt by adding headers or new compilation units as needed.
+- [acestep-cpp-ui](https://github.com/audiohacking/acestep-cpp-ui)
+- [acestep.cpp-simple-GUI](https://github.com/Nurb4000/acestep.cpp-simple-GUI)
+- [aceradio](https://github.com/IMbackK/aceradio)
 
 ## LM specifics
 
