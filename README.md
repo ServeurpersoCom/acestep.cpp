@@ -543,6 +543,7 @@ Third-party interfaces (under active development, waiting for API and codec to s
 
 - [acestep-cpp-ui](https://github.com/audiohacking/acestep-cpp-ui)
 - [acestep.cpp-simple-GUI](https://github.com/Nurb4000/acestep.cpp-simple-GUI)
+- [aceradio](https://github.com/IMbackK/aceradio)
 
 ## LM specifics
 
