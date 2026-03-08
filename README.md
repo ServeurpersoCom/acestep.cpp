@@ -107,6 +107,17 @@ EOF
     --vae models/vae-BF16.gguf
 ```
 
+With a LoRA adapter (PEFT safetensors):
+
+```bash
+./build/dit-vae \
+    --request /tmp/request0.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --dit models/acestep-v15-turbo-Q8_0.gguf \
+    --vae models/vae-BF16.gguf \
+    --lora /path/to/lora-adapter
+```
+
 Generate multiple songs at once with `--batch`:
 
 ```bash
@@ -431,12 +442,26 @@ VAE tiling (memory control):
   --vae-chunk <N>         Latent frames per tile (default: 256)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
+LoRA:
+  --lora <path>           LoRA safetensors file or directory
+  --lora-scale <float>    LoRA scaling factor (default: 1.0)
+
 Debug:
   --no-fa                 Disable flash attention
   --dump <dir>            Dump intermediate tensors
 ```
 
 Models are loaded once and reused across all requests.
+
+When `--lora` is provided, LoRA deltas are merged into the DiT projection
+weights at load time (before QKV fusion and GPU upload). The safetensors
+file is parsed directly, each lora_A/lora_B pair is multiplied
+(`alpha/rank * scale * B @ A`), and the result is added to the base weight
+in F32 before requantizing back to the original GGUF type. This is a
+static merge: inference runs at full speed with no adapter overhead.
+`--lora` accepts either a safetensors file or a directory containing
+`adapter_model.safetensors` and `adapter_config.json` (PEFT format).
+
 When `--src-audio` is provided, the source WAV is VAE-encoded once and
 injected as DiT context for every request. `audio_cover_strength` in the
 JSON controls how many steps use the source (default 0.5).
@@ -521,6 +546,7 @@ dit-vae
   Qwen3-Embedding (28L text encoder)
   CondEncoder (lyric 8L + timbre 4L + text_proj)
   FSQ detokenizer (audio codes -> flow matching source latents)
+  LoRA merge (optional: safetensors delta -> dequant/merge/requant at load)
   DiT (24L flow matching, Euler steps)
   VAE (AutoencoderOobleck, tiled decode)
   WAV stereo 48kHz
@@ -531,7 +557,7 @@ dit-vae
 Started as "can GGML even sing?". It can. Now make it do more.
 
 - [ ] **Understand mode**: audio codes -> metadata + lyrics (reverse of generation)
-- [ ] **LoRA**: adapter loading for fine-tuned DiT models
+- [x] **LoRA**: adapter loading for fine-tuned DiT models
 - [ ] **JSON HTTP server**: minimal API, stable contract
 - [ ] **Audio I/O**: built-in MP3 encode/decode if a clean MIT library exists, otherwise ffmpeg does the job
 - [ ] **Documentation split**: README (user guide) + ARCHITECTURE.md (internals) when a UI exists
