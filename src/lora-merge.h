@@ -15,6 +15,11 @@
 #include "weight-ctx.h"
 
 #include <sys/stat.h>
+#ifdef _WIN32
+#    ifndef S_ISDIR
+#        define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
+#    endif
+#endif
 
 #include <cstdio>
 #include <cstring>
@@ -199,7 +204,7 @@ static bool lora_merge(WeightCtx * wctx, const GGUFModel & gf, const char * lora
     if (stat(lora_path, &sb) == 0 && S_ISDIR(sb.st_mode)) {
         sf_path = std::string(lora_path) + "/adapter_model.safetensors";
     } else {
-        size_t sep = dir.find_last_of('/');
+        size_t sep = dir.find_last_of("/\\");
         dir        = (sep != std::string::npos) ? dir.substr(0, sep) : ".";
     }
 
