@@ -314,7 +314,14 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
             }
         }
 
-        // Step 3: bit allocation
+        // Step 3: run psy for all channels before bit allocation
+        float saved_xmin[2][MP3ENC_PSY_SFB_MAX];
+        for (int ch = 0; ch < nch; ch++) {
+            enc->psy.compute(mdct_lr[ch], sfb_long, enc->sr_index, ch);
+            memcpy(saved_xmin[ch], enc->psy.xmin, sizeof(enc->psy.xmin));
+        }
+
+        // Step 4: bit allocation
         int max_bits = mean_bits + intra_resv;
 
         // Don't exceed remaining budget
@@ -328,11 +335,10 @@ static int mp3enc_encode_frame(mp3enc_t * enc, const float * pcm) {
 
         int bits_per_ch = max_bits / nch;
 
-        // Step 4: quantize each channel
+        // Step 5: quantize each channel with saved thresholds
         int gr_bits_used = 0;
         for (int ch = 0; ch < nch; ch++) {
-            enc->psy.compute(mdct_lr[ch], sfb_long, enc->sr_index, ch);
-            int bits = mp3enc_outer_loop(mdct_lr[ch], ix[gr][ch], si.gr[gr][ch], enc->psy.xmin, bits_per_ch, sfb_long,
+            int bits = mp3enc_outer_loop(mdct_lr[ch], ix[gr][ch], si.gr[gr][ch], saved_xmin[ch], bits_per_ch, sfb_long,
                                          enc->sr_index, gr, si.scfsi[ch]);
             gr_bits_used += bits;
         }

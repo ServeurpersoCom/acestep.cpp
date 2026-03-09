@@ -57,8 +57,18 @@ struct mp3enc_psy {
     // Output: allowed distortion energy per SFB
     float xmin[MP3ENC_PSY_SFB_MAX];
 
+    // Output: perceptual entropy for this granule/channel (ISO 11172-3 Annex D).
+    // Higher PE = more complex signal = needs more bits.
+    float pe;
+
     // Forward masking: previous granule's masking energy (per channel)
     float prev_mask[2][MP3ENC_PSY_SFB_MAX];
+
+    // Pre-echo control: 2 previous granules of spread energy (per channel).
+    // Used to prevent masking threshold from rising too fast on transients
+    // (ISO 11172-3 Annex D, l3psy.c lines 610-616).
+    float nb_1[2][MP3ENC_PSY_SFB_MAX];  // previous granule spread energy
+    float nb_2[2][MP3ENC_PSY_SFB_MAX];  // 2 granules ago spread energy
 
     // Precomputed per-SFB data (set once per sample rate)
     float ath_energy[3][MP3ENC_PSY_SFB_MAX];  // [sr_index][sfb]: ATH in linear power
@@ -67,8 +77,11 @@ struct mp3enc_psy {
 
     void init() {
         ath_valid = false;
+        pe        = 0.0f;
         memset(xmin, 0, sizeof(xmin));
         memset(prev_mask, 0, sizeof(prev_mask));
+        memset(nb_1, 0, sizeof(nb_1));
+        memset(nb_2, 0, sizeof(nb_2));
     }
 
     // Precompute ATH energy and Bark positions per SFB.
@@ -216,7 +229,12 @@ struct mp3enc_psy {
                 }
 
                 float bark_i = sfb_bark[sr_index][i];
-                float dz     = bark_j - bark_i;
+                float dz_raw = bark_j - bark_i;
+
+                // Asymmetric spreading (ISO 11172-3 psy model 2, L3para_read).
+                // Upward masking (dz > 0): gentle slope, low freqs mask highs well.
+                // Downward masking (dz < 0): steep slope, highs mask lows poorly.
+                float dz = (dz_raw >= 0.0f) ? dz_raw * 1.35f : dz_raw * 2.7f;
 
                 // Spreading function value in dB
                 float sf_db = mp3enc_spreading_db(dz);
@@ -232,13 +250,31 @@ struct mp3enc_psy {
             spread_energy[j] = sum;
         }
 
-        // Step 5: combine everything into xmin per SFB.
-        // xmin = max(ath, spread_energy * offset)
+        // Step 5: combine spreading + offset, then apply pre-echo control.
+        // Pre-echo (ISO 11172-3 Annex D): prevent threshold from rising too fast
+        // on transients. Clamp current nb by 2x previous and 16x two-back.
+        // xmin = max(ath, min(nb, 2*nb_1, 16*nb_2))
         for (int sfb = 0; sfb < MP3ENC_PSY_SFB_MAX; sfb++) {
-            float mask = spread_energy[sfb] * offset_linear[sfb];
-            float ath  = ath_energy[sr_index][sfb];
+            float nb = spread_energy[sfb] * offset_linear[sfb];
 
-            xmin[sfb] = (mask > ath) ? mask : ath;
+            // Pre-echo clamp: use history to limit sudden threshold rises
+            float clamped = nb;
+            float lim1    = 2.0f * nb_1[ch][sfb];
+            float lim2    = 16.0f * nb_2[ch][sfb];
+            if (lim1 > 0.0f && lim1 < clamped) {
+                clamped = lim1;
+            }
+            if (lim2 > 0.0f && lim2 < clamped) {
+                clamped = lim2;
+            }
+
+            // Update history (store UN-clamped nb for future reference)
+            nb_2[ch][sfb] = nb_1[ch][sfb];
+            nb_1[ch][sfb] = nb;
+
+            // ATH floor
+            float ath = ath_energy[sr_index][sfb];
+            xmin[sfb] = (clamped > ath) ? clamped : ath;
         }
 
         // Step 6: forward masking (temporal).
@@ -253,6 +289,16 @@ struct mp3enc_psy {
             }
             // Save current mask (spread_energy, not xmin) for next granule
             prev_mask[ch][sfb] = spread_energy[sfb];
+        }
+
+        // Step 7: perceptual entropy (ISO 11172-3 Annex D).
+        // PE = sum of width * log(energy/threshold) for bands where energy > threshold.
+        // Used by the bit reservoir to give more bits to complex granules.
+        pe = 0.0f;
+        for (int sfb = 0; sfb < MP3ENC_PSY_SFB_MAX; sfb++) {
+            if (energy[sfb] > xmin[sfb] && xmin[sfb] > 1e-20f) {
+                pe += (float) sfb_table[sfb] * logf(energy[sfb] / xmin[sfb]);
+            }
         }
     }
 };
