@@ -790,29 +790,40 @@ int main(int argc, char ** argv) {
             prompt = build_lm_prompt(bpe, ace);
         }
         std::vector<int> uncond;
-        float            fill_cfg   = cfg_scale;
-        float            fill_top_p = top_p;
-        int              fill_top_k = top_k;
-        if (need_lyrics) {
-            // lyrics generation: free sampling, no CFG (matches original behavior)
-            fill_cfg   = 1.0f;
-            fill_top_p = 1.0f;
-            fill_top_k = 0;
-        } else if (fill_cfg > 1.0f) {
+
+        // Disable CFG for ANY textual expansion (lyrics OR CoT reasoning),
+        // as CFG distorts text logits and forces premature newlines.
+        float fill_cfg   = (need_lyrics || req.use_cot_caption) ? 1.0f : cfg_scale;
+        float fill_top_p = top_p;
+        int   fill_top_k = top_k;
+
+        if (fill_cfg > 1.0f) {
             uncond = build_lm_prompt_uncond(bpe, ace, neg_prompt);
         }
 
         fsm.reset();
-        if (need_lyrics && use_fsm && ace.vocal_language != "unknown" && !ace.vocal_language.empty()) {
-            fsm.force_language(bpe, ace.vocal_language);
+        MetadataFSM * active_fsm = nullptr;
+
+        if (use_fsm) {
+            if (need_lyrics) {
+                // Free text for lyrics. Only use FSM if strictly forcing language.
+                if (ace.vocal_language != "unknown" && !ace.vocal_language.empty()) {
+                    fsm.force_language(bpe, ace.vocal_language);
+                    active_fsm = &fsm;
+                }
+            } else {
+                if (!req.use_cot_caption) {
+                    active_fsm = &fsm;
+                }
+            }
         }
 
         fprintf(stderr, "[Fill] lyrics=%s metas=%s | %zu tokens, CFG: %.2f, N=%d\n", need_lyrics ? "generate" : "keep",
                 has_all_metas ? "complete" : "fill gaps", prompt.size(), fill_cfg, batch_size);
 
-        auto phase1_texts = generate_phase1_batch(&model, &bpe, prompt, 2048, temperature, fill_top_p, fill_top_k, seed,
-                                                  batch_size, use_fsm ? &fsm : nullptr, need_lyrics, fill_cfg,
-                                                  uncond.empty() ? nullptr : &uncond, !need_lyrics);
+        auto phase1_texts =
+            generate_phase1_batch(&model, &bpe, prompt, 2048, temperature, fill_top_p, fill_top_k, seed, batch_size,
+                                  active_fsm, need_lyrics, fill_cfg, uncond.empty() ? nullptr : &uncond, !need_lyrics);
 
         parse_phase1_into_aces(phase1_texts, ace, aces, seed, "Fill", need_lyrics, req.use_cot_caption);
 
