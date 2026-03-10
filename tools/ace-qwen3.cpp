@@ -529,7 +529,6 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     }
 
     // Batched decode loop, partial LM head: only project [TOKEN_IM_END..V)
-    // --- START OF OPTIMIZED PHASE 2 DECODE ---
     Timer t_decode;
     int   V_eff = V - TOKEN_IM_END;
 
@@ -635,14 +634,12 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
         }
         n_active = next_active_count;
 
-        // Debug output
         if ((step + 1) % 50 == 0) {
             double elapsed = t_decode.ms() / 1000.0;
             fprintf(stderr, "[Decode] step %d, %d active, %d total codes, %.1f tok/s\n", step + 1, n_active,
                     total_codes, (double) (step + 1) * N / elapsed);
         }
     }
-    // --- END OF OPTIMIZED PHASE 2 DECODE ---
 
     double decode_ms = t_decode.ms();
     fprintf(stderr, "[Phase2] Decode %.0fms\n", decode_ms);
