@@ -1,6 +1,8 @@
 {
-    "caption": "electric guitar riff, funk guitar, house music, instrumental",
-    "audio_cover_strength": 1.0,
+    "caption": "",
+    "lyrics": "[Instrumental]",
+    "lego": "guitar",
     "inference_steps": 50,
-    "guidance_scale": 7.0
+    "guidance_scale": 7.0,
+    "shift": 1.0
 }

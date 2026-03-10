@@ -258,12 +258,31 @@ EOF
     --vae models/vae-BF16.gguf
 ```
 
-**Lego** (`--lego <track>` + `--src-audio`):
+**Lego** (`"lego"` in JSON + `--src-audio`):
 generates a new instrument track layered over an existing backing track.
 Only the **base model** (`acestep-v15-base`) supports lego mode.
-The track name is passed on the CLI; set `audio_cover_strength=1.0` in the
-request so the source audio guides all DiT steps.
 See `examples/lego.json` and `examples/lego.sh`.
+
+```bash
+cat > /tmp/lego.json << 'EOF'
+{
+    "caption": "electric guitar riff, funk guitar, house music, instrumental",
+    "lyrics": "[Instrumental]",
+    "lego": "guitar",
+    "inference_steps": 50,
+    "guidance_scale": 7.0,
+    "shift": 1.0
+}
+EOF
+
+./build/dit-vae \
+    --src-audio backing-track.wav \
+    --request /tmp/lego.json \
+    --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
+    --dit models/acestep-v15-base-Q8_0.gguf \
+    --vae models/vae-BF16.gguf \
+    --wav
+```
 
 Available track names: `vocals`, `backing_vocals`, `drums`, `bass`, `guitar`,
 `keyboard`, `percussion`, `strings`, `synth`, `fx`, `brass`, `woodwinds`.
@@ -295,7 +314,8 @@ the LLM fills them, or a sensible runtime default is applied.
     "shift":                3.0,
     "audio_cover_strength": 0.5,
     "repainting_start":    -1,
-    "repainting_end":      -1
+    "repainting_end":      -1,
+    "lego":                ""
 }
 ```
 
@@ -362,6 +382,15 @@ Only used with `--src-audio`. When one or both are >= 0, repaint mode activates:
 the DiT regenerates the `[start, end)` time region while preserving everything
 else. `-1` on start means 0s (beginning), `-1` on end means source duration
 (end). Error if end <= start after resolve. `audio_cover_strength` is ignored.
+
+**`lego`** (string, default `""` = inactive)
+Track name for lego mode. Requires `--src-audio` and the **base model**.
+Valid names: `vocals`, `backing_vocals`, `drums`, `bass`, `guitar`,
+`keyboard`, `percussion`, `strings`, `synth`, `fx`, `brass`, `woodwinds`.
+When set, passes the source audio to the DiT as context and builds the
+instruction `"Generate the {TRACK} track based on the audio context:"`.
+`audio_cover_strength` is forced to 1.0 (all steps see the source audio).
+Use `inference_steps=50`, `guidance_scale=7.0`, `shift=1.0` for base model.
 
 ### LM sampling (ace-qwen3)
 

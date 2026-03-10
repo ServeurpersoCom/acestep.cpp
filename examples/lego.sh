@@ -23,7 +23,6 @@ set -eu
 # Step 2: lego guitar on the generated track (base model required)
 ../build/dit-vae \
     --src-audio simple00.wav \
-    --lego guitar \
     --request lego.json \
     --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit ../models/acestep-v15-base-Q8_0.gguf \

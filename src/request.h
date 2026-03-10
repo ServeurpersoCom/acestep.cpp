@@ -49,6 +49,12 @@ struct AceRequest {
     // -1 on start means 0s, -1 on end means source duration.
     float repainting_start;  // -1
     float repainting_end;    // -1
+
+    // lego mode (requires --src-audio, base model only)
+    // Track name from TRACK_NAMES: vocals, backing_vocals, drums, bass, guitar,
+    // keyboard, percussion, strings, synth, fx, brass, woodwinds.
+    // Empty = not lego. Sets instruction and forces full-range repaint.
+    std::string lego;  // ""
 };
 
 // Initialize all fields to defaults (matches Python GenerationParams defaults)

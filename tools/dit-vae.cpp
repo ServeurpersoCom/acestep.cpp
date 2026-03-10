@@ -16,6 +16,7 @@
 #include "vae-enc.h"
 #include "vae.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -32,11 +33,6 @@ static void print_usage(const char * prog) {
             "  --vae <gguf>            VAE GGUF file\n\n"
             "Reference audio:\n"
             "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n\n"
-            "Lego mode (base model only, requires --src-audio):\n"
-            "  --lego <track>          Generate a track over the source audio context\n"
-            "                          Track names: vocals, backing_vocals, drums, bass,\n"
-            "                          guitar, keyboard, percussion, strings, synth,\n"
-            "                          fx, brass, woodwinds\n\n"
             "LoRA:\n"
             "  --lora <path>           LoRA safetensors file or directory\n"
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
@@ -88,7 +84,6 @@ int main(int argc, char ** argv) {
     const char *              dit_gguf       = NULL;
     const char *              vae_gguf       = NULL;
     const char *              src_audio_path = NULL;
-    const char *              lego_track     = NULL;  // --lego <track>
     const char *              dump_dir       = NULL;
     const char *              lora_path      = NULL;
     float                     lora_scale     = 1.0f;
@@ -113,8 +108,6 @@ int main(int argc, char ** argv) {
             vae_gguf = argv[++i];
         } else if (strcmp(argv[i], "--src-audio") == 0 && i + 1 < argc) {
             src_audio_path = argv[++i];
-        } else if (strcmp(argv[i], "--lego") == 0 && i + 1 < argc) {
-            lego_track = argv[++i];
         } else if (strcmp(argv[i], "--lora") == 0 && i + 1 < argc) {
             lora_path = argv[++i];
         } else if (strcmp(argv[i], "--lora-scale") == 0 && i + 1 < argc) {
@@ -150,10 +143,6 @@ int main(int argc, char ** argv) {
     }
     if (batch_n < 1 || batch_n > 9) {
         fprintf(stderr, "[CLI] ERROR: --batch must be 1..9\n");
-        return 1;
-    }
-    if (lego_track && !src_audio_path) {
-        fprintf(stderr, "[CLI] ERROR: --lego requires --src-audio\n");
         return 1;
     }
     if (!dit_gguf) {
@@ -198,12 +187,6 @@ int main(int argc, char ** argv) {
         if (gf_load(&gf, dit_gguf)) {
             is_turbo             = gf_get_bool(gf, "acestep.is_turbo");
             const void * sl_data = gf_get_data(gf, "silence_latent");
-            if (lego_track && is_turbo) {
-                fprintf(stderr, "[CLI] ERROR: --lego requires the base DiT model\n");
-                gf_close(&gf);
-                dit_ggml_free(&model);
-                return 1;
-            }
             if (sl_data) {
                 silence_full.resize(15000 * 64);
                 memcpy(silence_full.data(), sl_data, 15000 * 64 * sizeof(float));
@@ -301,9 +284,41 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Request] ERROR: failed to parse %s, skipping\n", rpath);
             continue;
         }
-        if (req.caption.empty()) {
+        if (req.caption.empty() && req.lego.empty()) {
             fprintf(stderr, "[Request] ERROR: caption is empty in %s, skipping\n", rpath);
             continue;
+        }
+
+        // Lego mode validation (base model only, requires --src-audio)
+        bool is_lego = !req.lego.empty();
+        if (is_lego) {
+            if (!src_audio_path) {
+                fprintf(stderr, "[Lego] ERROR: lego requires --src-audio\n");
+                return 1;
+            }
+            if (is_turbo) {
+                fprintf(stderr, "[Lego] ERROR: lego requires the base DiT model (turbo detected)\n");
+                return 1;
+            }
+            // Reference project: TRACK_NAMES (constants.py)
+            static const char * allowed[] = {
+                "vocals",     "backing_vocals", "drums", "bass", "guitar", "keyboard",
+                "percussion", "strings",        "synth", "fx",   "brass",  "woodwinds",
+            };
+            bool valid = false;
+            for (int k = 0; k < 12; k++) {
+                if (req.lego == allowed[k]) {
+                    valid = true;
+                    break;
+                }
+            }
+            if (!valid) {
+                fprintf(stderr, "[Lego] ERROR: '%s' is not a valid track name\n", req.lego.c_str());
+                fprintf(stderr,
+                        "  Valid: vocals, backing_vocals, drums, bass, guitar, keyboard,\n"
+                        "         percussion, strings, synth, fx, brass, woodwinds\n");
+                return 1;
+            }
         }
 
         // Extract params
@@ -424,32 +439,36 @@ int main(int argc, char ** argv) {
         }
 
         // 2. Build formatted prompts
-        // Reference project uses opposite-sounding instructions (constants.py):
+        // Reference project instruction templates (constants.py TASK_INSTRUCTIONS):
         //   text2music = "Fill the audio semantic mask..."
         //   cover      = "Generate audio semantic tokens..."
         //   repaint    = "Repaint the mask area..."
-        //   lego       = "Generate the {track} track based on the audio context:"
+        //   lego       = "Generate the {TRACK_NAME} track based on the audio context:"
         // Auto-switches to cover when audio_codes are present
-        bool is_cover = have_cover || !codes_vec.empty();
-
-        // Lego: build instruction from the track name supplied via --lego <track>
-        char         lego_instruction[256] = {};
-        const char * instruction;
-        if (lego_track) {
-            snprintf(lego_instruction, sizeof(lego_instruction),
-                     "Generate the %s track based on the audio context:", lego_track);
-            instruction = lego_instruction;
-            fprintf(stderr, "[Lego] track=%s\n", lego_track);
+        bool        is_cover = have_cover || !codes_vec.empty();
+        std::string instruction_str;
+        if (is_lego) {
+            // Lego mode: force audio_cover_strength=1.0 so all DiT steps see the source audio
+            req.audio_cover_strength = 1.0f;
+            fprintf(stderr, "[Lego] track=%s, cover path, strength=1.0\n", req.lego.c_str());
+            // Reference project (task_utils.py:86): track name is UPPERCASE
+            std::string track_upper = req.lego;
+            for (char & c : track_upper) {
+                c = (char) toupper((unsigned char) c);
+            }
+            instruction_str = "Generate the " + track_upper + " track based on the audio context:";
+        } else if (is_repaint) {
+            instruction_str = "Repaint the mask area based on the given conditions:";
+        } else if (is_cover) {
+            instruction_str = "Generate audio semantic tokens based on the given conditions:";
         } else {
-            instruction = is_repaint ? "Repaint the mask area based on the given conditions:" :
-                          is_cover   ? "Generate audio semantic tokens based on the given conditions:" :
-                                       "Fill the audio semantic mask based on the given conditions:";
+            instruction_str = "Fill the audio semantic mask based on the given conditions:";
         }
 
         char metas[512];
         snprintf(metas, sizeof(metas), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm,
                  timesig, keyscale, (int) duration);
-        std::string text_str = std::string("# Instruction\n") + instruction + "\n\n" + "# Caption\n" + caption +
+        std::string text_str = std::string("# Instruction\n") + instruction_str + "\n\n" + "# Caption\n" + caption +
                                "\n\n" + "# Metas\n" + metas + "<|endoftext|>\n";
 
         std::string lyric_str = std::string("# Languages\n") + language + "\n\n# Lyric\n" + lyrics + "<|endoftext|>";
@@ -567,7 +586,7 @@ int main(int argc, char ** argv) {
         }
 
         // Build context: [T, ctx_ch] = src_latents[64] + chunk_mask[64]
-        // Cover:     src = cover_latents, mask = 1.0 everywhere
+        // Cover/Lego: src = cover_latents, mask = 1.0 everywhere
         // Repaint:   src = silence in region / cover outside, mask = 1.0 in region / 0.0 outside
         // Passthrough: detokenized FSQ codes + silence padding, mask = 1.0
         // Text2music: silence only, mask = 1.0

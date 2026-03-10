@@ -34,6 +34,7 @@ void request_init(AceRequest * r) {
     r->audio_cover_strength = 0.5f;
     r->repainting_start     = -1.0f;
     r->repainting_end       = -1.0f;
+    r->lego                 = "";
 }
 
 // JSON string escape / unescape
@@ -321,6 +322,8 @@ bool request_parse(AceRequest * r, const char * path) {
             r->repainting_start = (float) atof(v.c_str());
         } else if (k == "repainting_end") {
             r->repainting_end = (float) atof(v.c_str());
+        } else if (k == "lego") {
+            r->lego = v;
         }
     }
 
@@ -356,6 +359,9 @@ bool request_write(const AceRequest * r, const char * path) {
     fprintf(f, "  \"audio_cover_strength\": %.2f,\n", r->audio_cover_strength);
     fprintf(f, "  \"repainting_start\": %.1f,\n", r->repainting_start);
     fprintf(f, "  \"repainting_end\": %.1f,\n", r->repainting_end);
+    if (!r->lego.empty()) {
+        fprintf(f, "  \"lego\": \"%s\",\n", json_escape(r->lego).c_str());
+    }
     // audio_codes last (no trailing comma)
     fprintf(f, "  \"audio_codes\": \"%s\"\n", json_escape(r->audio_codes).c_str());
     fprintf(f, "}\n");
@@ -379,6 +385,9 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (r->repainting_start >= 0.0f || r->repainting_end >= 0.0f) {
         fprintf(f, "  repaint: start=%.1f end=%.1f\n", r->repainting_start, r->repainting_end);
+    }
+    if (!r->lego.empty()) {
+        fprintf(f, "  lego: %s\n", r->lego.c_str());
     }
     fprintf(f, "  audio_codes: %s\n", r->audio_codes.empty() ? "(none)" : "(present)");
 }
