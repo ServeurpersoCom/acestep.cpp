@@ -577,7 +577,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             }
         }
 
-        // 2. FORWARD PASS: GPU only computes attention for n_active sequences (Massive speedup as sequences finish!)
+        // 2. FORWARD PASS: GPU only computes attention for n_active sequences
         int actual_batch_size = use_cfg ? (2 * n_active) : n_active;
         qw3lm_forward_batch(m, batch_tokens.data(), batch_sets.data(), actual_batch_size, batch_logits.data(),
                             TOKEN_IM_END, V_eff);
