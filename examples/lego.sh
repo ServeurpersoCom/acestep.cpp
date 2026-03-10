@@ -9,9 +9,6 @@
 set -eu
 
 # Step 0: ensure the base model is available
-echo "=== Step 0: ensure base model ==="
-(cd .. && ./models.sh --base)
-
 # Step 1: generate a source track with the simple prompt
 echo "=== Step 1: generate track ==="
 ../build/ace-qwen3 \
