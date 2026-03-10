@@ -8,9 +8,7 @@
 
 set -eu
 
-# Step 0: ensure the base model is available
 # Step 1: generate a source track with the simple prompt
-echo "=== Step 1: generate track ==="
 ../build/ace-qwen3 \
     --request simple.json \
     --model ../models/acestep-5Hz-lm-4B-Q8_0.gguf
@@ -23,7 +21,6 @@ echo "=== Step 1: generate track ==="
     --wav
 
 # Step 2: lego guitar on the generated track (base model required)
-echo "=== Step 2: lego guitar ==="
 ../build/dit-vae \
     --src-audio simple00.wav \
     --lego guitar \
