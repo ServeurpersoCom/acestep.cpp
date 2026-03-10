@@ -258,6 +258,16 @@ EOF
     --vae models/vae-BF16.gguf
 ```
 
+**Lego** (`--lego <track>` + `--src-audio`):
+generates a new instrument track layered over an existing backing track.
+Only the **base model** (`acestep-v15-base`) supports lego mode.
+The track name is passed on the CLI; set `audio_cover_strength=1.0` in the
+request so the source audio guides all DiT steps.
+See `examples/lego.json` and `examples/lego.sh`.
+
+Available track names: `vocals`, `backing_vocals`, `drums`, `bass`, `guitar`,
+`keyboard`, `percussion`, `strings`, `synth`, `fx`, `brass`, `woodwinds`.
+
 ## Request JSON reference
 
 Only `caption` is required. All other fields default to "unset" which means

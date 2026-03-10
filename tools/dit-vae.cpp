@@ -32,6 +32,11 @@ static void print_usage(const char * prog) {
             "  --vae <gguf>            VAE GGUF file\n\n"
             "Reference audio:\n"
             "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n\n"
+            "Lego mode (base model only, requires --src-audio):\n"
+            "  --lego <track>          Generate a track over the source audio context\n"
+            "                          Track names: vocals, backing_vocals, drums, bass,\n"
+            "                          guitar, keyboard, percussion, strings, synth,\n"
+            "                          fx, brass, woodwinds\n\n"
             "LoRA:\n"
             "  --lora <path>           LoRA safetensors file or directory\n"
             "  --lora-scale <float>    LoRA scaling factor (default: 1.0)\n\n"
@@ -83,6 +88,7 @@ int main(int argc, char ** argv) {
     const char *              dit_gguf       = NULL;
     const char *              vae_gguf       = NULL;
     const char *              src_audio_path = NULL;
+    const char *              lego_track     = NULL;  // --lego <track>
     const char *              dump_dir       = NULL;
     const char *              lora_path      = NULL;
     float                     lora_scale     = 1.0f;
@@ -107,6 +113,8 @@ int main(int argc, char ** argv) {
             vae_gguf = argv[++i];
         } else if (strcmp(argv[i], "--src-audio") == 0 && i + 1 < argc) {
             src_audio_path = argv[++i];
+        } else if (strcmp(argv[i], "--lego") == 0 && i + 1 < argc) {
+            lego_track = argv[++i];
         } else if (strcmp(argv[i], "--lora") == 0 && i + 1 < argc) {
             lora_path = argv[++i];
         } else if (strcmp(argv[i], "--lora-scale") == 0 && i + 1 < argc) {
@@ -142,6 +150,10 @@ int main(int argc, char ** argv) {
     }
     if (batch_n < 1 || batch_n > 9) {
         fprintf(stderr, "[CLI] ERROR: --batch must be 1..9\n");
+        return 1;
+    }
+    if (lego_track && !src_audio_path) {
+        fprintf(stderr, "[CLI] ERROR: --lego requires --src-audio\n");
         return 1;
     }
     if (!dit_gguf) {
@@ -410,12 +422,25 @@ int main(int argc, char ** argv) {
         //   text2music = "Fill the audio semantic mask..."
         //   cover      = "Generate audio semantic tokens..."
         //   repaint    = "Repaint the mask area..."
+        //   lego       = "Generate the {track} track based on the audio context:"
         // Auto-switches to cover when audio_codes are present
-        bool         is_cover    = have_cover || !codes_vec.empty();
-        const char * instruction = is_repaint ? "Repaint the mask area based on the given conditions:" :
-                                   is_cover   ? "Generate audio semantic tokens based on the given conditions:" :
-                                                "Fill the audio semantic mask based on the given conditions:";
-        char         metas[512];
+        bool is_cover = have_cover || !codes_vec.empty();
+
+        // Lego: build instruction from the track name supplied via --lego <track>
+        char         lego_instruction[256] = {};
+        const char * instruction;
+        if (lego_track) {
+            snprintf(lego_instruction, sizeof(lego_instruction),
+                     "Generate the %s track based on the audio context:", lego_track);
+            instruction = lego_instruction;
+            fprintf(stderr, "[Lego] track=%s\n", lego_track);
+        } else {
+            instruction = is_repaint ? "Repaint the mask area based on the given conditions:" :
+                          is_cover   ? "Generate audio semantic tokens based on the given conditions:" :
+                                       "Fill the audio semantic mask based on the given conditions:";
+        }
+
+        char metas[512];
         snprintf(metas, sizeof(metas), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm,
                  timesig, keyscale, (int) duration);
         std::string text_str = std::string("# Instruction\n") + instruction + "\n\n" + "# Caption\n" + caption +
