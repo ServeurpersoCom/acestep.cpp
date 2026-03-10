@@ -198,6 +198,12 @@ int main(int argc, char ** argv) {
         if (gf_load(&gf, dit_gguf)) {
             is_turbo             = gf_get_bool(gf, "acestep.is_turbo");
             const void * sl_data = gf_get_data(gf, "silence_latent");
+            if (lego_track && is_turbo) {
+                fprintf(stderr, "[CLI] ERROR: --lego requires the base DiT model\n");
+                gf_close(&gf);
+                dit_ggml_free(&model);
+                return 1;
+            }
             if (sl_data) {
                 silence_full.resize(15000 * 64);
                 memcpy(silence_full.data(), sl_data, 15000 * 64 * sizeof(float));
