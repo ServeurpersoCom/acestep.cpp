@@ -44,6 +44,7 @@ static BackendPair backend_init(const char * label) {
         fprintf(stderr, "[Load] FATAL: no backend available\n");
         exit(1);
     }
+    bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
     int n_threads = (int) std::thread::hardware_concurrency() / 2;
     if (n_threads < 1) {
         n_threads = 1;
@@ -52,21 +53,16 @@ static BackendPair backend_init(const char * label) {
     // where only one gets the thread count)
     char params[64];
     snprintf(params, sizeof(params), "n_threads=%d", n_threads);
-    bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
-    if (best_is_cpu) {
-        bp.cpu_backend = bp.backend;
-    } else {
-        ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
-        if (cpu_dev) {
-            bp.cpu_backend = ggml_backend_dev_init(cpu_dev, params);
-        }
-        if (!bp.cpu_backend) {
-            bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, params);
-        }
-        if (!bp.cpu_backend) {
-            fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
-            exit(1);
-        }
+    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+    if (cpu_dev) {
+        bp.cpu_backend = ggml_backend_dev_init(cpu_dev, params);
+    }
+    if (!bp.cpu_backend) {
+        bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, params);
+    }
+    if (!bp.cpu_backend) {
+        fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
+        exit(1);
     }
     fprintf(stderr, "[Load] %s backend: %s (CPU threads: %d)\n", label, ggml_backend_name(bp.backend), n_threads);
 
