@@ -52,12 +52,22 @@ static BackendPair backend_init(const char * label) {
     // Initialize CPU backend with explicit thread count
     char params[64];
     snprintf(params, sizeof(params), "n_threads=%d", n_threads);
-    ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
-    if (cpu_dev) {
-        bp.cpu_backend = ggml_backend_dev_init(cpu_dev, params);
-    }
-    if (!bp.cpu_backend) {
-        bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, params);
+    auto init_cpu_backend = [&]() -> ggml_backend_t {
+        ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+        if (cpu_dev) {
+            if (ggml_backend_t cpu = ggml_backend_dev_init(cpu_dev, params)) {
+                return cpu;
+            }
+        }
+        return ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, params);
+    };
+
+    if (best_is_cpu) {
+        ggml_backend_free(bp.backend);
+        bp.backend = init_cpu_backend();
+        bp.cpu_backend = bp.backend;
+    } else {
+        bp.cpu_backend = init_cpu_backend();
     }
     if (!bp.cpu_backend) {
         fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
