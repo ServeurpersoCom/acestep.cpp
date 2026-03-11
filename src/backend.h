@@ -61,7 +61,7 @@ static BackendPair backend_init(const char * label) {
             bp.cpu_backend = ggml_backend_dev_init(cpu_dev, params);
         }
         if (!bp.cpu_backend) {
-            bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+            bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, params);
         }
         if (!bp.cpu_backend) {
             fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
