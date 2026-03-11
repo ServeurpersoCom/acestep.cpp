@@ -49,8 +49,7 @@ static BackendPair backend_init(const char * label) {
     if (n_threads < 1) {
         n_threads = 1;
     }
-    // [GGML] If best backend is already CPU, reuse it (avoid 2 CPU instances
-    // where only one gets the thread count)
+    // Initialize CPU backend with explicit thread count
     char params[64];
     snprintf(params, sizeof(params), "n_threads=%d", n_threads);
     ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
