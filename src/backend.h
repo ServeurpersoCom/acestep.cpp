@@ -6,7 +6,6 @@
 // qwen3.h, qwen3-lm.h, cond.h, dit.h, vae.h.
 
 #include "ggml-backend.h"
-#include "ggml-cpu.h"
 #ifdef ACESTEP_HAVE_CUDA
 // Query compute capability without pulling in cuda_runtime.h.
 // cudaDeviceGetAttribute takes an int enum value; we pass the raw constants.
@@ -51,17 +50,23 @@ static BackendPair backend_init(const char * label) {
     }
     // [GGML] If best backend is already CPU, reuse it (avoid 2 CPU instances
     // where only one gets the thread count)
+    char params[64];
+    snprintf(params, sizeof(params), "n_threads=%d", n_threads);
     bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
     if (best_is_cpu) {
         bp.cpu_backend = bp.backend;
-        ggml_backend_cpu_set_n_threads(bp.backend, n_threads);
     } else {
-        bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+        ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
+        if (cpu_dev) {
+            bp.cpu_backend = ggml_backend_dev_init(cpu_dev, params);
+        }
+        if (!bp.cpu_backend) {
+            bp.cpu_backend = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+        }
         if (!bp.cpu_backend) {
             fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
             exit(1);
         }
-        ggml_backend_cpu_set_n_threads(bp.cpu_backend, n_threads);
     }
     fprintf(stderr, "[Load] %s backend: %s (CPU threads: %d)\n", label, ggml_backend_name(bp.backend), n_threads);
 
