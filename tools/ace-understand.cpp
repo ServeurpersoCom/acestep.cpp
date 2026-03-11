@@ -397,7 +397,7 @@ int main(int argc, char ** argv) {
             be_tok = ggml_backend_dev_init(dev_cpu, params);
         }
         if (!be_tok) {
-            be_tok = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, NULL);
+            be_tok = ggml_backend_init_by_type(GGML_BACKEND_DEVICE_TYPE_CPU, params);
         }
         if (!be_tok) {
             fprintf(stderr, "[Tok] FATAL: failed to init CPU backend\n");
