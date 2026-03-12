@@ -340,7 +340,7 @@ int main(int argc, char ** argv) {
         float        shift          = req.shift > 0 ? req.shift : 1.0f;
 
         if (guidance_scale <= 0.0f) {
-            guidance_scale = is_turbo ? 1.0f : 7.0f;
+            guidance_scale = 1.0f;
         } else if (is_turbo && guidance_scale > 1.0f) {
             fprintf(stderr, "[Pipeline] WARNING: turbo model, forcing guidance_scale=1.0 (was %.1f)\n", guidance_scale);
             guidance_scale = 1.0f;

@@ -183,7 +183,7 @@ cd examples
 ./dit-only.sh         # skip LLM, DiT from noise
 ```
 
-Each example has a `-sft` variant (SFT model, 50 steps, CFG 7.0)
+Each example has a `-sft` variant (SFT model, 50 steps, CFG 1.0)
 alongside the turbo default (8 steps, no CFG).
 
 ## Generation modes
@@ -405,8 +405,7 @@ code generation) and in phase 1 when lyrics are already provided. When
 `1.0` disables CFG.
 
 **`lm_top_p`** (float, default `0.9`)
-Nucleus sampling cutoff. `1.0` disables. When `top_k=0`, an internal
-pre-filter of 256 tokens is applied before top_p for performance.
+Nucleus sampling cutoff. `1.0` disables.
 
 **`lm_top_k`** (int, default `0` = disabled)
 Top-K sampling. `0` disables hard top-K (top_p still applies).
@@ -428,17 +427,15 @@ phase 1 is skipped and the caption is never touched regardless of this flag.
 Number of diffusion denoising steps. Turbo preset: `8`. SFT preset: `50`.
 
 **`guidance_scale`** (float, default `0.0` = auto)
-CFG scale for the DiT. `0.0` is resolved at runtime:
-- Turbo models: forced to `1.0` (CFG disabled, turbo was trained without it).
-- SFT/base models: `7.0`.
+CFG scale for the DiT. `0.0` is resolved to `1.0` at runtime (CFG disabled).
 Any value > 1.0 on a turbo model is overridden to 1.0 with a warning.
 
 **`shift`** (float, default `3.0`)
 Flow-matching schedule shift. Controls the timestep distribution.
-`shift = s*t / (1 + (s-1)*t)`. Turbo preset: `3.0`. SFT preset: `6.0`.
+`shift = s*t / (1 + (s-1)*t)`. Turbo preset: `3.0`. SFT preset: `1.0`.
 
 Turbo preset: `inference_steps=8, shift=3.0` (guidance_scale auto-resolved to 1.0).
-SFT preset: `inference_steps=50, guidance_scale=7.0, shift=6.0`.
+SFT preset: `inference_steps=50, guidance_scale=1.0, shift=1.0`.
 
 ## ace-qwen3 reference
 
