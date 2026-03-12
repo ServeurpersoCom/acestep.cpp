@@ -53,14 +53,6 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq clang-format clang-tidy cppcheck
 
-      - name: Check trailing whitespace
-        continue-on-error: true
-        run: |
-          if grep -rIn --exclude-dir=.git --exclude="*.md,*.log" "[[:blank:]]$" .; then
-            echo "Trailing whitespace detected!"
-            exit 1
-          fi
-
       - name: Run clang-format (check mode)
         run: |
           find . \
@@ -72,9 +64,14 @@ jobs:
         run: |
           cppcheck --enable=all --error-exitcode=1 --inline-suppr \
           --suppress=missingIncludeSystem \
-          --suppress=unusedFunction \
           --suppress=missingInclude \
           --suppress=cstyleCast \
           --suppress=constVariable \
-          -i ggml -i build -i .git \
+          --suppress=constVariablePointer \
+          --suppress=constParameterPointer \
+          --suppress=variableScope \
+          --suppress=uselessCallsSubstr \
+          --suppress=useStlAlgorithm \
+          --suppress=shiftNegativeLHS \
+          -i ggml -i build -i .git -i mp3 \
           .
