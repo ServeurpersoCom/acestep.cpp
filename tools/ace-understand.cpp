@@ -32,7 +32,7 @@
 #include <vector>
 
 // Sampling: temperature -> top_k -> top_p -> softmax -> multinomial
-// Same as ace-qwen3.cpp. Greedy when temperature <= 0.
+// Same as ace-qwen3.cpp but no compact vocab (full V). Greedy when temperature <= 0.
 static int sample_top_k_p(float * logits, int V, float temperature, float top_p, int top_k, std::mt19937 & rng) {
     if (temperature <= 0.0f) {
         return (int) (std::max_element(logits, logits + V) - logits);
@@ -52,13 +52,12 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
         logits[i] *= inv_temp;
     }
 
-    // top_k pre-filter (or effective_k=256 when top_k=0)
-    int effective_k = (top_k > 0) ? top_k : 256;
-    if (effective_k < V) {
+    // top_k: keep top K values, set rest to -inf (skipped when top_k=0)
+    if (top_k > 0 && top_k < V) {
         tmp_buf.resize(V);
         memcpy(tmp_buf.data(), logits, V * sizeof(float));
-        std::nth_element(tmp_buf.begin(), tmp_buf.begin() + (effective_k - 1), tmp_buf.end(), std::greater<float>());
-        float threshold = tmp_buf[effective_k - 1];
+        std::nth_element(tmp_buf.begin(), tmp_buf.begin() + (top_k - 1), tmp_buf.end(), std::greater<float>());
+        float threshold = tmp_buf[top_k - 1];
         for (int i = 0; i < V; i++) {
             if (logits[i] < threshold) {
                 logits[i] = -INFINITY;
@@ -300,6 +299,7 @@ int main(int argc, char ** argv) {
         if (!request_parse(&req, request_path)) {
             return 1;
         }
+        request_dump(&req, stderr);
     }
 
     // Resolve seed (same as ace-qwen3)
@@ -345,7 +345,8 @@ int main(int argc, char ** argv) {
         free(planar);
 
         // VAE encode: audio -> latents [T_25Hz, 64]
-        Timer      t_vae;
+        Timer t_vae;
+        fprintf(stderr, "[VAE-Enc] Loading %s...\n", vae_gguf);
         VAEEncoder vae_enc = {};
         vae_enc_load(&vae_enc, vae_gguf);
         int                max_T_lat = (T_audio / 1920) + 64;
@@ -526,27 +527,26 @@ int main(int argc, char ** argv) {
     AcePrompt parsed = {};
     parse_cot_and_lyrics(text, &parsed);
 
-    fprintf(stderr, "\n[Result]\n");
     if (parsed.bpm > 0) {
-        fprintf(stderr, "  bpm: %d\n", parsed.bpm);
+        fprintf(stderr, "[Result] bpm: %d\n", parsed.bpm);
     }
     if (parsed.duration > 0) {
-        fprintf(stderr, "  duration: %.0fs\n", parsed.duration);
+        fprintf(stderr, "[Result] duration: %.0fs\n", parsed.duration);
     }
     if (!parsed.keyscale.empty()) {
-        fprintf(stderr, "  keyscale: %s\n", parsed.keyscale.c_str());
+        fprintf(stderr, "[Result] keyscale: %s\n", parsed.keyscale.c_str());
     }
     if (!parsed.timesignature.empty()) {
-        fprintf(stderr, "  timesig: %s\n", parsed.timesignature.c_str());
+        fprintf(stderr, "[Result] timesig: %s\n", parsed.timesignature.c_str());
     }
     if (!parsed.vocal_language.empty()) {
-        fprintf(stderr, "  language: %s\n", parsed.vocal_language.c_str());
+        fprintf(stderr, "[Result] language: %s\n", parsed.vocal_language.c_str());
     }
     if (!parsed.caption.empty()) {
-        fprintf(stderr, "  caption: %.80s%s\n", parsed.caption.c_str(), parsed.caption.size() > 80 ? "..." : "");
+        fprintf(stderr, "[Result] caption: %.80s%s\n", parsed.caption.c_str(), parsed.caption.size() > 80 ? "..." : "");
     }
     if (!parsed.lyrics.empty()) {
-        fprintf(stderr, "  lyrics: %zu chars\n", parsed.lyrics.size());
+        fprintf(stderr, "[Result] lyrics: %zu chars\n", parsed.lyrics.size());
     }
 
     // Step 7: write output JSON (reusable as dit-vae input with codes)
@@ -558,7 +558,7 @@ int main(int argc, char ** argv) {
         }
         codes_str += std::to_string(codes[i]);
     }
-    fprintf(stderr, "  audio_codes: %zu codes\n", codes.size());
+    fprintf(stderr, "[Result] audio_codes: %zu codes\n", codes.size());
 
     if (output_path) {
         AceRequest out;
@@ -574,6 +574,6 @@ int main(int argc, char ** argv) {
         request_write(&out, output_path);
     }
 
-    fprintf(stderr, "\n[Understand] Load %.0f | Total %.0fms | seed=%lld\n", load_ms, t_total.ms(), seed);
+    fprintf(stderr, "[Understand] Load %.0f | Total %.0fms | seed=%lld\n", load_ms, t_total.ms(), seed);
     return 0;
 }

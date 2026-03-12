@@ -284,6 +284,7 @@ int main(int argc, char ** argv) {
             fprintf(stderr, "[Request] ERROR: failed to parse %s, skipping\n", rpath);
             continue;
         }
+        request_dump(&req, stderr);
         if (req.caption.empty() && req.lego.empty()) {
             fprintf(stderr, "[Request] ERROR: caption is empty in %s, skipping\n", rpath);
             continue;
@@ -741,10 +742,7 @@ int main(int argc, char ** argv) {
                     debug_dump_2d(&dbg, "vae_audio", audio.data(), 2, T_audio);
                 }
 
-                if (audio_write(out_path, audio.data(), T_audio, 48000, mp3_kbps)) {
-                    fprintf(stderr, "[VAE Batch%d] Wrote %s: %d samples (%.2fs @ 48kHz stereo)\n", b, out_path, T_audio,
-                            (float) T_audio / 48000.0f);
-                } else {
+                if (!audio_write(out_path, audio.data(), T_audio, 48000, mp3_kbps)) {
                     fprintf(stderr, "[VAE Batch%d] FATAL: failed to write %s\n", b, out_path);
                 }
             }

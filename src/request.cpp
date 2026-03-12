@@ -373,21 +373,21 @@ bool request_write(const AceRequest * r, const char * path) {
 
 void request_dump(const AceRequest * r, FILE * f) {
     fprintf(f, "[Request] seed=%lld\n", (long long) r->seed);
-    fprintf(f, "  caption:    %.60s%s\n", r->caption.c_str(), r->caption.size() > 60 ? "..." : "");
-    fprintf(f, "  lyrics:     %zu bytes\n", r->lyrics.size());
-    fprintf(f, "  bpm=%d dur=%.0f key=%s ts=%s lang=%s\n", r->bpm, r->duration, r->keyscale.c_str(),
+    fprintf(f, "[Request] caption: %.60s%s\n", r->caption.c_str(), r->caption.size() > 60 ? "..." : "");
+    fprintf(f, "[Request] lyrics: %zu bytes\n", r->lyrics.size());
+    fprintf(f, "[Request] bpm=%d dur=%.0f key=%s ts=%s lang=%s\n", r->bpm, r->duration, r->keyscale.c_str(),
             r->timesignature.c_str(), r->vocal_language.c_str());
-    fprintf(f, "  lm: temp=%.2f cfg=%.1f top_p=%.2f top_k=%d\n", r->lm_temperature, r->lm_cfg_scale, r->lm_top_p,
-            r->lm_top_k);
-    fprintf(f, "  dit: steps=%d guidance=%.1f shift=%.1f\n", r->inference_steps, r->guidance_scale, r->shift);
+    fprintf(f, "[Request] lm: temp=%.2f cfg=%.1f top_p=%.2f top_k=%d\n", r->lm_temperature, r->lm_cfg_scale,
+            r->lm_top_p, r->lm_top_k);
+    fprintf(f, "[Request] dit: steps=%d guidance=%.1f shift=%.1f\n", r->inference_steps, r->guidance_scale, r->shift);
     if (r->audio_cover_strength != 0.5f) {
-        fprintf(f, "  cover: strength=%.2f\n", r->audio_cover_strength);
+        fprintf(f, "[Request] cover: strength=%.2f\n", r->audio_cover_strength);
     }
     if (r->repainting_start >= 0.0f || r->repainting_end >= 0.0f) {
-        fprintf(f, "  repaint: start=%.1f end=%.1f\n", r->repainting_start, r->repainting_end);
+        fprintf(f, "[Request] repaint: start=%.1f end=%.1f\n", r->repainting_start, r->repainting_end);
     }
     if (!r->lego.empty()) {
-        fprintf(f, "  lego: %s\n", r->lego.c_str());
+        fprintf(f, "[Request] lego: %s\n", r->lego.c_str());
     }
-    fprintf(f, "  audio_codes: %s\n", r->audio_codes.empty() ? "(none)" : "(present)");
+    fprintf(f, "[Request] audio_codes: %s\n", r->audio_codes.empty() ? "(none)" : "(present)");
 }

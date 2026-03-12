@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 
 // wav.h: WAV reader (returns interleaved, we deinterleave below)
 #include "wav.h"
@@ -148,7 +149,7 @@ static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
     *T_out  = T;
     *sr_out = out_sr;
 
-    fprintf(stderr, "[Audio] read %s: %d samples, %d Hz, %d ch (MP3)\n", path, T, out_sr, out_nch);
+    fprintf(stderr, "[MP3] read %s: %d samples, %d Hz, %d ch\n", path, T, out_sr, out_nch);
     return planar;
 }
 
@@ -206,7 +207,8 @@ static float * audio_read_48k(const char * path, int * T_out) {
         return raw;
     }
 
-    int     T_rs      = 0;
+    int T_rs = 0;
+    fprintf(stderr, "[Audio-resample] %d Hz -> 48000 Hz, %d samples...\n", sr, T);
     float * resampled = audio_resample(raw, T, sr, 48000, 2, &T_rs);
     free(raw);
 
@@ -216,7 +218,7 @@ static float * audio_read_48k(const char * path, int * T_out) {
         return NULL;
     }
 
-    fprintf(stderr, "[Audio-resample] %d Hz -> 48000 Hz (%d -> %d samples)\n", sr, T, T_rs);
+    fprintf(stderr, "[Audio-resample] Done: %d -> %d samples\n", T, T_rs);
 
     *T_out = T_rs;
     return resampled;
@@ -281,7 +283,7 @@ static bool audio_write_wav(const char * path, const float * audio, int T_audio,
     }
 
     fclose(f);
-    fprintf(stderr, "[Audio] wrote %s: %d samples, %d Hz, stereo (WAV)\n", path, T_audio, sr);
+    fprintf(stderr, "[WAV] wrote %s: %d samples, %d Hz, stereo\n", path, T_audio, sr);
     return true;
 }
 
@@ -323,6 +325,11 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
         return false;
     }
 
+    float duration = (float) enc_T / (float) enc_sr;
+    fprintf(stderr, "[MP3] encoding %.1fs @ %d kbps, %d Hz stereo\n", duration, kbps, enc_sr);
+
+    clock_t t_start = clock();
+
     // encode in 1-second chunks to keep memory usage low
     int chunk   = enc_sr;
     int written = 0;
@@ -346,12 +353,16 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
     fwrite(flush_data, 1, (size_t) flush_size, fp);
     written += flush_size;
 
+    float encode_ms = (float) (clock() - t_start) * 1000.0f / (float) CLOCKS_PER_SEC;
+    float realtime  = (encode_ms > 0.0f) ? (duration * 1000.0f / encode_ms) : 0.0f;
+
     fclose(fp);
     mp3enc_free(enc);
     free(resampled);
 
     float ratio = (enc_T > 0) ? (float) (enc_T * 2 * 2) / (float) written : 0.0f;
-    fprintf(stderr, "[Audio] wrote %s: %d bytes (%.1f:1), %d kbps, %d Hz (MP3)\n", path, written, ratio, kbps, enc_sr);
+    fprintf(stderr, "[MP3] wrote %s: %d bytes (%.1f:1), %.0f ms (%.2fx realtime)\n", path, written, ratio, encode_ms,
+            realtime);
     return true;
 }
 

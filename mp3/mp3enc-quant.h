@@ -320,54 +320,102 @@ static int mp3enc_best_scalefac_compress(const int * scalefac_l) {
     return best_compress;
 }
 
-// Inner loop: binary search on global_gain to fit the bit budget.
-// Quantizes with the given scalefactors (flat array, works for long or short blocks).
-// scalefac: flat scalefac array (scalefac_l for long, flattened scalefac_s for short).
-//           Pass NULL for no scalefactors (initial call before outer loop).
-// Returns actual Huffman bits used (not including scalefactor bits).
+// Inner loop: find minimum global_gain where Huffman bits fit the budget.
+// Bit count is monotonically decreasing with global_gain (higher gain = coarser
+// quantization = fewer bits). We want the smallest gain where bits <= budget.
+//
+// When hint_gain >= 0 (from a previous inner_loop call in the same outer loop),
+// the optimal gain is typically within a few steps. We scan linearly from the
+// hint instead of doing a full binary search on [0, 255]. This cuts the typical
+// iteration count from 8 to 3-4.
+//
+// scalefac: per-band scalefactors (NULL for initial call before outer loop).
+// hint_gain: previous global_gain from last inner_loop call, or -1 for full search.
 static int mp3enc_inner_loop(const float *         xr,
                              int *                 ix,
                              mp3enc_granule_info & gi,
                              int                   available_bits,
                              const uint8_t *       sfb_table,
                              int                   sr_index,
-                             const int *           scalefac = nullptr) {
-    int lo = 0, hi = 255;
+                             const int *           scalefac  = nullptr,
+                             int                   hint_gain = -1) {
+    // quantize + count_bits helper (avoids repeating the branch 5 times)
+    auto try_gain = [&](int g) -> int {
+        if (!scalefac || gi.scalefac_compress == 0) {
+            mp3enc_quantize(xr, ix, g);
+        } else {
+            mp3enc_quantize_sfb(xr, ix, g, scalefac, gi.scalefac_scale, gi.preflag, sfb_table);
+        }
+        for (int i = 0; i < 576; i++) {
+            if (abs(ix[i]) >= 8191) {
+                return available_bits + 1;  // saturated
+            }
+        }
+        return mp3enc_count_bits(ix, gi, sfb_table, sr_index);
+    };
+
     int best_gain = 210;
     int best_bits = available_bits + 1;
 
-    while (lo <= hi) {
-        int mid = (lo + hi) / 2;
-
-        // Quantize with scalefactors
-        if (!scalefac || gi.scalefac_compress == 0) {
-            mp3enc_quantize(xr, ix, mid);
-        } else {
-            mp3enc_quantize_sfb(xr, ix, mid, scalefac, gi.scalefac_scale, gi.preflag, sfb_table);
-        }
-
-        // Check for saturation
-        bool saturated = false;
-        for (int i = 0; i < 576; i++) {
-            if (abs(ix[i]) >= 8191) {
-                saturated = true;
-                break;
-            }
-        }
-
-        int bits;
-        if (saturated) {
-            bits = available_bits + 1;
-        } else {
-            bits = mp3enc_count_bits(ix, gi, sfb_table, sr_index);
-        }
+    if (hint_gain >= 0) {
+        // Linear scan from hint. Typical cost: 3-4 try_gain calls.
+        int bits = try_gain(hint_gain);
 
         if (bits <= available_bits) {
-            best_gain = mid;
+            // Hint fits. Scan downward to find the minimum valid gain.
+            best_gain = hint_gain;
             best_bits = bits;
-            hi        = mid - 1;
+            for (int g = hint_gain - 1; g >= 0 && g >= hint_gain - 10; g--) {
+                bits = try_gain(g);
+                if (bits > available_bits) {
+                    break;
+                }
+                best_gain = g;
+                best_bits = bits;
+            }
         } else {
-            lo = mid + 1;
+            // Hint doesn't fit. Scan upward to find the first valid gain.
+            bool found = false;
+            for (int g = hint_gain + 1; g <= 255 && g <= hint_gain + 20; g++) {
+                bits = try_gain(g);
+                if (bits <= available_bits) {
+                    best_gain = g;
+                    best_bits = bits;
+                    found     = true;
+                    break;
+                }
+            }
+            // Fallback: if scan didn't find it (rare, e.g. scalefac_scale toggle),
+            // binary search on the remaining range.
+            if (!found) {
+                int lo = hint_gain + 21;
+                int hi = 255;
+                while (lo <= hi) {
+                    int mid = (lo + hi) / 2;
+                    bits    = try_gain(mid);
+                    if (bits <= available_bits) {
+                        best_gain = mid;
+                        best_bits = bits;
+                        hi        = mid - 1;
+                    } else {
+                        lo = mid + 1;
+                    }
+                }
+            }
+        }
+    } else {
+        // No hint: full binary search on [0, 255].
+        int lo = 0, hi = 255;
+        while (lo <= hi) {
+            int mid  = (lo + hi) / 2;
+            int bits = try_gain(mid);
+            if (bits <= available_bits) {
+                best_gain = mid;
+                best_bits = bits;
+                hi        = mid - 1;
+            } else {
+                lo = mid + 1;
+            }
         }
     }
 
@@ -540,7 +588,7 @@ static int mp3enc_outer_loop(const float *         xr,
         }
 
         // Re-run inner loop
-        huff_bits = mp3enc_inner_loop(xr, ix, gi, huff_budget, sfb_table, sr_index, gi.scalefac_l);
+        huff_bits = mp3enc_inner_loop(xr, ix, gi, huff_budget, sfb_table, sr_index, gi.scalefac_l, gi.global_gain);
         int total = part2 + huff_bits;
 
         if (total <= available_bits) {

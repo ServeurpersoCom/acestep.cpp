@@ -25,9 +25,14 @@ struct TokenProb {
 // Sampling: temperature -> top_k -> top_p -> softmax -> multinomial
 // Matches nano-vLLM Sampler: div_(temperature) -> apply_top_k_top_p -> softmax -> sample
 //
-// Optimization: when top_k=0, apply effective_k=256 pre-filter via nth_element O(N).
-// Then top_p only sorts the K survivors (~256) instead of all V (~65k).
-// O(V*log(V)) sort on full vocab becomes O(V) nth_element + O(K*log(K)) sort on K<<V.
+// Optimization: the caller compacts logits to EOS + audio codes (V=65536)
+// instead of the full 150k+ vocab, so top_p sorts ~65k instead of ~150k.
+// When top_k>0: nth_element O(V) finds the K-th value, mask everything below.
+// When top_k=0 (disabled): no pre-filtering, top_p sees the full vocabulary.
+// top_p: compact surviving tokens, sort descending O(K*log(K)), softmax,
+// cumulative sum, mask tokens beyond the nucleus threshold.
+// This matches nano-vLLM: apply_top_k_top_p sorts the full vocab when
+// k is None, so we must not inject an artificial cap.
 static int sample_top_k_p(float * logits, int V, float temperature, float top_p, int top_k, std::mt19937 & rng) {
     if (temperature <= 0.0f) {
         // greedy
@@ -45,15 +50,12 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
         logits[i] *= inv_temp;
     }
 
-    // 2. top_k: keep top K values, set rest to -inf
-    //    When top_k=0 (disabled), use effective_k to pre-filter for top_p.
-    //    256 is conservative: with temp=0.85, top_p=0.9 typically selects ~50-200 tokens.
-    int effective_k = (top_k > 0) ? top_k : 256;
-    if (effective_k < V) {
+    // 2. top_k: keep top K values, set rest to -inf (skipped when top_k=0)
+    if (top_k > 0 && top_k < V) {
         tmp_buf.resize(V);
         memcpy(tmp_buf.data(), logits, V * sizeof(float));
-        std::nth_element(tmp_buf.begin(), tmp_buf.begin() + (effective_k - 1), tmp_buf.end(), std::greater<float>());
-        float threshold = tmp_buf[effective_k - 1];
+        std::nth_element(tmp_buf.begin(), tmp_buf.begin() + (top_k - 1), tmp_buf.end(), std::greater<float>());
+        float threshold = tmp_buf[top_k - 1];
         for (int i = 0; i < V; i++) {
             if (logits[i] < threshold) {
                 logits[i] = -INFINITY;
@@ -929,7 +931,6 @@ int main(int argc, char ** argv) {
             char path[512];
             snprintf(path, sizeof(path), "%s%d%s", base.c_str(), b, ext.c_str());
             request_write(&rr, path);
-            fprintf(stderr, "[Output] Wrote %s\n", path);
         }
     }
 
