@@ -19,6 +19,7 @@
 #include "request.h"
 #include "timer.h"
 #include "vae-enc.h"
+#include "debug.h"
 
 #include <algorithm>
 #include <cmath>
@@ -220,7 +221,8 @@ static void usage(const char * prog) {
             "Debug:\n"
             "  --max-seq <N>           KV cache size (default: 8192)\n"
             "  --no-fsm                Disable FSM constrained decoding\n"
-            "  --no-fa                 Disable flash attention\n",
+            "  --no-fa                 Disable flash attention\n"
+            "  --dump <dir>            Dump tok_latents + tok_codes (skip LM)\n",
             prog);
 }
 
@@ -231,6 +233,7 @@ int main(int argc, char ** argv) {
     const char * request_path   = nullptr;
     const char * model_path     = nullptr;
     const char * output_path    = nullptr;
+    const char * dump_dir       = nullptr;
     int          max_seq        = 8192;
     int          vae_chunk      = 256;
     int          vae_overlap    = 64;
@@ -255,6 +258,8 @@ int main(int argc, char ** argv) {
             model_path = argv[++i];
         } else if (!strcmp(argv[i], "-o") && i + 1 < argc) {
             output_path = argv[++i];
+        } else if (!strcmp(argv[i], "--dump") && i + 1 < argc) {
+            dump_dir = argv[++i];
         } else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc) {
             max_seq = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vae-chunk") && i + 1 < argc) {
@@ -275,8 +280,8 @@ int main(int argc, char ** argv) {
         }
     }
 
-    if (!model_path) {
-        fprintf(stderr, "[CLI] ERROR: --model required\n");
+    if (!model_path && !dump_dir) {
+        fprintf(stderr, "[CLI] ERROR: --model required (or use --dump for tok-only)\n");
         usage(argv[0]);
         return 1;
     }
@@ -422,6 +427,21 @@ int main(int argc, char ** argv) {
         codes.resize(T_5Hz);
         fprintf(stderr, "[Tok] %d codes (%.2fs @ 5Hz), %.0fms\n", T_5Hz, (float) T_5Hz / 5.0f, t_tok.ms());
 
+        // --dump: save latents and codes for test-tok-cossim.py
+        if (dump_dir) {
+            DebugDumper dbg;
+            debug_init(&dbg, dump_dir);
+            debug_dump_2d(&dbg, "tok_latents", latents.data(), T_25Hz, 64);
+            char cpath[1024];
+            snprintf(cpath, sizeof(cpath), "%s/tok_codes.bin", dump_dir);
+            FILE * fc = fopen(cpath, "wb");
+            if (fc) {
+                fwrite(codes.data(), sizeof(int), (size_t) T_5Hz, fc);
+                fclose(fc);
+                fprintf(stderr, "[Debug] tok_codes: [%d] int32\n", T_5Hz);
+            }
+        }
+
     } else {
         // Codes from JSON: parse audio_codes string "3101,11837,..."
         if (req.audio_codes.empty()) {
@@ -435,6 +455,12 @@ int main(int argc, char ** argv) {
     if (codes.empty()) {
         fprintf(stderr, "[Understand] ERROR: no audio codes to process\n");
         return 1;
+    }
+
+    // --dump without --model: tok-only mode, skip LM
+    if (dump_dir && !model_path) {
+        fprintf(stderr, "[Understand] Dump-only mode, %zu codes written\n", codes.size());
+        return 0;
     }
 
     // Step 2: load BPE tokenizer + LM

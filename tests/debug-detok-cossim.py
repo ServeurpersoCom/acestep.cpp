@@ -5,9 +5,9 @@ Runs dit-vae with --dump, then Python detokenizer, and compares.
 Also validates Python intermediates against manual math to isolate bugs.
 
 Usage:
-    python3 tests/debug-detok-cos-sim.py <request.json>
+    ./debug-detok-cossim.py
 
-The request must contain audio_codes (run ace-qwen3 first).
+Expects request0.json in CWD with audio_codes (run ace-qwen3 first).
 """
 import sys, os, json, struct, subprocess, shutil
 import numpy as np
@@ -34,7 +34,7 @@ def stats(name, a, b):
     n = min(len(a_f), len(b_f))
     diff = np.abs(a_f[:n] - b_f[:n])
     tag = "OK" if c > 0.999 else "BAD" if c < 0.99 else "WARN"
-    print(f"  {name:25s} cos={c:.6f} maxdiff={diff.max():.6f} meandiff={diff.mean():.6f} [{tag}]")
+    print(f"{name:25s} cos={c:.6f} maxdiff={diff.max():.6f} meandiff={diff.mean():.6f} [{tag}]")
     return c
 
 def load_dump(path):
@@ -84,11 +84,11 @@ def run_ggml(request_path, dump_dir):
     return True
 
 def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <request.json>")
+    if not os.path.isfile("request0.json"):
+        print("[Error] request0.json not found in CWD")
         return 1
 
-    request_path = sys.argv[1]
+    request_path = "request0.json"
     req = json.load(open(request_path))
     if 'audio_codes' not in req or not req['audio_codes']:
         print("ERROR: request has no audio_codes (run ace-qwen3 first)")
@@ -109,14 +109,14 @@ def main():
     print(f"[GGML] detok_output: [{T_25Hz}, 64]")
 
     # Step 2: Run Python
-    print("\n[Python] Loading model...")
+    print("[Python] Loading model...")
     import torch
     sys.path.insert(0, os.path.join(ROOT, '..', 'ACE-Step-1.5'))
     from acestep.handler import AceStepHandler
 
     handler = AceStepHandler()
     handler.initialize_service(
-        project_root=os.path.join(ROOT, 'checkpoints'),
+        project_root=ROOT,
         config_path='acestep-v15-sft',
         device='cuda',
     )
@@ -147,21 +147,21 @@ def main():
     print(f"[Python] detok output: {py_out.shape}")
 
     # Step 3: GGML vs Python final comparison
-    print(f"\n[Compare] GGML vs Python ({T_25Hz} frames)")
+    print(f"[Compare] GGML vs Python ({T_25Hz} frames)")
     n = min(len(ggml_out), len(py_out))
     stats("detok_output (full)", ggml_out[:n], py_out[:n])
 
     for t in range(min(5, T_5Hz)):
         g = ggml_out[t*5:(t+1)*5]
         p = py_out[t*5:(t+1)*5]
-        stats(f"  token {t} (5 frames)", g, p)
+        stats(f"token {t} (5 frames)", g, p)
 
-    print(f"\n  Frame 0 (ch 0-7):")
-    print(f"    GGML:   {ggml_out[0, :8]}")
-    print(f"    Python: {py_out[0, :8]}")
+    print(f"Frame 0 (ch 0-7):")
+    print(f"GGML:   {ggml_out[0, :8]}")
+    print(f"Python: {py_out[0, :8]}")
 
     # Step 4: Validate Python math (isolate which stage could break C++)
-    print(f"\n[Math validation] Python intermediates vs manual compute")
+    print(f"[Math validation] Python intermediates vs manual compute")
 
     # FSQ decode
     fsq_manual = np.array([fsq_decode_index(c) for c in codes])
@@ -188,16 +188,16 @@ def main():
     manual_after_special = np.tile(manual_embed, (5, 1)) + special_np
     stats("special_tokens tok0", manual_after_special, py_after_special)
 
-    print(f"\n[Summary]")
+    print(f"[Summary]")
     c_final = cos(ggml_out[:n], py_out[:n])
     if c_final > 0.999:
-        print(f"  PASS: cos={c_final:.6f}")
+        print(f"PASS: cos={c_final:.6f}")
     elif c_final > 0.99:
-        print(f"  WARN: cos={c_final:.6f} (precision issue, check bf16 vs f32)")
+        print(f"WARN: cos={c_final:.6f} (precision issue, check bf16 vs f32)")
     else:
-        print(f"  FAIL: cos={c_final:.6f}")
-        print(f"  If math validation OK above, bug is in C++ 2L encoder (attn/MLP).")
-        print(f"  If math validation BAD, check weight loading / FSQ / projections.")
+        print(f"FAIL: cos={c_final:.6f}")
+        print(f"If math validation OK above, bug is in C++ 2L encoder (attn/MLP).")
+        print(f"If math validation BAD, check weight loading / FSQ / projections.")
     return 0
 
 if __name__ == '__main__':

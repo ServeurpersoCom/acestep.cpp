@@ -40,22 +40,16 @@ struct TokGGML {
 };
 
 // FSQ encode: 6 raw values from project_in -> flat integer index
-// Matches Python vector_quantize_pytorch FSQ.bound() + codes_to_indices()
-// bound(z): tanh(z + shift) * half_l - offset -> round / half_width -> normalized [-1,1]
-// code = normalized * half_width + half_width -> integer [0, L-1]
+// Matches Python vector_quantize_pytorch FSQ.symmetry_preserving_bound() + codes_to_indices()
+// QL(x) = 2/(L-1) * floor((L-1)*(tanh(x)+1)/2 + 0.5) - 1
+// code = floor((L-1) * (tanh(x) + 1) / 2 + 0.5)  ->  integer [0, L-1]
 static int fsq_encode_index(const float * raw_vals) {
-    const float eps   = 1e-3f;
-    int         index = 0;
-    int         mult  = 1;
+    int index = 0;
+    int mult  = 1;
     for (int d = 0; d < FSQ_NDIMS; d++) {
-        int   L          = FSQ_LEVELS[d];
-        float half_l     = (float) (L - 1) * (1.0f + eps) / 2.0f;
-        float offset     = (L % 2 == 0) ? 0.5f : 0.0f;
-        float shift      = atanhf(offset / half_l);
-        float bounded    = tanhf(raw_vals[d] + shift) * half_l - offset;
-        int   rounded    = (int) roundf(bounded);
-        int   half_width = L / 2;
-        int   code       = rounded + half_width;
+        int   L    = FSQ_LEVELS[d];
+        float t    = tanhf(raw_vals[d]);
+        int   code = (int) floorf((float) (L - 1) * (t + 1.0f) / 2.0f + 0.5f);
         if (code < 0) {
             code = 0;
         }
