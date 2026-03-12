@@ -72,7 +72,6 @@ jobs:
         run: |
           cppcheck --enable=all --error-exitcode=1 --inline-suppr \
           --suppress=missingIncludeSystem \
-          --suppress=unusedFunction \
           --suppress=missingInclude \
           --suppress=cstyleCast \
           --suppress=constVariable \

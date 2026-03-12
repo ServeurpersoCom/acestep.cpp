@@ -131,7 +131,7 @@ Unable to import `torchao` Tensor objects. This may affect loading checkpoints s
 2026-03-04 21:51:46.995 | INFO     | acestep.core.generation.handler.generate_music:_vram_preflight_check:70 - [generate_music] VRAM pre-flight: 86.40 GB free, ~0.94 GB needed (batch=1, duration=88s, mode=turbo).
 2026-03-04 21:51:47.001 | INFO     | acestep.core.generation.handler.conditioning_target:_prepare_target_latents_and_wavs:41 - [generate_music] Decoding audio codes for item 0...
 2026-03-04 21:51:47.198 | INFO     | acestep.core.generation.handler.conditioning_text:_prepare_precomputed_lm_hints:31 - [generate_music] Decoding audio codes for LM hints for item 0...
-2026-03-04 21:51:47.201 | INFO     | acestep.core.generation.handler.conditioning_text:_prepare_text_conditioning_inputs:85 - 
+2026-03-04 21:51:47.201 | INFO     | acestep.core.generation.handler.conditioning_text:_prepare_text_conditioning_inputs:85 -
 ======================================================================
 2026-03-04 21:51:47.201 | INFO     | acestep.core.generation.handler.conditioning_text:_prepare_text_conditioning_inputs:86 - 🔍 [DEBUG] DiT TEXT ENCODER INPUT (Inference)
 2026-03-04 21:51:47.201 | INFO     | acestep.core.generation.handler.conditioning_text:_prepare_text_conditioning_inputs:87 - ======================================================================
