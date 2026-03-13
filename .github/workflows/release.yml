@@ -1,5 +1,4 @@
-# Build and publish portable acestep-cpp binaries for every supported platform.
-name: Release Binaries
+name: Build & Release Binaries
 
 on:
   release:
@@ -22,21 +21,14 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # ──────────── Linux ────────────────────────────────────────────
           - name: linux-x64
             os: ubuntu-22.04
             cmake_flags: -DGGML_BLAS=ON
             apt_extra: pkg-config libopenblas-dev
             install_cuda: true
             install_vulkan: true
-            
-          # ──────────── macOS ────────────────────────────────────────────
-          # macos-latest = arm64 (M-series); Metal + Accelerate auto-enabled
           - name: macos-arm64-metal
             os: macos-latest
-
-          # ──────────── Windows ──────────────────────────────────────────
-          # W.I.P.
 
     steps:
       - name: Checkout
@@ -44,21 +36,18 @@ jobs:
         with:
           submodules: recursive
 
-      # ── Linux: base build tools & optional apt packages ───────────────
       - name: Install build tools (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq cmake build-essential ${{ matrix.apt_extra || '' }}
 
-      # ── Linux: CUDA toolkit ────────────────
       - name: Install CUDA toolkit (Linux)
         uses: Jimver/cuda-toolkit@v0.2.30
         if: matrix.install_cuda == true
         with:
           log-file-suffix: '${{matrix.os}}.txt'
 
-      # ── Linux: Vulkan SDK  ────────────────────────────
       - name: Install Vulkan SDK (Windows)
         if: matrix.install_vulkan == true
         uses: humbletim/install-vulkan-sdk@v1.2
@@ -66,7 +55,6 @@ jobs:
           version: 1.4.309.0
           cache: true
 
-      # ── Configure & Build ─────────────────────────────────────────────
       - name: Configure & Build (Linux / macOS)
         if: runner.os == 'Linux'
         run: |
@@ -89,7 +77,6 @@ jobs:
           cmake -B build-msvc -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
           cmake --build build-msvc --config Release -j $env:NUMBER_OF_PROCESSORS
 
-      # ── Smoke test: verify binaries run (no GPU / model required) ─────
       - name: Smoke test
         continue-on-error: true
         shell: bash
@@ -108,7 +95,6 @@ jobs:
           "$BIN/quantize$EXT"     2>&1 | head -3
           "$BIN/mp3-codec$EXT"    2>&1 | head -3
 
-      # ── Determine which release tag to upload to ──────────────────────
       - name: Resolve release tag
         id: tag
         shell: bash
@@ -119,7 +105,6 @@ jobs:
             echo "value=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
           fi
 
-      # ── Package binaries ──────────────────────────────────────────────
       - name: Package binaries (Linux)
         if: runner.os != 'Windows'
         run: |
@@ -147,7 +132,6 @@ jobs:
           }
           Compress-Archive -Path dist\* -DestinationPath "acestep-${{ matrix.name }}.zip"
 
-      # ── Upload archive to the GitHub release ──────────────────────────
       - name: Upload to release (Linux / macOS)
         if: runner.os != 'Windows'
         env:
