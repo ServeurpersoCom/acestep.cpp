@@ -1,0 +1,168 @@
+# Build and publish portable acestep-cpp binaries for every supported platform.
+name: Release Binaries
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'Release tag to attach binaries to (e.g. v0.1.0)'
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # ──────────── Linux ────────────────────────────────────────────
+          - name: linux-x64
+            os: ubuntu-22.04
+            cmake_flags: -DGGML_BLAS=ON
+            apt_extra: pkg-config libopenblas-dev
+            install_cuda: true
+            install_vulkan: true
+            
+          # ──────────── macOS ────────────────────────────────────────────
+          # macos-latest = arm64 (M-series); Metal + Accelerate auto-enabled
+          - name: macos-arm64-metal
+            os: macos-latest
+
+          # ──────────── Windows ──────────────────────────────────────────
+          # W.I.P.
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      # ── Linux: base build tools & optional apt packages ───────────────
+      - name: Install build tools (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake build-essential ${{ matrix.apt_extra || '' }}
+
+      # ── Linux: CUDA toolkit ────────────────
+      - name: Install CUDA toolkit (Linux)
+        uses: Jimver/cuda-toolkit@v0.2.30
+        if: matrix.install_cuda == true
+        with:
+          log-file-suffix: '${{matrix.os}}.txt'
+
+      # ── Linux: Vulkan SDK  ────────────────────────────
+      - name: Install Vulkan SDK (Windows)
+        if: matrix.install_vulkan == true
+        uses: humbletim/install-vulkan-sdk@v1.2
+        with:
+          version: 1.4.309.0
+          cache: true
+
+      # ── Configure & Build ─────────────────────────────────────────────
+      - name: Configure & Build (Linux / macOS)
+        if: runner.os == 'Linux'
+        run: |
+          ./buildall.sh
+          
+      - name: Configure & Build (Linux / macOS)
+        if: runner.os == 'macOS'
+        run: |
+          mkdir build
+          cd build
+          cmake ..
+          cmake --build . --config Release -j "$(nproc)"
+
+      - name: Configure & Build (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path build | Out-Null
+          Set-Location build
+          cmake -B build-msvc -DGGML_CPU_ALL_VARIANTS=ON -DGGML_CUDA=ON -DGGML_VULKAN=ON -DGGML_BACKEND_DL=ON
+          cmake --build build-msvc --config Release -j $env:NUMBER_OF_PROCESSORS
+
+      # ── Smoke test: verify binaries run (no GPU / model required) ─────
+      - name: Smoke test
+        continue-on-error: true
+        shell: bash
+        run: |
+          if [ "$RUNNER_OS" = "Windows" ]; then
+            BIN="build/Release"
+            EXT=".exe"
+          else
+            BIN="build"
+            EXT=""
+          fi
+          "$BIN/ace-qwen3$EXT"    2>&1 | head -5
+          "$BIN/dit-vae$EXT"      2>&1 | head -5
+          "$BIN/ace-understand$EXT" 2>&1 | head -5
+          "$BIN/neural-codec$EXT" 2>&1 | head -5
+          "$BIN/quantize$EXT"     2>&1 | head -3
+          "$BIN/mp3-codec$EXT"    2>&1 | head -3
+
+      # ── Determine which release tag to upload to ──────────────────────
+      - name: Resolve release tag
+        id: tag
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "release" ]; then
+            echo "value=${{ github.event.release.tag_name }}" >> $GITHUB_OUTPUT
+          else
+            echo "value=${{ inputs.release_tag }}" >> $GITHUB_OUTPUT
+          fi
+
+      # ── Package binaries ──────────────────────────────────────────────
+      - name: Package binaries (Linux)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp build/ace-qwen3 build/dit-vae build/ace-understand \
+             build/quantize build/neural-codec build/mp3-codec build/*.so dist/
+          tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
+
+      - name: Package binaries (macOS)
+        if: runner.os != 'macOS'
+        run: |
+          mkdir -p dist
+          cp build/ace-qwen3 build/dit-vae build/ace-understand \
+             build/quantize build/neural-codec build/mp3-codec dist/
+          tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
+
+      - name: Package binaries (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path dist | Out-Null
+          $bins = @('ace-qwen3','dit-vae','ace-understand','quantize','neural-codec','mp3-codec')
+          foreach ($b in $bins) {
+            Copy-Item "build\Release\$b.exe" dist\
+          }
+          Compress-Archive -Path dist\* -DestinationPath "acestep-${{ matrix.name }}.zip"
+
+      # ── Upload archive to the GitHub release ──────────────────────────
+      - name: Upload to release (Linux / macOS)
+        if: runner.os != 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${{ steps.tag.outputs.value }}" \
+            "acestep-${{ matrix.name }}.tar.gz" \
+            --clobber
+
+      - name: Upload to release (Windows)
+        if: runner.os == 'Windows'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: pwsh
+        run: |
+          gh release upload "${{ steps.tag.outputs.value }}" `
+            "acestep-${{ matrix.name }}.zip" `
+            --clobber
