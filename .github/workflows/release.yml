@@ -106,7 +106,7 @@ jobs:
           fi
 
       - name: Package binaries (Linux)
-        if: runner.os != 'Windows'
+        if: runner.os == 'Linux'
         run: |
           mkdir -p dist
           cp build/ace-qwen3 build/dit-vae build/ace-understand \
@@ -114,7 +114,7 @@ jobs:
           tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
 
       - name: Package binaries (macOS)
-        if: runner.os != 'macOS'
+        if: runner.os == 'macOS'
         run: |
           mkdir -p dist
           cp build/ace-qwen3 build/dit-vae build/ace-understand \
