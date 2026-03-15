@@ -42,6 +42,13 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq cmake build-essential ${{ matrix.apt_extra || '' }}
 
+      - name: ccache
+        if: runner.os != 'Windows'
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          create-symlink: true
+          key: ${{ github.job }}-${{ matrix.os }}
+
       - name: Install CUDA toolkit (Linux)
         uses: Jimver/cuda-toolkit@v0.2.30
         if: matrix.install_cuda == true
@@ -117,10 +124,14 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           mkdir -p dist
-          cp build/ace-qwen3 build/dit-vae build/ace-understand \
-             build/quantize build/neural-codec build/mp3-codec dist/
+          cd build
+          for bin in ace-qwen3 dit-vae ace-understand quantize neural-codec mp3-codec; do
+            install_name_tool -add_rpath @executable_path "$bin"
+          done
+          cp -P ace-qwen3 dit-vae ace-understand quantize neural-codec mp3-codec libacestep*.a libggml*.dylib ../dist/
+          cd ..
           tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
-
+          
       - name: Package binaries (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
