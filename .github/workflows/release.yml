@@ -128,7 +128,7 @@ jobs:
           for bin in ace-* quantize neural-codec mp3-codec; do
             install_name_tool -add_rpath @executable_path "$bin"
           done
-          cp -P ace-ace-* quantize neural-codec mp3-codec libacestep*.a libggml*.dylib ../dist/
+          cp -P ace-* quantize neural-codec mp3-codec libacestep*.a libggml*.dylib ../dist/
           cd ..
           tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
           
