@@ -37,8 +37,8 @@ jobs:
 
       - name: Smoke test
         run: |
-          ./build/ace-qwen3 --help 2>&1 | head -5
-          ./build/dit-vae --help 2>&1 | head -5
+          ./build/ace-lm --help 2>&1 | head -5
+          ./build/ace-synth --help 2>&1 | head -5
           ./build/quantize --help 2>&1 | head -3
 
   lint:
