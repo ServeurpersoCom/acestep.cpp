@@ -102,7 +102,7 @@ static bool parse_cot_and_lyrics(const std::string & text, AcePrompt * out) {
 
     std::string cap = get_field("caption");
     if (!cap.empty()) {
-        // Caption may span multiple lines (yaml word-wrap)
+        // Caption may span multiple lines (YAML word-wrap), read until next field
         size_t cp = cot.find("caption:");
         if (cp != std::string::npos) {
             cp += 8;
@@ -217,6 +217,8 @@ static std::vector<int> build_lm_prompt_uncond(BPETokenizer &    bpe,
 
 // Build CoT YAML content (matching Python yaml.dump sort_keys=True)
 static std::string build_cot_yaml(const AcePrompt & prompt) {
+    // Matches Python yaml.dump(allow_unicode=True, sort_keys=True) wrapping:
+    // line break + 2-space indent when current column exceeds 80.
     auto yaml_wrap = [](const std::string & key, const std::string & val) -> std::string {
         std::string result = key + ":";
         int         col    = (int) (key.size() + 1);

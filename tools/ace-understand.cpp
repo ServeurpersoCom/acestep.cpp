@@ -3,7 +3,7 @@
 // Audio -> VAE encode -> FSQ tokenize -> LM understand -> metadata + lyrics
 // Or:  audio_codes from JSON -> LM understand -> metadata + lyrics
 //
-// Output: request JSON with metadata + lyrics, reusable as ace-qwen3 input.
+// Output: request JSON with metadata + lyrics, reusable as ace-lm input.
 //
 // Usage: ./ace-understand --src-audio <wav> --model <gguf> --dit <gguf> --vae <gguf>
 //        ./ace-understand --request <json> --model <gguf>
@@ -32,7 +32,7 @@
 #include <vector>
 
 // Sampling: temperature -> top_k -> top_p -> softmax -> multinomial
-// Same as ace-qwen3.cpp but no compact vocab (full V). Greedy when temperature <= 0.
+// Same as ace-lm.cpp but no compact vocab (full V). Greedy when temperature <= 0.
 static int sample_top_k_p(float * logits, int V, float temperature, float top_p, int top_k, std::mt19937 & rng) {
     if (temperature <= 0.0f) {
         return (int) (std::max_element(logits, logits + V) - logits);
@@ -119,7 +119,7 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
     return 0;
 }
 
-// BPE decode (token IDs -> text). Same as ace-qwen3.cpp.
+// BPE decode (token IDs -> text). Same as ace-lm.cpp.
 // Skips audio code tokens, im_start/end. Expands think tags to text.
 static std::string bpe_decode(const BPETokenizer & bpe, const std::vector<int> & ids) {
     static std::unordered_map<int, uint8_t> byte_dec;
@@ -205,7 +205,7 @@ static void usage(const char * prog) {
             "  --request <json>        Request JSON with audio_codes field\n"
             "\n"
             "Required:\n"
-            "  --model <gguf>          5Hz LM GGUF (same model as ace-qwen3)\n"
+            "  --model <gguf>          5Hz LM GGUF (same model as ace-lm)\n"
             "\n"
             "Output:\n"
             "  -o <json>               Output JSON (default: stdout summary)\n"
@@ -306,7 +306,7 @@ int main(int argc, char ** argv) {
         request_dump(&req, stderr);
     }
 
-    // Resolve seed (same as ace-qwen3)
+    // Resolve seed (same as ace-lm)
     long long seed = req.seed;
     if (seed < 0) {
         std::random_device rd;
@@ -561,7 +561,7 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Result] lyrics: %zu chars\n", parsed.lyrics.size());
     }
 
-    // Step 7: write output JSON (reusable as dit-vae input with codes)
+    // Step 7: write output JSON (reusable as ace-synth input with codes)
     // Build audio_codes string from recovered codes (comma-separated)
     std::string codes_str;
     for (size_t i = 0; i < codes.size(); i++) {

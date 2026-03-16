@@ -6,7 +6,7 @@
 # understand:
 # input -> ace-understand.json (audio codes + metadata)
 #
-# dit-vae:
+# ace-synth:
 # ace-understand.json -> output0.wav .. output3.wav
 
 set -eu
@@ -29,7 +29,7 @@ sed -i \
     -e 's/"audio_cover_strength": *[0-9.]*/"audio_cover_strength": 0.04/' \
     ace-understand.json
 
-../build/dit-vae \
+../build/ace-synth \
     --src-audio "$input" \
     --request ace-understand.json \
     --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \

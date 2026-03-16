@@ -25,7 +25,7 @@ cmake .. -DGGML_VULKAN=ON
 cmake --build . --config Release -j$(nproc)
 ```
 
-Builds five binaries: `ace-qwen3` (LLM), `dit-vae` (DiT + VAE), `ace-understand` (reverse: audio -> metadata), `neural-codec` (VAE encode/decode) and `mp3-codec` (MP3 encoder/decoder).
+Builds five binaries: `ace-lm` (LLM), `ace-synth` (DiT + VAE), `ace-understand` (reverse: audio -> metadata), `neural-codec` (VAE encode/decode) and `mp3-codec` (MP3 encoder/decoder).
 
 ## Models
 
@@ -74,7 +74,7 @@ config metadata so no external file is needed at runtime.
 
 ## Quick start
 
-`ace-qwen3` generates lyrics and audio codes, `dit-vae` synthesizes audio.
+`ace-lm` generates lyrics and audio codes, `ace-synth` synthesizes audio.
 The input JSON is never modified. Output is always numbered: `request0.json`.
 
 ```bash
@@ -88,12 +88,12 @@ cat > /tmp/request.json << 'EOF'
 EOF
 
 # LLM: request.json -> request0.json (enriched with metadata + lyrics + codes)
-./build/ace-qwen3 \
+./build/ace-lm \
     --request /tmp/request.json \
     --model models/acestep-5Hz-lm-4B-Q8_0.gguf
 
 # DiT+VAE: request0.json -> request00.mp3
-./build/dit-vae \
+./build/ace-synth \
     --request /tmp/request0.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
@@ -104,7 +104,7 @@ With a LoRA adapter (PEFT directory or ComfyUI single file):
 
 ```bash
 # PEFT directory (contains adapter_model.safetensors + adapter_config.json)
-./build/dit-vae \
+./build/ace-synth \
     --request /tmp/request0.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
@@ -112,7 +112,7 @@ With a LoRA adapter (PEFT directory or ComfyUI single file):
     --lora /path/to/lora-adapter
 
 # ComfyUI single .safetensors file (alpha baked in, no config needed)
-./build/dit-vae \
+./build/ace-synth \
     --request /tmp/request0.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
@@ -125,7 +125,7 @@ Generate multiple songs at once with `--batch`:
 ```bash
 # LLM: 2 LM variations x 2 DiT variations = 4 WAVs total
 # -> request0.json, request1.json (different lyrics/codes, seeds auto+0, auto+1)
-./build/ace-qwen3 \
+./build/ace-lm \
     --request /tmp/request.json \
     --model models/acestep-5Hz-lm-4B-Q8_0.gguf \
     --batch 2
@@ -133,7 +133,7 @@ Generate multiple songs at once with `--batch`:
 # DiT+VAE: (2 DiT variations of LM output 1 and 2)
 # -> request0.json -> request00.wav, request01.wav
 # -> request1.json -> request10.wav, request11.wav
-./build/dit-vae \
+./build/ace-synth \
     --request /tmp/request0.json /tmp/request1.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit models/acestep-v15-turbo-Q8_0.gguf \
@@ -158,7 +158,7 @@ cat > /tmp/cover.json << 'EOF'
 }
 EOF
 
-./build/dit-vae \
+./build/ace-synth \
     --src-audio song.wav
     --request /tmp/cover.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
@@ -210,7 +210,7 @@ so the single-pass "Generate tokens" path is used. No lyrics generation.
 The DiT was trained with this exact string as the no-vocal condition.
 
 **Passthrough** (`audio_codes` present): LLM is skipped entirely.
-Run `dit-vae` to decode existing codes. See `examples/dit-only.json`.
+Run `ace-synth` to decode existing codes. See `examples/dit-only.json`.
 
 **Reference audio** (`--src-audio` on CLI): no LLM needed. The source audio
 (WAV or MP3, any sample rate) is resampled to 48kHz, VAE-encoded to latent
@@ -243,7 +243,7 @@ cat > /tmp/repaint.json << 'EOF'
 }
 EOF
 
-./build/dit-vae \
+./build/ace-synth \
     --src-audio song.wav \
     --request /tmp/repaint.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
@@ -268,7 +268,7 @@ cat > /tmp/lego.json << 'EOF'
 }
 EOF
 
-./build/dit-vae \
+./build/ace-synth \
     --src-audio backing-track.wav \
     --request /tmp/lego.json \
     --text-encoder models/Qwen3-Embedding-0.6B-Q8_0.gguf \
@@ -312,7 +312,7 @@ the LLM fills them, or a sensible runtime default is applied.
 }
 ```
 
-### Text conditioning (ace-qwen3 + dit-vae)
+### Text conditioning (ace-lm + ace-synth)
 
 **`caption`** (string, required)
 Natural language description of the music style, mood, instruments, etc.
@@ -357,8 +357,8 @@ RNG seed. Resolved once at startup to a random value if -1. Batch elements
 use `seed+0`, `seed+1`, ... `seed+N-1`.
 
 **`audio_codes`** (string, default `""`)
-Comma-separated FSQ token IDs produced by ace-qwen3. When non-empty, the
-entire LLM pass is skipped and dit-vae decodes these codes directly
+Comma-separated FSQ token IDs produced by ace-lm. When non-empty, the
+entire LLM pass is skipped and ace-synth decodes these codes directly
 (passthrough mode).
 
 **`audio_cover_strength`** (float, default `0.5`)
@@ -385,7 +385,7 @@ instruction `"Generate the {TRACK} track based on the audio context:"`.
 `audio_cover_strength` is forced to 1.0 (all steps see the source audio).
 Use `inference_steps=50`, `guidance_scale=1.0`, `shift=1.0` for base model.
 
-### LM sampling (ace-qwen3)
+### LM sampling (ace-lm)
 
 **`lm_temperature`** (float, default `0.85`)
 Sampling temperature for both phase 1 (lyrics/metadata) and phase 2 (audio
@@ -414,7 +414,7 @@ the user caption is preserved verbatim. Only matters when the LLM runs
 phase 1 (i.e. some metadata is missing). When all metadata is provided
 phase 1 is skipped and the caption is never touched regardless of this flag.
 
-### DiT flow matching (dit-vae)
+### DiT flow matching (ace-synth)
 
 **`inference_steps`** (int, default `8`)
 Number of diffusion denoising steps. Turbo preset: `8`. SFT preset: `50`.
@@ -430,10 +430,10 @@ Flow-matching schedule shift. Controls the timestep distribution.
 Turbo preset: `inference_steps=8, shift=3.0` (guidance_scale auto-resolved to 1.0).
 SFT preset: `inference_steps=50, guidance_scale=1.0, shift=1.0`.
 
-## ace-qwen3 reference
+## ace-lm reference
 
 ```
-Usage: ace-qwen3 --request <json> --model <gguf> [options]
+Usage: ace-lm --request <json> --model <gguf> [options]
 
 Required:
   --request <json>       Input request JSON
@@ -458,13 +458,13 @@ Batching is always active (default N=1). Model weights are read once per
 decode step for all N sequences. Phase 1 (CoT) and Phase 2 (audio codes)
 are both batched with independent seeds (seed+0 .. seed+N-1).
 
-## dit-vae reference
+## ace-synth reference
 
 ```
-Usage: dit-vae --request <json...> --text-encoder <gguf> --dit <gguf> --vae <gguf> [options]
+Usage: ace-synth --request <json...> --text-encoder <gguf> --dit <gguf> --vae <gguf> [options]
 
 Required:
-  --request <json...>     One or more request JSONs (from ace-qwen3 --request)
+  --request <json...>     One or more request JSONs (from ace-lm --request)
   --text-encoder <gguf>   Text encoder GGUF file
   --dit <gguf>            DiT GGUF file
   --vae <gguf>            VAE GGUF file
@@ -577,7 +577,7 @@ neural-codec --vae models/vae-BF16.gguf --decode -i song.nac4 -o song_decoded.wa
 ## mp3-codec reference
 
 Standalone MIT-licensed MPEG1 Layer III encoder and decoder. No external
-dependencies. The encoder is used by `dit-vae` for MP3 output. The decoder
+dependencies. The encoder is used by `ace-synth` for MP3 output. The decoder
 uses minimp3 (CC0). Reads WAV or MP3, writes WAV or MP3 (auto-detected
 from output extension).
 
@@ -599,7 +599,7 @@ Examples:
 ## ace-understand reference
 
 Reverse pipeline: audio (or pre-existing audio codes) -> LM understand ->
-metadata + lyrics. The output JSON is reusable as ace-qwen3 or dit-vae input.
+metadata + lyrics. The output JSON is reusable as ace-lm or ace-synth input.
 
 Two input modes: `--src-audio` runs the full chain (VAE encode + FSQ tokenize +
 LM), `--request` with an `audio_codes` field skips straight to the LM.
@@ -616,7 +616,7 @@ Code input (skip VAE + tokenizer):
   --request <json>        Request JSON with audio_codes field
 
 Required:
-  --model <gguf>          5Hz LM GGUF (same model as ace-qwen3)
+  --model <gguf>          5Hz LM GGUF (same model as ace-lm)
 
 Output:
   -o <json>               Output JSON (default: stdout summary)
@@ -637,14 +637,14 @@ Debug:
 ## Architecture
 
 ```
-ace-qwen3 (Qwen3 causal LM, 0.6B/1.7B/4B)
+ace-lm (Qwen3 causal LM, 0.6B/1.7B/4B)
   Phase 1 (if needed): CoT generates bpm, keyscale, timesignature, lyrics
   Phase 2: audio codes (5Hz tokens, FSQ vocabulary)
   Both phases batched: N sequences per forward, weights read once
   CFG with dual KV cache per batch element (cond + uncond)
   Output: request0.json .. requestN-1.json
 
-dit-vae
+ace-synth
   BPE tokenize
   Qwen3-Embedding (28L text encoder)
   CondEncoder (lyric 8L + timbre 4L + text_proj)
@@ -685,7 +685,7 @@ Third-party interfaces (under active development, waiting for API and codec to s
 
 ## LM specifics
 
-ace-qwen3 is not a general-purpose chat engine. It is a two-phase autoregressive
+ace-lm is not a general-purpose chat engine. It is a two-phase autoregressive
 pipeline specialized for ACE-Step music generation.
 
 Phase 1 (CoT) generates structured metadata (bpm, keyscale, timesignature, caption,

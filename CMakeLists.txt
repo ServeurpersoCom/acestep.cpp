@@ -75,18 +75,20 @@ endmacro()
 # Core library (shared between binaries)
 add_library(acestep-core STATIC
     src/request.cpp
+    src/pipeline-lm.cpp
+    src/pipeline-synth.cpp
 )
 link_ggml_backends(acestep-core)
 
-# dit-vae: full pipeline (text-enc + cond + dit + vae + wav)
-add_executable(dit-vae tools/dit-vae.cpp)
-target_link_libraries(dit-vae PRIVATE acestep-core)
-link_ggml_backends(dit-vae)
+# ace-synth: full pipeline (text-enc + cond + dit + vae + wav)
+add_executable(ace-synth tools/ace-synth.cpp)
+target_link_libraries(ace-synth PRIVATE acestep-core)
+link_ggml_backends(ace-synth)
 
-# ace-qwen3: LLM inference (CoT + audio codes)
-add_executable(ace-qwen3 tools/ace-qwen3.cpp)
-target_link_libraries(ace-qwen3 PRIVATE acestep-core)
-link_ggml_backends(ace-qwen3)
+# ace-lm: LLM inference (CoT + audio codes)
+add_executable(ace-lm tools/ace-lm.cpp)
+target_link_libraries(ace-lm PRIVATE acestep-core)
+link_ggml_backends(ace-lm)
 
 add_executable(ace-understand tools/ace-understand.cpp)
 target_link_libraries(ace-understand PRIVATE acestep-core)
@@ -101,7 +103,7 @@ add_executable(neural-codec tools/neural-codec.cpp)
 link_ggml_backends(neural-codec)
 
 # mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
-# The mp3/ headers are header-only and usable by dit-vae too via #include "mp3/mp3enc.h"
+# The mp3/ headers are header-only and usable by ace-synth too via #include "mp3/mp3enc.h"
 add_executable(mp3-codec tools/mp3-codec.cpp)
 target_include_directories(mp3-codec PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/src

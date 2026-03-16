@@ -98,7 +98,7 @@ def codes_to_python_format(codes_csv):
 # GGML runner
 
 def run_ggml(dump_dir, req, cfg, gguf_path, lora_dir=None):
-    ggml_bin = "../build/dit-vae"
+    ggml_bin = "../build/ace-synth"
     if not os.path.isfile(ggml_bin):
         print(f"[GGML] binary not found: {ggml_bin}")
         return False

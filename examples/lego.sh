@@ -12,11 +12,11 @@
 set -eu
 
 # Phase 1: generate a source track with the simple prompt
-../build/ace-qwen3 \
+../build/ace-lm \
     --request simple.json \
     --model ../models/acestep-5Hz-lm-4B-Q8_0.gguf
 
-../build/dit-vae \
+../build/ace-synth \
     --request simple0.json \
     --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit ../models/acestep-v15-turbo-Q8_0.gguf \
@@ -24,7 +24,7 @@ set -eu
     --wav
 
 # Phase 2: lego guitar on the generated track (base model required)
-../build/dit-vae \
+../build/ace-synth \
     --src-audio simple00.wav \
     --request lego.json \
     --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \

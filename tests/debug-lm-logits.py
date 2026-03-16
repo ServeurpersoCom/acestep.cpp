@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Compare first-token logits: GGML vs PyTorch for ace-qwen3 LM"""
+"""Compare first-token logits: GGML vs PyTorch for ace-lm LM"""
 import sys, struct, json, os
 import numpy as np
 
@@ -138,7 +138,7 @@ def test_pytorch_logits(model_dir, prompt_tokens):
 def main():
     if len(sys.argv) < 4:
         print("Usage: debug-lm-logits.py <model_dir> <ggml_logits.bin> <tokens.csv>")
-        print("  1) ace-qwen3 --dump-logits logits.bin --dump-tokens tokens.csv ...")
+        print("  1) ace-lm --dump-logits logits.bin --dump-tokens tokens.csv ...")
         print("  2) python3 tests/debug-lm-logits.py checkpoints/acestep-5Hz-lm-0.6B logits.bin tokens.csv")
         return
 
