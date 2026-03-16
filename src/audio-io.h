@@ -259,6 +259,7 @@ static bool audio_write_wav(const char * path, const float * audio, int T_audio,
     fwrite(&data_size, 4, 1, f);
 
     // buffer all samples then write once (avoids millions of fwrite syscalls)
+    // audio is pre-normalized to 0 dBFS by audio_write(), no clamp needed
     const float * L   = audio;
     const float * R   = audio + T_audio;
     short *       pcm = (short *) malloc((size_t) T_audio * 2 * sizeof(short));
@@ -267,22 +268,8 @@ static bool audio_write_wav(const char * path, const float * audio, int T_audio,
         return false;
     }
     for (int t = 0; t < T_audio; t++) {
-        float lf = L[t];
-        float rf = R[t];
-        if (lf > 1.0f) {
-            lf = 1.0f;
-        }
-        if (lf < -1.0f) {
-            lf = -1.0f;
-        }
-        if (rf > 1.0f) {
-            rf = 1.0f;
-        }
-        if (rf < -1.0f) {
-            rf = -1.0f;
-        }
-        pcm[t * 2 + 0] = (short) (lf * 32767.0f);
-        pcm[t * 2 + 1] = (short) (rf * 32767.0f);
+        pcm[t * 2 + 0] = (short) (L[t] * 32767.0f);
+        pcm[t * 2 + 1] = (short) (R[t] * 32767.0f);
     }
     fwrite(pcm, 2, (size_t) T_audio * 2, f);
     free(pcm);
@@ -374,7 +361,24 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
 // Write audio, auto-detect format from extension.
 // .mp3 -> MP3 encoding at the given kbps (default 128).
 // .wav (or anything else) -> WAV 16-bit PCM.
-static bool audio_write(const char * path, const float * audio, int T_audio, int sr, int kbps) {
+// Peak-normalizes to 0 dBFS in-place before writing (single normalization point).
+static bool audio_write(const char * path, float * audio, int T_audio, int sr, int kbps) {
+    // 0 dBFS peak normalization: scale so max |sample| = 1.0
+    int   n_total = T_audio * 2;
+    float peak    = 0.0f;
+    for (int i = 0; i < n_total; i++) {
+        float a = audio[i] < 0.0f ? -audio[i] : audio[i];
+        if (a > peak) {
+            peak = a;
+        }
+    }
+    if (peak > 1e-8f && peak != 1.0f) {
+        float gain = 1.0f / peak;
+        for (int i = 0; i < n_total; i++) {
+            audio[i] *= gain;
+        }
+    }
+
     if (audio_io_ends_with(path, ".mp3")) {
         return audio_write_mp3(path, audio, T_audio, sr, (kbps > 0) ? kbps : 128);
     }

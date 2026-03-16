@@ -12,6 +12,7 @@
 #include <cstdio>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Prefix tree for FSM constrained decoding
@@ -69,6 +70,23 @@ struct MetadataFSM {
     int              think_end_tok = TOKEN_THINK_END;
     int              vocab_size    = 0;
 
+    // Token decoding (for caption transition detection)
+    BPETokenizer *                   bpe_ptr = nullptr;
+    std::unordered_map<int, uint8_t> byte_dec;  // BPE codepoint -> raw byte
+
+    // Caption transition: text-based field detection (matches Python FSM)
+    // When LLM generates a newline in caption followed by a non-space char,
+    // we enter caption_ending mode and accumulate text until we see ":".
+    // Then we parse the field name and jump directly to the VALUE state.
+    bool        caption_ending = false;
+    std::string pending_field_name;
+
+    // Token injection for user-provided field values.
+    // When active, apply_mask whitelists only the next token, update consumes it.
+    // After the queue is exhausted, we transition to the next field.
+    std::vector<int> inject_queue;
+    std::string      forced_language;  // set by force_language(), injected at LANGUAGE_VALUE
+
     static std::vector<int> tokenize_strip(BPETokenizer & bpe, const std::string & full, const std::string & prefix) {
         std::vector<int> full_tok = bpe_encode(&bpe, full, false);
         std::vector<int> pre_tok  = bpe_encode(&bpe, prefix, false);
@@ -89,8 +107,38 @@ struct MetadataFSM {
         }
     }
 
+    // Decode a single token ID to its raw text representation.
+    // Uses the byte_dec reverse map built during init().
+    std::string decode_token(int id) const {
+        if (!bpe_ptr || id < 0 || id >= (int) bpe_ptr->id_to_str.size()) {
+            return "";
+        }
+        const std::string & s = bpe_ptr->id_to_str[id];
+        std::string         result;
+        const char *        p = s.c_str();
+        while (*p) {
+            int  adv;
+            int  cp = utf8_codepoint(p, &adv);
+            auto it = byte_dec.find(cp);
+            if (it != byte_dec.end()) {
+                result += (char) it->second;
+            }
+            p += adv;
+        }
+        return result;
+    }
+
     void init(BPETokenizer & bpe, int vsize) {
-        vocab_size  = vsize;
+        vocab_size = vsize;
+        bpe_ptr    = &bpe;
+
+        // Build reverse byte map for decode_token()
+        for (int b = 0; b < 256; b++) {
+            int adv;
+            int cp       = utf8_codepoint(bpe.byte2str[b].c_str(), &adv);
+            byte_dec[cp] = (uint8_t) b;
+        }
+
         auto nl     = bpe_encode(&bpe, "\n", false);
         newline_tok = nl.empty() ? -1 : nl[0];
 
@@ -119,11 +167,11 @@ struct MetadataFSM {
         }
         // Keyscale
         {
-            const char *             notes[] = { "A", "B", "C", "D", "E", "F", "G" };
-            const char *             accs[]  = { "", "b", "#" };
-            const char *             modes[] = { "major",      "minor",          "dorian",       "phrygian",  "lydian",
-                                                 "mixolydian", "aeolian",        "locrian",      "chromatic", "blues",
-                                                 "pentatonic", "harmonic minor", "melodic minor" };
+            // Keyscale: 7 notes x 5 accidentals x 2 modes = 70 values
+            // Matches Python constants.py: KEYSCALE_NOTES x KEYSCALE_ACCIDENTALS x KEYSCALE_MODES
+            const char * notes[] = { "A", "B", "C", "D", "E", "F", "G" };
+            const char * accs[]  = { "", "#", "b", "\xe2\x99\xaf", "\xe2\x99\xad" };  // empty, #, b, U+266F, U+266D
+            const char * modes[] = { "major", "minor" };
             std::vector<std::string> vals;
             for (auto n : notes) {
                 for (auto a : accs) {
@@ -134,10 +182,14 @@ struct MetadataFSM {
             }
             build_value_tree(bpe, keyscale_tree, "keyscale:", vals);
         }
-        // Language
+        // Language: 51 codes matching Python constants.py VALID_LANGUAGES
         {
-            std::vector<std::string> vals = { "en", "zh", "ja", "ko", "es", "fr", "de", "uk",     "ru",
-                                              "pt", "it", "ar", "tr", "pl", "sv", "nl", "unknown" };
+            std::vector<std::string> vals = {
+                "ar", "az", "bg", "bn", "ca", "cs", "da", "de", "el", "en",  "es", "fa",      "fi",
+                "fr", "he", "hi", "hr", "ht", "hu", "id", "is", "it", "ja",  "ko", "la",      "lt",
+                "ms", "ne", "nl", "no", "pa", "pl", "pt", "ro", "ru", "sa",  "sk", "sr",      "sv",
+                "sw", "ta", "te", "th", "tl", "tr", "uk", "ur", "vi", "yue", "zh", "unknown",
+            };
             build_value_tree(bpe, language_tree, "language:", vals);
         }
         // Time signature
@@ -159,12 +211,21 @@ struct MetadataFSM {
         state                   = BPM_NAME;
         name_pos                = 0;
         caption_pending_newline = false;
+        caption_ending          = false;
+        pending_field_name.clear();
         value_acc.clear();
+        inject_queue.clear();
+        // forced_language is NOT cleared: it persists across resets
+        // (set once at setup, applies to every generate call)
     }
 
-    // Force FSM to only allow a specific language value
+    // Force FSM to inject a specific language value.
+    // The value is tokenized and force-injected when the FSM reaches
+    // LANGUAGE_VALUE, matching the Python FSM's token injection behavior.
+    // Also rebuilds the prefix tree as a safety net.
     void force_language(BPETokenizer & bpe, const std::string & lang) {
-        language_tree = PrefixTree();
+        forced_language = lang;
+        language_tree   = PrefixTree();
         build_value_tree(bpe, language_tree, "language:", { lang });
     }
 
@@ -234,6 +295,19 @@ struct MetadataFSM {
             return;
         }
 
+        // Token injection active: whitelist only the next queued token.
+        // This is the C++ equivalent of Python's user_field_token_queue.
+        if (!inject_queue.empty()) {
+            int forced = inject_queue[0];
+            for (int v = 0; v < vocab_size; v++) {
+                if (v != forced) {
+                    logits[v] = -1e9f;
+                }
+            }
+            return;
+        }
+
+        // Force name tokens for the current field
         const std::vector<int> * name = current_name_tokens();
         if (name && name_pos < (int) name->size()) {
             int forced = (*name)[name_pos];
@@ -245,6 +319,25 @@ struct MetadataFSM {
             return;
         }
 
+        // Language injection: when entering LANGUAGE_VALUE with a forced
+        // language, tokenize " value\n" and activate inject queue.
+        // Matches Python: user_provided_metadata["language"] -> token queue.
+        if (state == LANGUAGE_VALUE && !forced_language.empty() && bpe_ptr) {
+            std::string      text  = "language:" + forced_language + "\n";
+            std::vector<int> vtoks = tokenize_strip(*bpe_ptr, text, "language:");
+            if (!vtoks.empty()) {
+                inject_queue = vtoks;
+                int forced   = inject_queue[0];
+                for (int v = 0; v < vocab_size; v++) {
+                    if (v != forced) {
+                        logits[v] = -1e9f;
+                    }
+                }
+                return;
+            }
+        }
+
+        // Prefix tree constrained values (bpm, duration, keyscale, language, timesig)
         const PrefixTree * tree = current_value_tree();
         if (tree) {
             const std::vector<int> * allowed = tree->get(value_acc);
@@ -271,6 +364,8 @@ struct MetadataFSM {
             return;
         }
 
+        // Caption value: block audio codes, allow everything else.
+        // Also applies when caption_ending (LLM generating next field name).
         if (state == CAPTION_VALUE) {
             for (int v = AUDIO_CODE_BASE; v < AUDIO_CODE_BASE + AUDIO_CODE_COUNT; v++) {
                 if (v < vocab_size) {
@@ -295,18 +390,72 @@ struct MetadataFSM {
             return;
         }
 
-        // Caption YAML continuation: after a \n in caption, check if the next
-        // token starts "duration:" (end of caption) or is a continuation line.
+        // Inject queue: consume the forced token, transition when exhausted.
+        // Matches Python: user_field_token_queue.pop(0), then next_state.
+        if (!inject_queue.empty()) {
+            inject_queue.erase(inject_queue.begin());
+            if (inject_queue.empty()) {
+                // Injection complete: transition to next field
+                state    = next_name_state();
+                name_pos = 0;
+                value_acc.clear();
+            }
+            return;
+        }
+
+        // Caption YAML continuation: after a \n in caption, decode the token
+        // text and check if it starts with space/tab (continuation) or not
+        // (new field name). Matches Python: caption_after_newline logic.
         if (caption_pending_newline) {
             caption_pending_newline = false;
-            if (!duration_name.empty() && token == duration_name[0]) {
-                // End of caption, start matching "duration:" field name
-                state    = DURATION_NAME;
-                name_pos = 1;  // already consumed first token
-                value_acc.clear();
+            std::string tok_text    = decode_token(token);
+            if (!tok_text.empty() && tok_text[0] != ' ' && tok_text[0] != '\t') {
+                // Non-indented: LLM is generating a field name (like "duration:")
+                caption_ending     = true;
+                pending_field_name = tok_text;
+                // Check if we already have a colon (short token like "d:")
+                if (tok_text.find(':') != std::string::npos) {
+                    // Already got the full field name, parse it
+                    std::string field = pending_field_name.substr(0, pending_field_name.find(':'));
+                    // Trim whitespace
+                    while (!field.empty() && field.back() == ' ') {
+                        field.pop_back();
+                    }
+                    State target = field_name_to_value_state(field);
+                    if (target != DISABLED) {
+                        state    = target;
+                        name_pos = 0;
+                        value_acc.clear();
+                        caption_ending = false;
+                        pending_field_name.clear();
+                    }
+                }
                 return;
             }
-            // Continuation line (e.g. YAML wrap with leading spaces), stay in CAPTION_VALUE
+            // Continuation line (YAML wrap with leading spaces), stay in CAPTION_VALUE
+            return;
+        }
+
+        // Caption ending: accumulate decoded text until ":" detected,
+        // then parse field name and jump to VALUE state.
+        // Matches Python: caption_ending + pending_field_name logic.
+        if (caption_ending) {
+            std::string tok_text = decode_token(token);
+            pending_field_name += tok_text;
+            if (tok_text.find(':') != std::string::npos || pending_field_name.find(':') != std::string::npos) {
+                std::string field = pending_field_name.substr(0, pending_field_name.find(':'));
+                while (!field.empty() && field.back() == ' ') {
+                    field.pop_back();
+                }
+                State target = field_name_to_value_state(field);
+                if (target != DISABLED) {
+                    state    = target;
+                    name_pos = 0;
+                    value_acc.clear();
+                    caption_ending = false;
+                    pending_field_name.clear();
+                }
+            }
             return;
         }
 
@@ -356,7 +505,6 @@ struct MetadataFSM {
             if (token == newline_tok) {
                 // Don't transition yet: the caption may wrap (YAML continuation
                 // lines start with spaces). Peek at next token via a flag.
-                // We set pending_newline and check in the NEXT update call.
                 caption_pending_newline = true;
             }
             return;
@@ -366,6 +514,24 @@ struct MetadataFSM {
             state = CODES;
             return;
         }
+    }
+
+    // Map field name text to the corresponding VALUE state.
+    // Used by caption_ending to jump directly when ":" is detected.
+    State field_name_to_value_state(const std::string & field) const {
+        if (field == "duration") {
+            return DURATION_VALUE;
+        }
+        if (field == "keyscale") {
+            return KEYSCALE_VALUE;
+        }
+        if (field == "language") {
+            return LANGUAGE_VALUE;
+        }
+        if (field == "timesignature") {
+            return TIMESIG_VALUE;
+        }
+        return DISABLED;
     }
 };
 

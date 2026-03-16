@@ -11,13 +11,13 @@
 set -eu
 
 # Phase 1: LM generates 2 code variations
-../build/ace-qwen3 \
+../build/ace-lm \
     --request simple.json \
     --model ../models/acestep-5Hz-lm-4B-Q8_0.gguf \
     --batch 2
 
 # Phase 2: DiT+VAE generates 2 noise variations per LM output (single call)
-../build/dit-vae \
+../build/ace-synth \
     --request simple0.json simple1.json \
     --text-encoder ../models/Qwen3-Embedding-0.6B-Q8_0.gguf \
     --dit ../models/acestep-v15-turbo-Q8_0.gguf \

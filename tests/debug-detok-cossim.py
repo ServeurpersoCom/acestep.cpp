@@ -1,20 +1,20 @@
 #!/usr/bin/env python3
 """Compare C++ vs Python detokenizer, step by step.
 
-Runs dit-vae with --dump, then Python detokenizer, and compares.
+Runs ace-synth with --dump, then Python detokenizer, and compares.
 Also validates Python intermediates against manual math to isolate bugs.
 
 Usage:
     ./debug-detok-cossim.py
 
-Expects request0.json in CWD with audio_codes (run ace-qwen3 first).
+Expects request0.json in CWD with audio_codes (run ace-lm first).
 """
 import sys, os, json, struct, subprocess, shutil
 import numpy as np
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(SCRIPT_DIR)
-GGML_BIN    = os.path.join(ROOT, "build", "dit-vae")
+GGML_BIN    = os.path.join(ROOT, "build", "ace-synth")
 DIT_GGUF    = os.path.join(ROOT, "models", "acestep-v15-sft-BF16.gguf")
 QWEN_GGUF   = os.path.join(ROOT, "models", "Qwen3-Embedding-0.6B-BF16.gguf")
 VAE_GGUF    = os.path.join(ROOT, "models", "vae-BF16.gguf")
@@ -71,7 +71,7 @@ def run_ggml(request_path, dump_dir):
         "--request", request_path,
         "--dump", dump_dir,
     ]
-    print(f"[GGML] Running dit-vae...")
+    print(f"[GGML] Running ace-synth...")
     r = subprocess.run(cmd, stderr=subprocess.PIPE, text=True)
     detok_path = os.path.join(dump_dir, "detok_output.bin")
     if not os.path.isfile(detok_path):
@@ -91,7 +91,7 @@ def main():
     request_path = "request0.json"
     req = json.load(open(request_path))
     if 'audio_codes' not in req or not req['audio_codes']:
-        print("ERROR: request has no audio_codes (run ace-qwen3 first)")
+        print("ERROR: request has no audio_codes (run ace-lm first)")
         return 1
 
     codes = [int(x) for x in req['audio_codes'].split(',')]
