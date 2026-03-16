@@ -95,8 +95,8 @@ jobs:
             BIN="build"
             EXT=""
           fi
-          "$BIN/ace-qwen3$EXT"    2>&1 | head -5
-          "$BIN/dit-vae$EXT"      2>&1 | head -5
+          "$BIN/ace-lm$EXT"    2>&1 | head -5
+          "$BIN/ace-synth$EXT"      2>&1 | head -5
           "$BIN/ace-understand$EXT" 2>&1 | head -5
           "$BIN/neural-codec$EXT" 2>&1 | head -5
           "$BIN/quantize$EXT"     2>&1 | head -3
@@ -116,7 +116,7 @@ jobs:
         if: runner.os == 'Linux'
         run: |
           mkdir -p dist
-          cp build/ace-qwen3 build/dit-vae build/ace-understand \
+          cp build/ace-* \
              build/quantize build/neural-codec build/mp3-codec build/*.so dist/
           tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
 
@@ -125,10 +125,10 @@ jobs:
         run: |
           mkdir -p dist
           cd build
-          for bin in ace-qwen3 dit-vae ace-understand quantize neural-codec mp3-codec; do
+          for bin in ace-* quantize neural-codec mp3-codec; do
             install_name_tool -add_rpath @executable_path "$bin"
           done
-          cp -P ace-qwen3 dit-vae ace-understand quantize neural-codec mp3-codec libacestep*.a libggml*.dylib ../dist/
+          cp -P ace-ace-* quantize neural-codec mp3-codec libacestep*.a libggml*.dylib ../dist/
           cd ..
           tar -C dist -czf "acestep-${{ matrix.name }}.tar.gz" .
           
@@ -137,7 +137,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Path dist | Out-Null
-          $bins = @('ace-qwen3','dit-vae','ace-understand','quantize','neural-codec','mp3-codec')
+          $bins = @('ace-lm','ace-synth','ace-understand','quantize','neural-codec','mp3-codec')
           foreach ($b in $bins) {
             Copy-Item "build\Release\$b.exe" dist\
           }
