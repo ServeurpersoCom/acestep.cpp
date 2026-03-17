@@ -29,10 +29,6 @@ permissions:
   contents: write
 
 jobs:
-
-  # ─────────────────────────────────────────────
-  # Linux x64
-  # ─────────────────────────────────────────────
   build-linux:
     name: Build · linux-x64
     runs-on: ubuntu-22.04
@@ -107,9 +103,6 @@ jobs:
             "acestep-linux-x64.tar.gz" \
             --clobber
 
-  # ─────────────────────────────────────────────
-  # macOS arm64 (Metal)
-  # ─────────────────────────────────────────────
   build-mac:
     name: Build · macos-arm64-metal
     runs-on: macos-latest
@@ -175,9 +168,6 @@ jobs:
             "acestep-macos-arm64-metal.tar.gz" \
             --clobber
 
-  # ─────────────────────────────────────────────
-  # Windows x64
-  # ─────────────────────────────────────────────
   build-windows:
     name: Build · windows-x64
     runs-on: windows-latest
@@ -189,7 +179,6 @@ jobs:
         with:
           submodules: recursive
 
-      # Cache the CUDA toolkit installation (~5 GB, takes 20-30 min without cache)
       - name: Cache CUDA toolkit
         id: cache-cuda
         uses: actions/cache@v4
@@ -203,14 +192,12 @@ jobs:
         with:
           log-file-suffix: 'windows-latest.txt'
 
-      # Vulkan SDK has built-in cache support
       - name: Install Vulkan SDK
         uses: humbletim/install-vulkan-sdk@v1.2
         with:
           version: 1.4.309.0
           cache: true
 
-      # Cache the CMake build directory to speed up incremental builds
       - name: Cache build directory
         uses: actions/cache@v4
         with:
