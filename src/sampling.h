@@ -36,7 +36,6 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
     // Pre-allocated buffers (avoid malloc/free per call)
     static thread_local std::vector<float>     tmp_buf;
     static thread_local std::vector<TokenProb> sorted_buf;
-    static thread_local std::vector<float>     probs_buf;
 
     // 1. temperature (matches nano-vLLM: logits.float().div_(temperatures))
     float inv_temp = 1.0f / temperature;
@@ -57,13 +56,38 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
         }
     }
 
-    // 3. top_p: nucleus filter: only sort surviving (non-masked) tokens
+    // 3. top_p: nucleus filter.
+    // the expensive part is sorting, not softmax. we compute the full-vocab
+    // softmax first (two O(V) passes), then only sort the tokens above a
+    // logit cutoff. the cumsum uses full-vocab-normalized probabilities, so
+    // the nucleus boundary is identical to sorting all V tokens (vLLM).
     if (top_p > 0.0f && top_p < 1.0f) {
-        // Compact: collect only finite logits (survived top_k)
+        // full-vocab softmax: exact probabilities for the cumsum.
+        // tokens already masked to -inf by top_k contribute exp(-inf)=0.
+        float max_logit = -INFINITY;
+        for (int i = 0; i < V; i++) {
+            if (logits[i] > max_logit) {
+                max_logit = logits[i];
+            }
+        }
+        float sum_exp = 0.0f;
+        for (int i = 0; i < V; i++) {
+            sum_exp += expf(logits[i] - max_logit);
+        }
+        float inv_sum = 1.0f / sum_exp;
+
+        // compact only tokens worth sorting. a token at max-16 has relative
+        // probability exp(-16) ~ 1e-7; even 65536 such tokens sum to < 0.7%
+        // of the total mass. since their probabilities come from the full
+        // softmax above, the cumsum reaches the same boundary as vLLM.
+        float cutoff = max_logit - 16.0f;
         sorted_buf.clear();
         for (int i = 0; i < V; i++) {
-            if (logits[i] > -1e30f) {
-                sorted_buf.push_back({ i, logits[i] });
+            if (logits[i] >= cutoff) {
+                float prob = expf(logits[i] - max_logit) * inv_sum;
+                sorted_buf.push_back({ i, prob });
+            } else {
+                logits[i] = -INFINITY;
             }
         }
 
@@ -72,25 +96,15 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
             std::sort(sorted_buf.begin(), sorted_buf.end(),
                       [](const TokenProb & a, const TokenProb & b) { return a.prob > b.prob; });
 
-            // softmax of temp-scaled logits for cumsum
-            float max_val = sorted_buf[0].prob;
-            float sum     = 0.0f;
-            probs_buf.resize(K);
-            for (int i = 0; i < K; i++) {
-                probs_buf[i] = expf(sorted_buf[i].prob - max_val);
-                sum += probs_buf[i];
-            }
-            float inv = 1.0f / sum;
-
-            // cumulative sum, test before accumulating (shift-right trick)
+            // cumsum with full-vocab-normalized probs (shift-right: test before accumulate)
             float cum = 0.0f;
             for (int i = 0; i < K; i++) {
                 if (i > 0 && cum >= top_p) {
                     logits[sorted_buf[i].id] = -INFINITY;
                 }
-                cum += probs_buf[i] * inv;
+                cum += sorted_buf[i].prob;
             }
-        }  // K > 0
+        }
     }
 
     // 4. softmax -> multinomial (only non-masked tokens matter)
