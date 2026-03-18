@@ -111,12 +111,12 @@ def add_metadata(w, cfg, model_type):
 def add_tensors_from_sf(w, sf_path, tag, model_type):
     meta, hdr_size = read_sf_header(sf_path)
     names = sorted(meta.keys())
-    f = open(sf_path, "rb")
-    count = 0
-    total = 0
+    with open(sf_path, "rb") as f:
+        count = 0
+        total = 0
 
-    for name in names:
-        info = meta[name]
+        for name in names:
+            info = meta[name]
 
         # normalize: some upstream checkpoints omit the "model." prefix
         if model_type == "lm" and not name.startswith("model."):
@@ -146,8 +146,7 @@ def add_tensors_from_sf(w, sf_path, tag, model_type):
         count += 1
         total += nbytes
 
-    f.close()
-    return count, total
+        return count, total
 
 # silence_latent.pt reader (replaces pt2bin C++ tool)
 # PyTorch .pt is a ZIP with entry "*/data/0" containing f32 [64, 15000]
