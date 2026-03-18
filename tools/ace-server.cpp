@@ -43,10 +43,6 @@
 #include <string>
 #include <vector>
 
-#ifndef _WIN32
-#    include <unistd.h>
-#endif
-
 // server instance pointer for the signal handler
 static httplib::Server * g_svr = nullptr;
 
@@ -227,33 +223,12 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
                 return;
             }
 
-            // detect format from magic bytes: "RIFF" = WAV, else assume MP3
-            bool         is_wav = (file.content.size() >= 4 && memcmp(file.content.data(), "RIFF", 4) == 0);
-            const char * ext    = is_wav ? ".wav" : ".mp3";
-
-            // write to temp file (audio_read_48k needs a file path)
-            char tmp_base[] = "/tmp/ace-audio-XXXXXX";
-            int  fd         = mkstemp(tmp_base);
-            if (fd < 0) {
-                queue_release();
-                json_error(res, 500, "failed to create temp file");
-                return;
-            }
-            write(fd, file.content.data(), file.content.size());
-            close(fd);
-
-            // rename with proper extension so audio_read_48k detects format
-            std::string tmp_path = std::string(tmp_base) + ext;
-            rename(tmp_base, tmp_path.c_str());
-
-            // decode to planar stereo 48kHz
+            // decode directly from multipart buffer (WAV/MP3 auto-detected)
             int     T_audio = 0;
-            float * planar  = audio_read_48k(tmp_path.c_str(), &T_audio);
-            unlink(tmp_path.c_str());
-
+            float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
             if (!planar || T_audio <= 0) {
                 queue_release();
-                json_error(res, 400, "failed to decode audio file");
+                json_error(res, 400, "failed to decode audio");
                 return;
             }
 
@@ -453,32 +428,12 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
             return;
         }
 
-        // detect format from magic bytes: "RIFF" = WAV, else assume MP3
-        bool         is_wav = (file.content.size() >= 4 && memcmp(file.content.data(), "RIFF", 4) == 0);
-        const char * ext    = is_wav ? ".wav" : ".mp3";
-
-        // write to temp file (audio_read_48k needs a file path)
-        char tmp_base[] = "/tmp/ace-audio-XXXXXX";
-        int  fd         = mkstemp(tmp_base);
-        if (fd < 0) {
-            queue_release();
-            json_error(res, 500, "failed to create temp file");
-            return;
-        }
-        write(fd, file.content.data(), file.content.size());
-        close(fd);
-
-        std::string tmp_path = std::string(tmp_base) + ext;
-        rename(tmp_base, tmp_path.c_str());
-
-        // decode to planar stereo 48kHz
+        // decode directly from multipart buffer (WAV/MP3 auto-detected)
         int     T_audio = 0;
-        float * planar  = audio_read_48k(tmp_path.c_str(), &T_audio);
-        unlink(tmp_path.c_str());
-
+        float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
         if (!planar || T_audio <= 0) {
             queue_release();
-            json_error(res, 400, "failed to decode audio file");
+            json_error(res, 400, "failed to decode audio");
             return;
         }
 
@@ -527,7 +482,7 @@ static void handle_health(const httplib::Request &, httplib::Response & res) {
 
     // build pipelines list from what was actually loaded
     std::string pipes = "[";
-    bool first = true;
+    bool        first = true;
     if (g_ctx_lm) {
         pipes += "\"lm\"";
         first = false;
@@ -671,10 +626,8 @@ int main(int argc, char ** argv) {
     // synth needs all three: --embedding + --dit + --vae.
     bool have_lm_group = (lm_params.model_path != NULL);
 
-    bool have_any_synth = (synth_params.text_encoder_path || synth_params.dit_path
-                           || synth_params.vae_path);
-    bool have_synth_group = (synth_params.text_encoder_path && synth_params.dit_path
-                             && synth_params.vae_path);
+    bool have_any_synth   = (synth_params.text_encoder_path || synth_params.dit_path || synth_params.vae_path);
+    bool have_synth_group = (synth_params.text_encoder_path && synth_params.dit_path && synth_params.vae_path);
 
     if (have_any_synth && !have_synth_group) {
         fprintf(stderr, "[Server] ERROR: incomplete synth options\n");
@@ -726,12 +679,11 @@ int main(int argc, char ** argv) {
         ace_understand_default_params(&und_params);
         und_params.shared_model = ace_lm_get_model(g_ctx_lm);
         und_params.shared_bpe   = ace_lm_get_bpe(g_ctx_lm);
-        und_params.dit_path     = synth_params.dit_path;   // NULL when synth not loaded
-        und_params.vae_path     = synth_params.vae_path;   // NULL when synth not loaded
+        und_params.dit_path     = synth_params.dit_path;  // NULL when synth not loaded
+        und_params.vae_path     = synth_params.vae_path;  // NULL when synth not loaded
         und_params.use_fa       = lm_params.use_fa;
         und_params.use_fsm      = lm_params.use_fsm;
-        fprintf(stderr, "[Server] Loading understand%s...\n",
-                have_synth_group ? " (audio + codes)" : " (codes-only)");
+        fprintf(stderr, "[Server] Loading understand%s...\n", have_synth_group ? " (audio + codes)" : " (codes-only)");
         g_ctx_understand = ace_understand_load(&und_params);
         if (!g_ctx_understand) {
             fprintf(stderr, "[Server] FATAL: understand load failed\n");
@@ -766,12 +718,9 @@ int main(int argc, char ** argv) {
     signal(SIGTERM, on_signal);
 
     fprintf(stderr, "[Server] Listening on %s:%d\n", host, port);
-    fprintf(stderr, "[Server] Pipelines:%s%s%s\n",
-            g_ctx_lm ? " /lm" : "",
-            g_ctx_synth ? " /synth" : "",
+    fprintf(stderr, "[Server] Pipelines:%s%s%s\n", g_ctx_lm ? " /lm" : "", g_ctx_synth ? " /synth" : "",
             g_ctx_understand ? " /understand" : "");
-    fprintf(stderr, "[Server] max_batch=%d max_queue=%d mp3_kbps=%d\n",
-            g_max_batch, g_max_queue, g_mp3_kbps);
+    fprintf(stderr, "[Server] max_batch=%d max_queue=%d mp3_kbps=%d\n", g_max_batch, g_max_queue, g_mp3_kbps);
 
     if (!svr.listen(host, port)) {
         fprintf(stderr, "[Server] FATAL: cannot bind %s:%d\n", host, port);

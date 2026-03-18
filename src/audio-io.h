@@ -64,12 +64,9 @@ static bool audio_io_ends_with(const char * str, const char * suffix) {
     return true;
 }
 
-// Read an MP3 file via minimp3. Returns planar stereo float.
-// Caller must free() the result.
-static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
-    *T_out  = 0;
-    *sr_out = 0;
-
+// Load entire file into memory. Caller must free() the returned pointer.
+static uint8_t * audio_io_load_file(const char * path, size_t * size_out) {
+    *size_out = 0;
     FILE * fp = fopen(path, "rb");
     if (!fp) {
         fprintf(stderr, "[Audio] Cannot open %s\n", path);
@@ -79,40 +76,47 @@ static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
     long fsize = ftell(fp);
     fseek(fp, 0, SEEK_SET);
 
-    unsigned char * mp3_buf = (unsigned char *) malloc((size_t) fsize);
-    if (!mp3_buf) {
+    uint8_t * buf = (uint8_t *) malloc((size_t) fsize);
+    if (!buf) {
         fclose(fp);
         return NULL;
     }
-    fread(mp3_buf, 1, (size_t) fsize, fp);
+    fread(buf, 1, (size_t) fsize, fp);
     fclose(fp);
+
+    *size_out = (size_t) fsize;
+    return buf;
+}
+
+// Decode MP3 from memory buffer. Returns planar stereo float [L:T][R:T].
+static float * audio_io_read_mp3_buf(const uint8_t * data, size_t size, int * T_out, int * sr_out) {
+    *T_out  = 0;
+    *sr_out = 0;
 
     mp3dec_t dec;
     mp3dec_init(&dec);
 
-    // decode all frames, accumulate interleaved short samples
     short * pcm_buf   = NULL;
     int     pcm_cap   = 0;
-    int     pcm_count = 0;  // total samples (frames * channels)
+    int     pcm_count = 0;
     int     out_sr    = 0;
     int     out_nch   = 0;
 
-    int offset = 0;
-    while (offset < fsize) {
+    size_t offset = 0;
+    while (offset < size) {
         mp3dec_frame_info_t info;
         short               pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-        int                 samples = mp3dec_decode_frame(&dec, mp3_buf + offset, (int) (fsize - offset), pcm, &info);
+        int                 samples = mp3dec_decode_frame(&dec, data + offset, (int) (size - offset), pcm, &info);
         if (info.frame_bytes == 0) {
             break;
         }
-        offset += info.frame_bytes;
+        offset += (size_t) info.frame_bytes;
 
         if (samples > 0) {
             if (out_sr == 0) {
                 out_sr  = info.hz;
                 out_nch = info.channels;
             }
-
             int need = pcm_count + samples * out_nch;
             if (need > pcm_cap) {
                 pcm_cap = (need < 65536) ? 65536 : need * 2;
@@ -122,23 +126,20 @@ static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
             pcm_count += samples * out_nch;
         }
     }
-    free(mp3_buf);
 
     if (pcm_count == 0 || out_sr == 0) {
-        fprintf(stderr, "[Audio] No audio decoded from %s\n", path);
+        fprintf(stderr, "[Audio] No audio decoded from buffer\n");
         free(pcm_buf);
         return NULL;
     }
 
     int T = pcm_count / out_nch;
 
-    // convert to planar stereo float
     float * planar = (float *) malloc((size_t) T * 2 * sizeof(float));
     if (!planar) {
         free(pcm_buf);
         return NULL;
     }
-
     for (int t = 0; t < T; t++) {
         float l       = (float) pcm_buf[t * out_nch + 0] / 32768.0f;
         float r       = (out_nch >= 2) ? (float) pcm_buf[t * out_nch + 1] / 32768.0f : l;
@@ -149,30 +150,26 @@ static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
 
     *T_out  = T;
     *sr_out = out_sr;
-
-    fprintf(stderr, "[MP3] Read %s: %d samples, %d Hz, %d ch\n", path, T, out_sr, out_nch);
+    fprintf(stderr, "[MP3] Read buffer: %d samples, %d Hz, %d ch\n", T, out_sr, out_nch);
     return planar;
 }
 
-// Read a WAV file. Returns planar stereo float.
-// Wraps read_wav from wav.h (which returns interleaved) and deinterleaves.
-static float * audio_io_read_wav(const char * path, int * T_out, int * sr_out) {
+// Decode WAV from memory buffer. Returns planar stereo float [L:T][R:T].
+static float * audio_io_read_wav_buf(const uint8_t * data, size_t size, int * T_out, int * sr_out) {
     *T_out  = 0;
     *sr_out = 0;
 
     int     T = 0, sr = 0;
-    float * interleaved = read_wav(path, &T, &sr);
+    float * interleaved = read_wav_buf(data, size, &T, &sr);
     if (!interleaved) {
         return NULL;
     }
 
-    // read_wav always returns stereo interleaved [L0,R0,L1,R1,...]
     float * planar = (float *) malloc((size_t) T * 2 * sizeof(float));
     if (!planar) {
         free(interleaved);
         return NULL;
     }
-
     for (int t = 0; t < T; t++) {
         planar[t]     = interleaved[t * 2 + 0];
         planar[T + t] = interleaved[t * 2 + 1];
@@ -182,6 +179,72 @@ static float * audio_io_read_wav(const char * path, int * T_out, int * sr_out) {
     *T_out  = T;
     *sr_out = sr;
     return planar;
+}
+
+// Decode WAV or MP3 from memory buffer (auto-detect from magic bytes).
+// Returns planar stereo float [L:T][R:T]. Caller frees.
+static float * audio_read_buf(const uint8_t * data, size_t size, int * T_out, int * sr_out) {
+    if (size >= 4 && memcmp(data, "RIFF", 4) == 0) {
+        return audio_io_read_wav_buf(data, size, T_out, sr_out);
+    }
+    return audio_io_read_mp3_buf(data, size, T_out, sr_out);
+}
+
+// Decode WAV or MP3 from memory buffer and resample to 48000 Hz stereo.
+// Returns planar stereo float [L:T][R:T]. Caller frees.
+static float * audio_read_48k_buf(const uint8_t * data, size_t size, int * T_out) {
+    int     T = 0, sr = 0;
+    float * raw = audio_read_buf(data, size, &T, &sr);
+    if (!raw) {
+        *T_out = 0;
+        return NULL;
+    }
+
+    if (sr == 48000) {
+        *T_out = T;
+        return raw;
+    }
+
+    int T_rs = 0;
+    fprintf(stderr, "[Audio-Resample] %d Hz -> 48000 Hz, %d samples...\n", sr, T);
+    float * resampled = audio_resample(raw, T, sr, 48000, 2, &T_rs);
+    free(raw);
+
+    if (!resampled) {
+        fprintf(stderr, "[Audio-Resample] Resample failed\n");
+        *T_out = 0;
+        return NULL;
+    }
+
+    fprintf(stderr, "[Audio-Resample] Done: %d -> %d samples\n", T, T_rs);
+
+    *T_out = T_rs;
+    return resampled;
+}
+
+// File-based wrappers: load file into memory, delegate to buffer functions.
+// Used by CLI tools that take file paths as arguments.
+
+static float * audio_io_read_mp3(const char * path, int * T_out, int * sr_out) {
+    size_t    size = 0;
+    uint8_t * buf  = audio_io_load_file(path, &size);
+    if (!buf) {
+        return NULL;
+    }
+    float * result = audio_io_read_mp3_buf(buf, size, T_out, sr_out);
+    free(buf);
+    return result;
+}
+
+static float * audio_io_read_wav(const char * path, int * T_out, int * sr_out) {
+    size_t    size = 0;
+    uint8_t * buf  = audio_io_load_file(path, &size);
+    if (!buf) {
+        return NULL;
+    }
+    float * result = audio_io_read_wav_buf(buf, size, T_out, sr_out);
+    free(buf);
+    return result;
 }
 
 // Read WAV or MP3 (auto-detect from extension).
