@@ -118,35 +118,35 @@ def add_tensors_from_sf(w, sf_path, tag, model_type):
         for name in names:
             info = meta[name]
 
-        # normalize: some upstream checkpoints omit the "model." prefix
-        if model_type == "lm" and not name.startswith("model."):
-            name = "model." + name
+            # normalize: some upstream checkpoints omit the "model." prefix
+            if model_type == "lm" and not name.startswith("model."):
+                name = "model." + name
 
-        dtype_str = info["dtype"]
-        shape = info["shape"]
-        off0, off1 = info["data_offsets"]
-        nbytes = off1 - off0
+            dtype_str = info["dtype"]
+            shape = info["shape"]
+            off0, off1 = info["data_offsets"]
+            nbytes = off1 - off0
 
-        f.seek(hdr_size + off0)
-        raw = f.read(nbytes)
+            f.seek(hdr_size + off0)
+            raw = f.read(nbytes)
 
-        if dtype_str == "BF16":
-            arr = np.frombuffer(raw, dtype=np.uint16).reshape(shape)
-            w.add_tensor(name, arr, raw_dtype=BF16)
-        elif dtype_str == "F16":
-            arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
-            w.add_tensor(name, arr)
-        elif dtype_str == "F32":
-            arr = np.frombuffer(raw, dtype=np.float32).reshape(shape)
-            w.add_tensor(name, arr)
-        else:
-            log(tag, "  skip %s: dtype %s" % (name, dtype_str))
-            continue
+            if dtype_str == "BF16":
+                arr = np.frombuffer(raw, dtype=np.uint16).reshape(shape)
+                w.add_tensor(name, arr, raw_dtype=BF16)
+            elif dtype_str == "F16":
+                arr = np.frombuffer(raw, dtype=np.float16).reshape(shape)
+                w.add_tensor(name, arr)
+            elif dtype_str == "F32":
+                arr = np.frombuffer(raw, dtype=np.float32).reshape(shape)
+                w.add_tensor(name, arr)
+            else:
+                log(tag, "  skip %s: dtype %s" % (name, dtype_str))
+                continue
 
-        count += 1
-        total += nbytes
+            count += 1
+            total += nbytes
 
-        return count, total
+    return count, total
 
 # silence_latent.pt reader (replaces pt2bin C++ tool)
 # PyTorch .pt is a ZIP with entry "*/data/0" containing f32 [64, 15000]
