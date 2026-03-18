@@ -35,7 +35,8 @@ def find_sf_files(model_dir):
         return [single]
     index = os.path.join(model_dir, "model.safetensors.index.json")
     if os.path.exists(index):
-        idx = json.load(open(index))
+        with open(index, "r", encoding="utf-8") as f:
+            idx = json.load(f)
         shards = sorted(set(idx["weight_map"].values()))
         return [os.path.join(model_dir, s) for s in shards]
     diffusers = os.path.join(model_dir, "diffusion_pytorch_model.safetensors")
@@ -202,7 +203,8 @@ def convert_model(name, model_dir, output_path, model_type):
         log(tag, "skip %s: no config.json" % name)
         return False
 
-    cfg = json.load(open(cfg_path))
+    with open(cfg_path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
     sf_files = find_sf_files(model_dir)
     if not sf_files:
         log(tag, "skip %s: no safetensors" % name)
