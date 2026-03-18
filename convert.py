@@ -108,7 +108,7 @@ def add_metadata(w, cfg, model_type):
     w.add_string("acestep.config_json", json.dumps(cfg, separators=(",", ":")))
 
 # Tensor packing from safetensors
-def add_tensors_from_sf(w, sf_path, tag):
+def add_tensors_from_sf(w, sf_path, tag, model_type):
     meta, hdr_size = read_sf_header(sf_path)
     names = sorted(meta.keys())
     f = open(sf_path, "rb")
@@ -119,7 +119,7 @@ def add_tensors_from_sf(w, sf_path, tag):
         info = meta[name]
 
         # normalize: some upstream checkpoints omit the "model." prefix
-        if not name.startswith("model."):
+        if model_type == "lm" and not name.startswith("model."):
             name = "model." + name
 
         dtype_str = info["dtype"]
@@ -171,13 +171,14 @@ def add_bpe_tokenizer(w, model_dir, tag):
     if not os.path.exists(vocab_path) or not os.path.exists(merges_path):
         return False
 
-    vocab = json.load(open(vocab_path))
+    with open(vocab_path, "r", encoding="utf-8") as f:
+        vocab = json.load(f)
     tokens = [""] * len(vocab)
     for tok_str, tok_id in vocab.items():
         if 0 <= tok_id < len(tokens):
             tokens[tok_id] = tok_str
 
-    with open(merges_path) as f:
+    with open(merges_path, "r", encoding="utf-8") as f:
         merges = []
         for line in f:
             line = line.rstrip("\n\r")
@@ -225,7 +226,7 @@ def convert_model(name, model_dir, output_path, model_type):
     n_tensors = 0
     n_bytes = 0
     for sf in sf_files:
-        c, b = add_tensors_from_sf(w, sf, tag)
+        c, b = add_tensors_from_sf(w, sf, tag, model_type)
         n_tensors += c
         n_bytes += b
         if len(sf_files) > 1:
