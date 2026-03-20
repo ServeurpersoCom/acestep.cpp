@@ -145,7 +145,7 @@ AceUnderstand * ace_understand_load(const AceUnderstandParams * params) {
         gf_close(&gf);
 
         // FSQ tokenizer (CPU backend, weights in DiT GGUF)
-        ctx->fsq_backend = cpu_backend_new();
+        ctx->fsq_backend = cpu_backend_new(backend_cpu_n_threads());
         if (!ctx->fsq_backend) {
             fprintf(stderr, "[Tok] FATAL: failed to init CPU backend\n");
             delete ctx;

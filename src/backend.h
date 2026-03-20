@@ -26,15 +26,21 @@ struct BackendPair {
 static BackendPair g_backend_cache = {};
 static int         g_backend_refs  = 0;
 
+// Physical core count heuristic (logical / 2 for HT/SMT).
+// Used for GGML CPU thread count: GEMM shares SIMD units across hyperthreads,
+// so one thread per physical core is optimal.
+static int backend_cpu_n_threads(void) {
+    int n = (int) std::thread::hardware_concurrency() / 2;
+    return n > 0 ? n : 1;
+}
+
 // Standalone CPU backend via Registry API (DL-safe, no ggml-cpu.h needed).
-// Returns NULL on failure. Caller must check.
-static ggml_backend_t cpu_backend_new(void) {
-    int n_threads = (int) std::thread::hardware_concurrency() / 2;
-    if (n_threads < 1) {
-        n_threads = 1;
-    }
+// Sets thread count via proc address since ggml_backend_cpu_device_init_backend
+// ignores its params string and always defaults to GGML_DEFAULT_N_THREADS (4).
+// Returns NULL on failure.
+static ggml_backend_t cpu_backend_new(int n_threads) {
     ggml_backend_dev_t cpu_dev = ggml_backend_dev_by_type(GGML_BACKEND_DEVICE_TYPE_CPU);
-    ggml_backend_t     cpu    = NULL;
+    ggml_backend_t     cpu     = NULL;
     if (cpu_dev) {
         cpu = ggml_backend_dev_init(cpu_dev, NULL);
     }
@@ -45,12 +51,11 @@ static ggml_backend_t cpu_backend_new(void) {
         return NULL;
     }
 
-    // ggml_backend_cpu_device_init_backend ignores params, so set threads
-    // explicitly via the proc address API (same approach as llama.cpp).
     ggml_backend_dev_t dev = ggml_backend_get_device(cpu);
     ggml_backend_reg_t reg = dev ? ggml_backend_dev_backend_reg(dev) : NULL;
     if (reg) {
-        auto set_fn = (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
+        auto set_fn =
+            (ggml_backend_set_n_threads_t) ggml_backend_reg_get_proc_address(reg, "ggml_backend_set_n_threads");
         if (set_fn) {
             set_fn(cpu, n_threads);
         }
@@ -93,20 +98,17 @@ static BackendPair backend_init(const char * label) {
         exit(1);
     }
     bool best_is_cpu = (strcmp(ggml_backend_name(bp.backend), "CPU") == 0);
+    int  n_threads   = backend_cpu_n_threads();
     if (best_is_cpu) {
         ggml_backend_free(bp.backend);
-        bp.backend     = cpu_backend_new();
+        bp.backend     = cpu_backend_new(n_threads);
         bp.cpu_backend = bp.backend;
     } else {
-        bp.cpu_backend = cpu_backend_new();
+        bp.cpu_backend = cpu_backend_new(n_threads);
     }
     if (!bp.cpu_backend) {
         fprintf(stderr, "[Load] FATAL: failed to init CPU backend\n");
         exit(1);
-    }
-    int n_threads = (int) std::thread::hardware_concurrency() / 2;
-    if (n_threads < 1) {
-        n_threads = 1;
     }
     fprintf(stderr, "[Load] %s backend: %s (CPU threads: %d)\n", label, ggml_backend_name(bp.backend), n_threads);
 

@@ -295,8 +295,8 @@ static bool qw3lm_build_partial_head(Qwen3LM * m, int lm_offset) {
     }
 
     struct ggml_init_params ctx_params = { ggml_tensor_overhead() + 16, NULL, true };
-    m->lm_head_ctx = ggml_init(ctx_params);
-    m->lm_head_phase2 = ggml_new_tensor_2d(m->lm_head_ctx, m->embed_tokens->type, H, lm_count);
+    m->lm_head_ctx                     = ggml_init(ctx_params);
+    m->lm_head_phase2                  = ggml_new_tensor_2d(m->lm_head_ctx, m->embed_tokens->type, H, lm_count);
     ggml_set_name(m->lm_head_phase2, "lm_head_phase2");
 
     m->lm_head_buf = ggml_backend_alloc_ctx_tensors(m->lm_head_ctx, m->backend);
@@ -310,14 +310,14 @@ static bool qw3lm_build_partial_head(Qwen3LM * m, int lm_offset) {
     ggml_backend_buffer_set_usage(m->lm_head_buf, GGML_BACKEND_BUFFER_USAGE_WEIGHTS);
 
     // Copy rows [lm_offset..V) from embed_tokens (GPU -> CPU -> GPU)
-    size_t row_bytes = ggml_row_size(m->embed_tokens->type, H);
-    size_t nbytes    = (size_t) lm_count * row_bytes;
+    size_t               row_bytes = ggml_row_size(m->embed_tokens->type, H);
+    size_t               nbytes    = (size_t) lm_count * row_bytes;
     std::vector<uint8_t> tmp(nbytes);
     ggml_backend_tensor_get(m->embed_tokens, tmp.data(), (size_t) lm_offset * row_bytes, nbytes);
     ggml_backend_tensor_set(m->lm_head_phase2, tmp.data(), 0, nbytes);
 
-    fprintf(stderr, "[LM] Partial head: %d rows (%d..%d), %.1f MB\n",
-            lm_count, lm_offset, V, (float) nbytes / (1024 * 1024));
+    fprintf(stderr, "[LM] Partial head: %d rows (%d..%d), %.1f MB\n", lm_count, lm_offset, V,
+            (float) nbytes / (1024 * 1024));
     return true;
 }
 

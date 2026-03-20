@@ -397,7 +397,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     // partial head: pre-extracted contiguous tensor for [TOKEN_IM_END..V) rows.
     // When unavailable (alloc failed): full vocab, slightly more compute, same result.
     Timer t_decode;
-    bool  partial    = (m->lm_head_phase2 != NULL);
+    bool  partial     = (m->lm_head_phase2 != NULL);
     int   out_V       = partial ? (V - TOKEN_IM_END) : V;
     int   lm_offset   = partial ? TOKEN_IM_END : 0;
     int   lm_count    = partial ? (V - TOKEN_IM_END) : 0;
