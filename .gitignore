@@ -7,3 +7,5 @@ tests/*/
 checkpoints/
 models/
 __pycache__/
+node_modules/
+tools/webui/dist/

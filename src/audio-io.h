@@ -290,57 +290,69 @@ static float * audio_read_48k(const char * path, int * T_out) {
     return resampled;
 }
 
-// Write planar stereo float to WAV 16-bit PCM.
-// audio: [L: T_audio][R: T_audio], clipped to [-1, 1].
-static bool audio_write_wav(const char * path, const float * audio, int T_audio, int sr) {
-    FILE * f = fopen(path, "wb");
-    if (!f) {
-        fprintf(stderr, "[Audio] Cannot open %s for writing\n", path);
-        return false;
-    }
-
+// audio_encode_wav is the core: encode planar stereo to WAV 16-bit PCM in memory.
+// 44-byte RIFF header + interleaved int16 samples.
+// audio is planar [L0..LN, R0..RN], pre-normalized by caller.
+// Does NOT normalize - caller is responsible (audio_write does it).
+// Returns empty string on failure.
+static std::string audio_encode_wav(const float * audio, int T_audio, int sr) {
     int n_channels = 2, bits = 16;
     int byte_rate   = sr * n_channels * (bits / 8);
     int block_align = n_channels * (bits / 8);
     int data_size   = T_audio * n_channels * (bits / 8);
     int file_size   = 36 + data_size;
 
-    fwrite("RIFF", 1, 4, f);
-    fwrite(&file_size, 4, 1, f);
-    fwrite("WAVE", 1, 4, f);
-    fwrite("fmt ", 1, 4, f);
+    std::string out;
+    out.resize(44 + (size_t) data_size);
+    char * p = &out[0];
+
+    // RIFF header
+    memcpy(p, "RIFF", 4); p += 4;
+    memcpy(p, &file_size, 4); p += 4;
+    memcpy(p, "WAVE", 4); p += 4;
+    memcpy(p, "fmt ", 4); p += 4;
     int   fmt_size = 16;
     short fmt_tag  = 1;
     short nc       = (short) n_channels;
     short ba       = (short) block_align;
     short bp       = (short) bits;
-    fwrite(&fmt_size, 4, 1, f);
-    fwrite(&fmt_tag, 2, 1, f);
-    fwrite(&nc, 2, 1, f);
-    fwrite(&sr, 4, 1, f);
-    fwrite(&byte_rate, 4, 1, f);
-    fwrite(&ba, 2, 1, f);
-    fwrite(&bp, 2, 1, f);
-    fwrite("data", 1, 4, f);
-    fwrite(&data_size, 4, 1, f);
+    memcpy(p, &fmt_size, 4); p += 4;
+    memcpy(p, &fmt_tag, 2); p += 2;
+    memcpy(p, &nc, 2); p += 2;
+    memcpy(p, &sr, 4); p += 4;
+    memcpy(p, &byte_rate, 4); p += 4;
+    memcpy(p, &ba, 2); p += 2;
+    memcpy(p, &bp, 2); p += 2;
+    memcpy(p, "data", 4); p += 4;
+    memcpy(p, &data_size, 4); p += 4;
 
-    // buffer all samples then write once (avoids millions of fwrite syscalls)
-    // audio is pre-normalized to 0 dBFS by audio_write(), no clamp needed
-    const float * L   = audio;
-    const float * R   = audio + T_audio;
-    short *       pcm = (short *) malloc((size_t) T_audio * 2 * sizeof(short));
-    if (!pcm) {
-        fclose(f);
-        return false;
-    }
+    // interleave planar float to PCM int16
+    const float * L = audio;
+    const float * R = audio + T_audio;
+    short * pcm = (short *) p;
     for (int t = 0; t < T_audio; t++) {
         pcm[t * 2 + 0] = (short) (L[t] * 32767.0f);
         pcm[t * 2 + 1] = (short) (R[t] * 32767.0f);
     }
-    fwrite(pcm, 2, (size_t) T_audio * 2, f);
-    free(pcm);
 
-    fclose(f);
+    return out;
+}
+
+// Write planar stereo audio to WAV file. Thin wrapper around audio_encode_wav.
+static bool audio_write_wav(const char * path, const float * audio, int T_audio, int sr) {
+    std::string wav = audio_encode_wav(audio, T_audio, sr);
+    if (wav.empty()) {
+        return false;
+    }
+
+    FILE * fp = fopen(path, "wb");
+    if (!fp) {
+        fprintf(stderr, "[Audio] Cannot open %s for writing\n", path);
+        return false;
+    }
+    fwrite(wav.data(), 1, wav.size(), fp);
+    fclose(fp);
+
     fprintf(stderr, "[WAV] Wrote %s: %d samples, %d Hz, stereo\n", path, T_audio, sr);
     return true;
 }

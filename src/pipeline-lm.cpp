@@ -696,11 +696,12 @@ int ace_lm_generate(AceLm *            ctx,
 
         if (ctx->params.use_fsm) {
             if (need_lyrics) {
-                // Free text for lyrics. Only use FSM if strictly forcing language.
+                // FSM constrains CoT metadata (bpm/dur/key/lang/tsig).
+                // Only masks before </think>, lyrics after are unconstrained.
                 if (ace.vocal_language != "unknown" && !ace.vocal_language.empty()) {
                     ctx->fsm.force_language(ctx->bpe, ace.vocal_language);
-                    active_fsm = &ctx->fsm;
                 }
+                active_fsm = &ctx->fsm;
             } else {
                 if (!req->use_cot_caption) {
                     active_fsm = &ctx->fsm;

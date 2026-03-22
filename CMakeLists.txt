@@ -86,8 +86,22 @@ add_executable(ace-lm tools/ace-lm.cpp)
 target_link_libraries(ace-lm PRIVATE acestep-core)
 link_ggml_backends(ace-lm)
 
-# ace-server: HTTP server (LM + synth endpoints)
-add_executable(ace-server tools/ace-server.cpp)
+# webui: convert tools/webui/public/index.html.gz to a C header for embedding.
+# the .gz is committed to git so the C++ build works without npm.
+# to update: cd tools/webui && npm install && npm run build, then rebuild ace-server.
+set(WEBUI_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/tools/public/index.html.gz")
+set(WEBUI_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz.hpp")
+add_custom_command(
+    OUTPUT "${WEBUI_OUTPUT}"
+    COMMAND "${CMAKE_COMMAND}" "-DINPUT=${WEBUI_INPUT}" "-DOUTPUT=${WEBUI_OUTPUT}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/xxd.cmake"
+    DEPENDS "${WEBUI_INPUT}"
+    COMMENT "Embedding webui into index.html.gz.hpp"
+)
+set_source_files_properties(${WEBUI_OUTPUT} PROPERTIES GENERATED TRUE)
+
+# ace-server: HTTP server (LM + synth endpoints + embedded webui)
+add_executable(ace-server tools/ace-server.cpp ${WEBUI_OUTPUT})
+target_include_directories(ace-server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(ace-server PRIVATE acestep-core httplib)
 link_ggml_backends(ace-server)
 

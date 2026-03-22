@@ -1,0 +1,28 @@
+{
+	"name": "ace-webui",
+	"private": true,
+	"version": "0.1.0",
+	"type": "module",
+	"scripts": {
+		"dev": "vite",
+		"build": "vite build",
+		"preview": "vite preview",
+		"format": "prettier --write .",
+		"format:check": "prettier --check .",
+		"lint": "prettier --check .",
+		"check": "svelte-check --tsconfig ./tsconfig.json"
+	},
+	"devDependencies": {
+		"@sveltejs/vite-plugin-svelte": "^6.0.0",
+		"prettier": "^3.4.0",
+		"prettier-plugin-svelte": "^3.3.0",
+		"svelte": "^5.38.0",
+		"svelte-check": "^4.0.0",
+		"typescript": "^5.8.0",
+		"vite": "^7.2.0"
+	},
+	"dependencies": {
+		"@lucide/svelte": "^0.577.0",
+		"vite-plugin-singlefile": "^2.3.2"
+	}
+}
