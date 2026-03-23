@@ -3,6 +3,7 @@
 //
 
 #include "request.h"
+
 #include "yyjson.h"
 
 #include <cstdlib>
@@ -168,7 +169,7 @@ bool request_parse_json_array(const char * json, std::vector<AceRequest> * out) 
         request_parse_obj(root, &r);
         out->push_back(r);
     } else if (yyjson_is_arr(root)) {
-        size_t      idx, max;
+        size_t       idx, max;
         yyjson_val * val;
         yyjson_arr_foreach(root, idx, max, val) {
             if (!yyjson_is_obj(val)) {
