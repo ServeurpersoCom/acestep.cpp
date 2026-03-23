@@ -5,7 +5,7 @@
     "bpm": 124,
     "vocal_language": "fr",
     "keyscale": "F# major",
-    "timesignature": "4"
+    "timesignature": "4",
     "inference_steps": 50,
     "guidance_scale": 1.0,
     "shift": 1.0

@@ -35,8 +35,19 @@ export const app = $state({
 	format: saved.format,
 	request: saved.request as AceRequest,
 	songs: [] as Song[],
-	health: null as AceHealth | null
+	health: null as AceHealth | null,
+	toast: '' as string
 });
+
+let toastTimer = 0;
+
+export function toast(msg: string, ms = 4000) {
+	clearTimeout(toastTimer);
+	app.toast = msg;
+	toastTimer = setTimeout(() => {
+		app.toast = '';
+	}, ms) as unknown as number;
+}
 
 // persist on every change
 $effect.root(() => {

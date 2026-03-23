@@ -6,6 +6,7 @@
 	import { HEALTH_POLL_MS } from './lib/config.js';
 	import RequestForm from './components/RequestForm.svelte';
 	import SongList from './components/SongList.svelte';
+	import Toast from './components/Toast.svelte';
 
 	// boot: load songs from IndexedDB
 	$effect(() => {
@@ -61,6 +62,8 @@
 		</section>
 	</main>
 </div>
+
+<Toast />
 
 <style>
 	:global(:root) {

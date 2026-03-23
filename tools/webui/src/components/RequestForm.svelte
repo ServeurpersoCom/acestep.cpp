@@ -1,12 +1,11 @@
 <script lang="ts">
 	import { RotateCcw, Download, FolderOpen } from '@lucide/svelte';
-	import { app } from '../lib/state.svelte.js';
+	import { app, toast } from '../lib/state.svelte.js';
 	import { lmGenerate, synthGenerate } from '../lib/api.js';
 	import { putSong } from '../lib/db.js';
 	import type { AceRequest, Song } from '../lib/types.js';
 
 	let busy = $state(false);
-	let error = $state('');
 	let fileInput: HTMLInputElement;
 
 	let d = $derived(app.health?.default);
@@ -41,7 +40,7 @@
 				app.request = JSON.parse(text) as AceRequest;
 			})
 			.catch(() => {
-				error = 'Invalid JSON file';
+				toast('Invalid JSON file');
 			});
 	}
 
@@ -90,7 +89,6 @@
 	// audio_codes always comes from LM (we cleared it before sending).
 	async function compose() {
 		busy = true;
-		error = '';
 		try {
 			const req = buildRequest();
 			req.audio_codes = '';
@@ -110,7 +108,7 @@
 				if (!app.request.caption && r.caption) app.request.caption = r.caption;
 			}
 		} catch (e: unknown) {
-			error = e instanceof Error ? e.message : String(e);
+			toast(e instanceof Error ? e.message : String(e));
 		} finally {
 			busy = false;
 		}
@@ -119,7 +117,6 @@
 	// POST /synth: read form, send with format, store audio
 	async function synthesize() {
 		busy = true;
-		error = '';
 		try {
 			const req = buildRequest();
 			const result = await synthGenerate(req, app.format);
@@ -137,7 +134,7 @@
 			song.id = await putSong(song);
 			app.songs.unshift(song);
 		} catch (e: unknown) {
-			error = e instanceof Error ? e.message : String(e);
+			toast(e instanceof Error ? e.message : String(e));
 		} finally {
 			busy = false;
 		}
@@ -313,10 +310,6 @@
 	</details>
 
 	<button type="button" disabled={busy} onclick={synthesize}>Synthesize</button>
-
-	{#if error}
-		<div class="error">{error}</div>
-	{/if}
 </form>
 
 <style>
@@ -389,10 +382,6 @@
 		align-items: center;
 		gap: 0.3rem;
 		cursor: pointer;
-	}
-	.error {
-		color: var(--error);
-		font-size: 0.85rem;
 	}
 	button {
 		padding: 0.5rem 1rem;
