@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <string>
+#include <vector>
 
 struct AceRequest {
     // text content
@@ -74,6 +75,10 @@ bool request_write(const AceRequest * r, const char * path);
 
 // Serialize struct to JSON string.
 std::string request_to_json(const AceRequest * r);
+
+// Parse JSON: single object {} or array [{}, ...] into a vector.
+// Returns false on malformed JSON or empty result.
+bool request_parse_json_array(const char * json, std::vector<AceRequest> * out);
 
 // Dump human-readable summary to stream (debug)
 void request_dump(const AceRequest * r, FILE * f);

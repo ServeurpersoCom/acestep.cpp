@@ -72,6 +72,15 @@ macro(link_ggml_backends target)
     endforeach()
 endmacro()
 
+# yyjson (MIT, fast JSON parser/writer)
+add_library(yyjson STATIC vendor/yyjson/yyjson.c)
+target_include_directories(yyjson PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/yyjson)
+if(MSVC)
+    target_compile_options(yyjson PRIVATE /W0)
+else()
+    target_compile_options(yyjson PRIVATE -w)
+endif()
+
 # Core library (shared between binaries)
 add_library(acestep-core STATIC
     src/request.cpp
@@ -79,6 +88,7 @@ add_library(acestep-core STATIC
     src/pipeline-synth.cpp
     src/pipeline-understand.cpp
 )
+target_link_libraries(acestep-core PUBLIC yyjson)
 link_ggml_backends(acestep-core)
 
 # ace-synth: full pipeline (text-enc + cond + dit + vae + wav)

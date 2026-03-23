@@ -312,46 +312,10 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         }
         ace_reqs.push_back(ace_req);
     } else {
-        // plain JSON body: array of requests or single request
-        const std::string & body = req.body;
-        size_t              pos  = body.find_first_not_of(" \t\r\n");
-        if (pos != std::string::npos && body[pos] == '[') {
-            // JSON array: parse each element
-            // minimal array split: find each {} object in the array.
-            // use request_parse_json for each, which handles nested braces.
-            int depth     = 0;
-            int obj_start = -1;
-            for (size_t i = pos; i < body.size(); i++) {
-                char c = body[i];
-                if (c == '{') {
-                    if (depth == 0) {
-                        obj_start = (int) i;
-                    }
-                    depth++;
-                } else if (c == '}') {
-                    depth--;
-                    if (depth == 0 && obj_start >= 0) {
-                        std::string obj_str = body.substr(obj_start, i - obj_start + 1);
-                        AceRequest  r;
-                        request_init(&r);
-                        if (!request_parse_json(&r, obj_str.c_str())) {
-                            json_error(res, 400, "invalid JSON in array element");
-                            return;
-                        }
-                        ace_reqs.push_back(r);
-                        obj_start = -1;
-                    }
-                }
-            }
-        } else {
-            // single JSON object (backward compatible)
-            AceRequest r;
-            request_init(&r);
-            if (!request_parse_json(&r, body.c_str())) {
-                json_error(res, 400, "invalid JSON");
-                return;
-            }
-            ace_reqs.push_back(r);
+        // plain JSON body: single object {} or array [{}, ...]
+        if (!request_parse_json_array(req.body.c_str(), &ace_reqs)) {
+            json_error(res, 400, "invalid JSON");
+            return;
         }
     }
 
