@@ -54,6 +54,7 @@
 				.text()
 				.then((text) => {
 					app.request = JSON.parse(text) as AceRequest;
+					app.name = file.name.replace(/\.json$/i, '') || 'Imported';
 					app.pendingRequests = [];
 					app.pendingIndex = 0;
 				})
