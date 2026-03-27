@@ -642,6 +642,5 @@
 	}
 	button:disabled {
 		opacity: 0.4;
-		cursor: not-allowed;
 	}
 </style>

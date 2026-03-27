@@ -38,6 +38,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <csignal>
 #include <cstdio>
 #include <cstdlib>
@@ -47,6 +48,68 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#ifdef _WIN32
+#    include <fcntl.h>
+#    include <io.h>
+#    ifndef STDERR_FILENO
+#        define STDERR_FILENO 2
+#    endif
+#else
+#    include <unistd.h>
+#endif
+
+// portable fd wrappers. avoids macros that collide with C++ method names
+// (e.g. sink.write() in httplib would be eaten by a write() macro).
+#ifdef _WIN32
+static int fd_pipe(int fd[2]) {
+    return _pipe(fd, 4096, _O_BINARY);
+}
+
+static int fd_dup(int fd) {
+    return _dup(fd);
+}
+
+static int fd_dup2(int src, int dst) {
+    return _dup2(src, dst);
+}
+
+static int fd_read(int fd, void * buf, size_t n) {
+    return _read(fd, buf, (unsigned) n);
+}
+
+static int fd_write(int fd, const void * buf, size_t n) {
+    return _write(fd, buf, (unsigned) n);
+}
+
+static void fd_close(int fd) {
+    _close(fd);
+}
+#else
+static int fd_pipe(int fd[2]) {
+    return pipe(fd);
+}
+
+static int fd_dup(int fd) {
+    return dup(fd);
+}
+
+static int fd_dup2(int src, int dst) {
+    return dup2(src, dst);
+}
+
+static int fd_read(int fd, void * buf, size_t n) {
+    return (int) read(fd, buf, n);
+}
+
+static int fd_write(int fd, const void * buf, size_t n) {
+    return (int) write(fd, buf, n);
+}
+
+static void fd_close(int fd) {
+    close(fd);
+}
+#endif
 
 // server instance pointer for the signal handler
 static httplib::Server * g_svr = nullptr;
@@ -89,6 +152,127 @@ static AceSynthParams      g_synth_params;
 static AceUnderstandParams g_und_params;
 
 static std::atomic<bool> g_stop_watchdog{ false };
+
+// log capture: intercept stderr via pipe, forward to terminal + ring buffer.
+// SSE clients connect to /logs and receive lines in real time.
+#define LOG_RING_BITS 9
+#define LOG_RING_SIZE (1 << LOG_RING_BITS)
+#define LOG_RING_MASK (LOG_RING_SIZE - 1)
+
+static std::mutex              mtx_log;
+static std::condition_variable cv_log;
+static std::string             log_ring[LOG_RING_SIZE];
+static uint64_t                log_seq = 0;
+
+static int g_real_stderr_fd = -1;
+static int g_pipe_read_fd   = -1;
+
+static void setup_log_capture() {
+    g_real_stderr_fd = fd_dup(STDERR_FILENO);
+    int pipefd[2];
+    if (fd_pipe(pipefd) != 0) {
+        g_real_stderr_fd = -1;
+        return;
+    }
+    g_pipe_read_fd = pipefd[0];
+    fd_dup2(pipefd[1], STDERR_FILENO);
+    fd_close(pipefd[1]);
+}
+
+// reader thread: drain pipe, forward to real stderr, push lines to ring.
+// exits when the write end of the pipe is closed (fd_dup2 restores real stderr).
+static void log_reader_main() {
+    char        buf[4096];
+    std::string partial;
+    for (;;) {
+        int n = fd_read(g_pipe_read_fd, buf, sizeof(buf));
+        if (n <= 0) {
+            break;
+        }
+        fd_write(g_real_stderr_fd, buf, (size_t) n);
+        partial.append(buf, (size_t) n);
+        size_t pos;
+        while ((pos = partial.find('\n')) != std::string::npos) {
+            std::lock_guard<std::mutex> lock(mtx_log);
+            log_ring[log_seq & LOG_RING_MASK] = partial.substr(0, pos);
+            log_seq++;
+            cv_log.notify_all();
+            partial.erase(0, pos + 1);
+        }
+    }
+    if (!partial.empty()) {
+        std::lock_guard<std::mutex> lock(mtx_log);
+        log_ring[log_seq & LOG_RING_MASK] = std::move(partial);
+        log_seq++;
+        cv_log.notify_all();
+    }
+    fd_close(g_pipe_read_fd);
+}
+
+static void teardown_log_capture() {
+    if (g_real_stderr_fd < 0) {
+        return;
+    }
+    fflush(stderr);
+    fd_dup2(g_real_stderr_fd, STDERR_FILENO);
+    fd_close(g_real_stderr_fd);
+    g_real_stderr_fd = -1;
+}
+
+// RAII: captures stderr on construction, restores + joins reader on destruction.
+// safe on any exit path (early arg errors, model load failures, normal shutdown).
+struct LogCapture {
+    std::thread reader;
+
+    LogCapture() {
+        setup_log_capture();
+        reader = std::thread(log_reader_main);
+    }
+
+    ~LogCapture() {
+        teardown_log_capture();
+        cv_log.notify_all();
+        if (reader.joinable()) {
+            reader.join();
+        }
+    }
+};
+
+// GET /logs: SSE stream of stderr lines.
+// sends backlog (up to LOG_RING_SIZE) then streams new lines in real time.
+static void handle_logs(const httplib::Request &, httplib::Response & res) {
+    res.set_header("Cache-Control", "no-cache");
+    res.set_header("X-Accel-Buffering", "no");
+    res.set_chunked_content_provider(
+        "text/event-stream", [cursor = uint64_t(0), init = false](size_t, httplib::DataSink & sink) mutable -> bool {
+            std::unique_lock<std::mutex> lock(mtx_log);
+            if (!init) {
+                uint64_t avail = log_seq < LOG_RING_SIZE ? log_seq : (uint64_t) LOG_RING_SIZE;
+                cursor         = log_seq - avail;
+                while (cursor < log_seq) {
+                    std::string ev = "data: " + log_ring[cursor & LOG_RING_MASK] + "\n\n";
+                    cursor++;
+                    lock.unlock();
+                    if (!sink.write(ev.c_str(), ev.size())) {
+                        return false;
+                    }
+                    lock.lock();
+                }
+                init = true;
+            }
+            cv_log.wait_for(lock, std::chrono::seconds(2));
+            while (cursor < log_seq) {
+                std::string ev = "data: " + log_ring[cursor & LOG_RING_MASK] + "\n\n";
+                cursor++;
+                lock.unlock();
+                if (!sink.write(ev.c_str(), ev.size())) {
+                    return false;
+                }
+                lock.lock();
+            }
+            return true;
+        });
+}
 
 // cancel trampoline: bridges httplib's is_connection_closed to our cancel callback.
 // data points to the std::function<bool()> from httplib::Request.
@@ -678,6 +862,8 @@ static void usage(const char * prog) {
 }
 
 int main(int argc, char ** argv) {
+    LogCapture log_capture;
+
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
 
@@ -838,6 +1024,7 @@ int main(int argc, char ** argv) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });
     svr.Get("/props", handle_props);
+    svr.Get("/logs", handle_logs);
 
     // embedded webui: gzipped single-page app (built by tools/webui/).
     // the browser decompresses transparently via Content-Encoding: gzip.
@@ -885,5 +1072,6 @@ int main(int argc, char ** argv) {
     ace_synth_free(g_ctx_synth);
     ace_lm_free(g_ctx_lm);
     fprintf(stderr, "[Server] Done\n");
+
     return 0;
 }

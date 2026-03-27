@@ -7,6 +7,7 @@ interface Saved {
 	volume: number;
 	format: string;
 	dark: boolean;
+	logsOpen: boolean;
 	request: AceRequest;
 }
 
@@ -20,13 +21,21 @@ function load(): Saved {
 				volume: parsed.volume ?? 0.5,
 				format: parsed.format === 'wav' ? 'wav' : 'mp3',
 				dark: parsed.dark ?? true,
+				logsOpen: parsed.logsOpen ?? true,
 				request: parsed.request || { caption: '' }
 			};
 		}
 	} catch {
 		// corrupt or unavailable
 	}
-	return { name: '', volume: 0.5, format: 'mp3', dark: false, request: { caption: '' } };
+	return {
+		name: '',
+		volume: 0.5,
+		format: 'mp3',
+		dark: false,
+		logsOpen: true,
+		request: { caption: '' }
+	};
 }
 
 const saved = load();
@@ -36,6 +45,7 @@ export const app = $state({
 	volume: saved.volume,
 	format: saved.format,
 	dark: saved.dark,
+	logsOpen: saved.logsOpen,
 	request: saved.request as AceRequest,
 	songs: [] as Song[],
 	health: null as AceHealth | null,
@@ -63,6 +73,7 @@ $effect.root(() => {
 			volume: app.volume,
 			format: app.format,
 			dark: app.dark,
+			logsOpen: app.logsOpen,
 			request: app.request
 		};
 		localStorage.setItem(STORAGE_KEY, JSON.stringify(data));
