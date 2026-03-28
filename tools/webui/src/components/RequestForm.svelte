@@ -248,8 +248,8 @@
 			if (sh != null) synthParams.shift = sh;
 			const acs = num(app.request.audio_cover_strength);
 			if (acs != null) synthParams.audio_cover_strength = acs;
-			// repaint: inject range from ref audio selection
-			if (app.refRangeEnd > app.refRangeStart && app.refRangeStart >= 0) {
+			// repaint: inject range only when a ref song is selected
+			if (app.refSongId != null && app.refRangeEnd > app.refRangeStart && app.refRangeStart >= 0) {
 				synthParams.repainting_start = app.refRangeStart;
 				synthParams.repainting_end = app.refRangeEnd;
 			}
