@@ -142,9 +142,14 @@ static int dit_ggml_generate(DiTGGML *           model,
                              const float *       context_switch = nullptr,
                              int                 cover_steps    = -1,
                              bool (*cancel)(void *)             = nullptr,
-                             void *      cancel_data            = nullptr,
-                             const int * real_S                 = nullptr,
-                             const int * real_enc_S             = nullptr) {
+                             void *        cancel_data          = nullptr,
+                             const int *   real_S               = nullptr,
+                             const int *   real_enc_S           = nullptr,
+                             const float * enc_switch           = nullptr,
+                             const int *   real_enc_S_switch    = nullptr,
+                             const float * repaint_src          = nullptr,
+                             int           repaint_t0           = 0,
+                             int           repaint_t1           = 0) {
     DiTGGMLConfig & c       = model->cfg;
     int             Oc      = c.out_channels;      // 64
     int             ctx_ch  = c.in_channels - Oc;  // 128
@@ -359,6 +364,22 @@ static int dit_ggml_generate(DiTGGML *           model,
                            ctx_ch * sizeof(float));
                 }
             }
+            // switch encoder hidden states (text re-encoded with text2music instruction)
+            if (enc_switch) {
+                memcpy(enc_buf.data(), enc_switch, H * enc_S * N * sizeof(float));
+                // rebuild cross-attention mask with non-cover encoder lengths
+                if (real_enc_S_switch) {
+                    for (int b = 0; b < N; b++) {
+                        int re = real_enc_S_switch[b];
+                        for (int qi = 0; qi < S; qi++) {
+                            for (int ki = 0; ki < enc_S; ki++) {
+                                float v                                  = (ki < re) ? 0.0f : -INFINITY;
+                                ca_data[b * enc_S * S + qi * enc_S + ki] = ggml_fp32_to_fp16(v);
+                            }
+                        }
+                    }
+                }
+            }
             fprintf(stderr, "[DiT] Cover: switched to non-cover context at step %d/%d\n", step, num_steps);
         }
 
@@ -489,6 +510,26 @@ static int dit_ggml_generate(DiTGGML *           model,
             float dt = t_curr - schedule[step + 1];
             for (int i = 0; i < n_total; i++) {
                 xt[i] -= vt[i] * dt;
+            }
+
+            // repaint injection: re-anchor preserved regions to noised source.
+            // xt[outside mask] = t_next * noise + (1 - t_next) * clean_src
+            // only for the first half of steps (injection_ratio = 0.5)
+            if (repaint_src && repaint_t1 > repaint_t0) {
+                int injection_cutoff = (num_steps + 1) / 2;
+                if (step < injection_cutoff) {
+                    float t_next = schedule[step + 1];
+                    for (int b = 0; b < N; b++) {
+                        for (int t = 0; t < T; t++) {
+                            if (t < repaint_t0 || t >= repaint_t1) {
+                                for (int ch = 0; ch < Oc; ch++) {
+                                    int idx = b * n_per + t * Oc + ch;
+                                    xt[idx] = t_next * noise[idx] + (1.0f - t_next) * repaint_src[t * Oc + ch];
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
 

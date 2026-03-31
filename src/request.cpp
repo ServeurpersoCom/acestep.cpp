@@ -39,6 +39,7 @@ void request_init(AceRequest * r) {
     r->guidance_scale       = 0.0f;  // 0 = auto (1.0 for all models)
     r->shift                = 0.0f;  // 0 = auto (turbo: 3.0, base/sft: 1.0)
     r->audio_cover_strength = 0.5f;
+    r->cover_noise_strength = 0.0f;
     r->repainting_start     = -1.0f;
     r->repainting_end       = -1.0f;
     r->task_type            = "";
@@ -124,6 +125,9 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "audio_cover_strength")) && yyjson_is_num(v)) {
         r->audio_cover_strength = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "cover_noise_strength")) && yyjson_is_num(v)) {
+        r->cover_noise_strength = (float) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "repainting_start")) && yyjson_is_num(v)) {
         r->repainting_start = (float) yyjson_get_num(v);
@@ -260,6 +264,7 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r) {
     yyjson_mut_obj_add_real(doc, root, "guidance_scale", r->guidance_scale);
     yyjson_mut_obj_add_real(doc, root, "shift", r->shift);
     yyjson_mut_obj_add_real(doc, root, "audio_cover_strength", r->audio_cover_strength);
+    yyjson_mut_obj_add_real(doc, root, "cover_noise_strength", r->cover_noise_strength);
     yyjson_mut_obj_add_real(doc, root, "repainting_start", r->repainting_start);
     yyjson_mut_obj_add_real(doc, root, "repainting_end", r->repainting_end);
     if (!r->task_type.empty()) {
@@ -314,8 +319,9 @@ void request_dump(const AceRequest * r, FILE * f) {
     fprintf(f, "[Request] lm: temp=%.2f cfg=%.1f top_p=%.2f top_k=%d\n", r->lm_temperature, r->lm_cfg_scale,
             r->lm_top_p, r->lm_top_k);
     fprintf(f, "[Request] dit: steps=%d guidance=%.1f shift=%.1f\n", r->inference_steps, r->guidance_scale, r->shift);
-    if (r->audio_cover_strength != 0.5f) {
-        fprintf(f, "[Request] cover: strength=%.2f\n", r->audio_cover_strength);
+    if (r->audio_cover_strength != 0.5f || r->cover_noise_strength != 0.0f) {
+        fprintf(f, "[Request] cover: strength=%.2f noise_strength=%.2f\n", r->audio_cover_strength,
+                r->cover_noise_strength);
     }
     if (r->repainting_start >= 0.0f || r->repainting_end >= 0.0f) {
         fprintf(f, "[Request] repaint: start=%.1f end=%.1f\n", r->repainting_start, r->repainting_end);

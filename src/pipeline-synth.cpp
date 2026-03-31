@@ -294,6 +294,12 @@ int ace_synth_generate(AceSynth *         ctx,
     float rs         = rr.repainting_start;
     float re         = rr.repainting_end;
 
+    // use_source_context: task requires source latents in DiT context.
+    // Separates "audio physically present" (have_cover) from "DiT should see source".
+    // text2music ignores src_audio even if provided (uses it for timbre only).
+    bool use_source_context = (task == TASK_COVER || task == TASK_REPAINT || task == TASK_LEGO ||
+                               task == TASK_EXTRACT || task == TASK_COMPLETE);
+
     // validation: tasks that need source audio
     if (task == TASK_COVER || task == TASK_REPAINT || task == TASK_LEGO || task == TASK_EXTRACT ||
         task == TASK_COMPLETE) {
@@ -380,9 +386,9 @@ int ace_synth_generate(AceSynth *         ctx,
     }
 
     // T = number of 25Hz latent frames for DiT
-    // Cover: from source audio. Codes: from code count. Else: from duration.
+    // Source tasks: from source audio. Codes: from code count. Else: from duration.
     int T;
-    if (have_cover) {
+    if (use_source_context && have_cover) {
         T        = T_cover;
         // duration in metas must match actual source length, not JSON default
         duration = (float) T_cover / (float) FRAMES_PER_SECOND;
@@ -442,10 +448,9 @@ int ace_synth_generate(AceSynth *         ctx,
         instruction_str = dit_instr_complete(track_upper);
     } else if (task == TASK_REPAINT) {
         instruction_str = DIT_INSTR_REPAINT;
-    } else if (task == TASK_COVER || have_cover || have_codes) {
-        // cover instruction whenever source latents are present in context.
-        // this includes text2music with LM-generated audio_codes: the DiT
-        // sees decoded latents (not silence) and was trained with this instruction.
+    } else if (task == TASK_COVER || have_codes) {
+        // cover instruction when task is cover, or text2music with LM-generated codes
+        // (DiT sees decoded latents in context and was trained with this instruction).
         instruction_str = DIT_INSTR_COVER;
     } else {
         instruction_str = DIT_INSTR_TEXT2MUSIC;
@@ -546,11 +551,60 @@ int ace_synth_generate(AceSynth *         ctx,
         }
     }
 
-    // find max enc_S, pad shorter encodings with null_cond, stack into [H, max_enc_S, N]
+    // non-cover encoding: re-encode text with text2music instruction for post-switch phase.
+    // same lyrics/timbre, only the instruction changes (cover -> text2music).
+    bool need_enc_switch = use_source_context && !is_repaint && rr.audio_cover_strength < 1.0f;
+    std::vector<std::vector<float>> per_enc_nc(batch_n);
+    std::vector<int>                per_enc_S_nc(batch_n, 0);
+
+    if (need_enc_switch) {
+        for (int b = 0; b < batch_n; b++) {
+            const AceRequest & rb = reqs[b];
+
+            char bpm_b[16] = "N/A";
+            if (rb.bpm > 0) {
+                snprintf(bpm_b, sizeof(bpm_b), "%d", rb.bpm);
+            }
+            const char * keyscale_b = rb.keyscale.empty() ? "N/A" : rb.keyscale.c_str();
+            const char * timesig_b  = rb.timesignature.empty() ? "N/A" : rb.timesignature.c_str();
+            const char * language_b = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
+
+            char metas_b[512];
+            snprintf(metas_b, sizeof(metas_b),
+                     "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm_b, timesig_b,
+                     keyscale_b, (int) duration);
+            std::string text_str = std::string("# Instruction\n") + DIT_INSTR_TEXT2MUSIC + "\n\n" + "# Caption\n" +
+                                   rb.caption + "\n\n" + "# Metas\n" + metas_b + "<|endoftext|>\n";
+            std::string lyric_str =
+                std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
+
+            auto text_ids  = bpe_encode(&ctx->bpe, text_str.c_str(), true);
+            auto lyric_ids = bpe_encode(&ctx->bpe, lyric_str.c_str(), true);
+            int  S_text    = (int) text_ids.size();
+            int  S_lyric   = (int) lyric_ids.size();
+
+            std::vector<float> text_hidden(H_text * S_text);
+            qwen3_forward(&ctx->text_enc, text_ids.data(), S_text, text_hidden.data());
+
+            std::vector<float> lyric_embed(H_text * S_lyric);
+            qwen3_embed_lookup(&ctx->text_enc, lyric_ids.data(), S_lyric, lyric_embed.data());
+
+            cond_ggml_forward(&ctx->cond_enc, text_hidden.data(), S_text, lyric_embed.data(), S_lyric,
+                              timbre_feats.data(), S_ref, per_enc_nc[b], &per_enc_S_nc[b]);
+            fprintf(stderr, "[Encode Batch%d] non-cover: %d+%d tokens -> enc_S=%d\n", b, S_text, S_lyric,
+                    per_enc_S_nc[b]);
+        }
+    }
+
+    // find max enc_S across both cover and non-cover encodings,
+    // pad shorter encodings with null_cond, stack into [H, max_enc_S, N]
     int max_enc_S = 0;
     for (int b = 0; b < batch_n; b++) {
         if (per_enc_S[b] > max_enc_S) {
             max_enc_S = per_enc_S[b];
+        }
+        if (need_enc_switch && per_enc_S_nc[b] > max_enc_S) {
+            max_enc_S = per_enc_S_nc[b];
         }
     }
     enc_S = max_enc_S;
@@ -563,6 +617,23 @@ int ace_synth_generate(AceSynth *         ctx,
             memcpy(dst + s * H_cond, null_cond_vec.data(), H_cond * sizeof(float));
         }
     }
+
+    // pad and stack non-cover encoding (same max_enc_S for graph compatibility)
+    std::vector<float> enc_hidden_nc;
+    std::vector<int>   per_enc_S_nc_final;
+    if (need_enc_switch) {
+        enc_hidden_nc.resize(H_cond * max_enc_S * batch_n);
+        per_enc_S_nc_final.resize(batch_n);
+        for (int b = 0; b < batch_n; b++) {
+            float * dst = enc_hidden_nc.data() + b * max_enc_S * H_cond;
+            memcpy(dst, per_enc_nc[b].data(), (size_t) per_enc_S_nc[b] * H_cond * sizeof(float));
+            for (int s = per_enc_S_nc[b]; s < max_enc_S; s++) {
+                memcpy(dst + s * H_cond, null_cond_vec.data(), H_cond * sizeof(float));
+            }
+            per_enc_S_nc_final[b] = per_enc_S_nc[b];
+        }
+    }
+
     if (batch_n > 1) {
         fprintf(stderr, "[Encode] Per-batch encoding done: max_enc_S=%d\n", max_enc_S);
     }
@@ -589,7 +660,7 @@ int ace_synth_generate(AceSynth *         ctx,
 
     std::vector<float> context(batch_n * T * ctx_ch);
 
-    if (have_cover) {
+    if (use_source_context && have_cover) {
         // Cover/Lego/Repaint: build once, replicate (cover_latents are shared)
         std::vector<float> context_single(T * ctx_ch);
         for (int t = 0; t < T; t++) {
@@ -655,7 +726,7 @@ int ace_synth_generate(AceSynth *         ctx,
     // Repaint mode: mask handles region selection, no context switching needed
     std::vector<float> context_silence;
     int                cover_steps = -1;
-    if (have_cover && !is_repaint) {
+    if (use_source_context && !is_repaint) {
         float cover_strength = rr.audio_cover_strength;
         if (cover_strength < 1.0f) {
             // Build silence context: all frames use silence_latent
@@ -688,6 +759,44 @@ int ace_synth_generate(AceSynth *         ctx,
         fprintf(stderr, "[Context Batch%d] Philox noise seed=%lld, [%d, %d]\n", b, (long long) reqs[b].seed, T, Oc);
     }
 
+    // cover_noise_strength: start diffusion closer to source instead of pure noise.
+    // xt = nearest_t * noise + (1 - nearest_t) * cover_latents, then truncate schedule.
+    if (use_source_context && have_cover && rr.cover_noise_strength > 0.0f) {
+        float effective_noise_level = 1.0f - rr.cover_noise_strength;
+        // find nearest timestep in schedule
+        int   start_idx             = 0;
+        float best_dist             = fabsf(schedule[0] - effective_noise_level);
+        for (int i = 1; i < num_steps; i++) {
+            float dist = fabsf(schedule[i] - effective_noise_level);
+            if (dist < best_dist) {
+                best_dist = dist;
+                start_idx = i;
+            }
+        }
+        float nearest_t = schedule[start_idx];
+        // blend: xt = nearest_t * noise + (1 - nearest_t) * cover_latents
+        for (int b = 0; b < batch_n; b++) {
+            float * n = noise.data() + b * Oc * T;
+            for (int t = 0; t < T; t++) {
+                int           t_src = t < T_cover ? t : T_cover - 1;
+                const float * src   = cover_latents.data() + t_src * Oc;
+                for (int c = 0; c < Oc; c++) {
+                    int idx = t * Oc + c;
+                    n[idx]  = nearest_t * n[idx] + (1.0f - nearest_t) * src[c];
+                }
+            }
+        }
+        // truncate schedule
+        schedule.erase(schedule.begin(), schedule.begin() + start_idx);
+        num_steps = (int) schedule.size();
+        // recalculate cover_steps with remaining steps
+        if (cover_steps >= 0) {
+            cover_steps = (int) ((float) num_steps * rr.audio_cover_strength);
+        }
+        fprintf(stderr, "[Cover] cover_noise_strength=%.2f -> noise_level=%.4f, nearest_t=%.4f, remaining_steps=%d\n",
+                rr.cover_noise_strength, effective_noise_level, nearest_t, num_steps);
+    }
+
     // DiT Generate
     std::vector<float> output(batch_n * Oc * T);
 
@@ -703,13 +812,26 @@ int ace_synth_generate(AceSynth *         ctx,
     debug_dump_2d(&dbg, "context", context.data(), T, ctx_ch);
 
     fprintf(stderr, "[DiT] Starting: T=%d, S=%d, enc_S=%d, steps=%d, batch=%d%s\n", T, S, enc_S, num_steps, batch_n,
-            have_cover ? " (cover)" : "");
+            use_source_context ? " (cover)" : "");
+
+    // repaint injection buffer: cover_latents padded to T with silence.
+    // T may exceed T_cover due to patch_size rounding; frames beyond T_cover use silence.
+    std::vector<float> repaint_src;
+    if (is_repaint) {
+        repaint_src.resize(T * Oc);
+        for (int t = 0; t < T; t++) {
+            const float * src = (t < T_cover) ? cover_latents.data() + t * Oc : ctx->silence_full.data() + t * Oc;
+            memcpy(repaint_src.data() + t * Oc, src, Oc * sizeof(float));
+        }
+    }
 
     timer.reset();
-    int dit_rc = dit_ggml_generate(&ctx->dit, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n,
-                                   num_steps, schedule.data(), output.data(), guidance_scale, &dbg,
-                                   context_silence.empty() ? nullptr : context_silence.data(), cover_steps, cancel,
-                                   cancel_data, per_S.data(), per_enc_S.data());
+    int dit_rc = dit_ggml_generate(
+        &ctx->dit, noise.data(), context.data(), enc_hidden.data(), enc_S, T, batch_n, num_steps, schedule.data(),
+        output.data(), guidance_scale, &dbg, context_silence.empty() ? nullptr : context_silence.data(), cover_steps,
+        cancel, cancel_data, per_S.data(), per_enc_S.data(), enc_hidden_nc.empty() ? nullptr : enc_hidden_nc.data(),
+        per_enc_S_nc_final.empty() ? nullptr : per_enc_S_nc_final.data(),
+        repaint_src.empty() ? nullptr : repaint_src.data(), repaint_t0, repaint_t1);
     if (dit_rc != 0) {
         return -1;
     }

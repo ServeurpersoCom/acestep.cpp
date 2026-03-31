@@ -180,6 +180,8 @@
 		if (shift != null) out.shift = shift;
 		const audio_cover_strength = num(r.audio_cover_strength);
 		if (audio_cover_strength != null) out.audio_cover_strength = audio_cover_strength;
+		const cover_noise_strength = num(r.cover_noise_strength);
+		if (cover_noise_strength != null) out.cover_noise_strength = cover_noise_strength;
 		const lm_batch_size = num(r.lm_batch_size);
 		if (lm_batch_size != null && lm_batch_size >= 1) out.lm_batch_size = lm_batch_size;
 		const synth_batch_size = num(r.synth_batch_size);
@@ -212,6 +214,7 @@
 			shift: app.request.shift,
 			seed: app.request.seed,
 			audio_cover_strength: app.request.audio_cover_strength,
+			cover_noise_strength: app.request.cover_noise_strength,
 			synth_batch_size: app.request.synth_batch_size
 		});
 		app.pendingIndex = index;
@@ -243,6 +246,7 @@
 					shift: app.request.shift,
 					seed: app.request.seed,
 					audio_cover_strength: app.request.audio_cover_strength,
+					cover_noise_strength: app.request.cover_noise_strength,
 					synth_batch_size: app.request.synth_batch_size
 				});
 			}
@@ -294,6 +298,8 @@
 			if (sh != null) synthParams.shift = sh;
 			const acs = num(app.request.audio_cover_strength);
 			if (acs != null) synthParams.audio_cover_strength = acs;
+			const cns = num(app.request.cover_noise_strength);
+			if (cns != null) synthParams.cover_noise_strength = cns;
 			// task_type and track from form
 			const t = app.request.task_type || '';
 			if (t) synthParams.task_type = t;
@@ -576,6 +582,13 @@
 						type="text"
 						placeholder={ph(d?.audio_cover_strength)}
 						bind:value={app.request.audio_cover_strength}
+					/></label
+				>
+				<label
+					>Cover noise <input
+						type="text"
+						placeholder={ph(d?.cover_noise_strength)}
+						bind:value={app.request.cover_noise_strength}
 					/></label
 				>
 				<label
