@@ -45,7 +45,7 @@ struct AceRequest {
     float shift;            // 0 = auto (turbo: 3.0, base/sft: 1.0)
 
     // cover mode (active when source audio is provided)
-    float audio_cover_strength;  // 0.5 (0-1, fraction of DiT steps using source context)
+    float audio_cover_strength;  // 1.0 (0-1, fraction of DiT steps using source context)
     float cover_noise_strength;  // 0.0 (0-1, how close to source: 0=pure noise, 1=source)
 
     // repaint mode (requires source audio)

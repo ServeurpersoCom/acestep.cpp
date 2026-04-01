@@ -189,8 +189,7 @@ cat > /tmp/cover.json << 'EOF'
 {
     "task_type": "cover",
     "caption": "Jazz piano cover with brushed drums and walking bass",
-    "lyrics": "[Instrumental]",
-    "audio_cover_strength": 0.5
+    "lyrics": "[Instrumental]"
 }
 EOF
 
@@ -349,7 +348,8 @@ the LLM fills them, or a sensible runtime default is applied.
     "inference_steps":      0,
     "guidance_scale":       0.0,
     "shift":                0.0,
-    "audio_cover_strength": 0.5,
+    "audio_cover_strength": 1.0,
+    "cover_noise_strength": 0.0,
     "repainting_start":     -1,
     "repainting_end":       -1,
     "task_type":            "",
@@ -428,13 +428,14 @@ Comma-separated FSQ token IDs produced by ace-lm. When non-empty, the
 entire LLM pass is skipped and ace-synth decodes these codes directly
 (passthrough mode).
 
-**`audio_cover_strength`** (float, default `0.5`)
+**`audio_cover_strength`** (float, default `1.0`)
 Only used in `cover` mode. Fraction of DiT steps that see the source audio
-as context. At `1.0` all steps use the source (near passthrough). At `0.0` no
-steps use the source (pure text2music, source is ignored). At `0.5` the first
-half of the steps are guided by the source structure, the second half are free
-to follow the caption. Lower values give more creative freedom, higher values
-preserve more of the original. Forced to 1.0 for `lego`, `extract`, `complete`.
+as context. At `1.0` all steps use the source. At `0.0` no
+steps use the source (pure text2music, source is ignored). Values below 1.0
+switch DiT context to silence and encoder hidden states to text2music
+instruction at the corresponding step. Lower values give more creative
+freedom, higher values preserve more of the original structure.
+Forced to 1.0 for `lego`, `extract`, `complete`.
 Ignored in `repaint` mode (the mask handles everything).
 
 **`cover_noise_strength`** (float, default `0.0`)
@@ -615,7 +616,7 @@ static merge: inference runs at full speed with no adapter overhead.
 `--src-audio` provides source content for cover, repaint, lego, extract and
 complete tasks. The audio (WAV or MP3, any sample rate) is resampled to 48kHz
 and VAE-encoded once. `audio_cover_strength` in the JSON controls how many
-DiT steps use the source context (default 0.5). `cover_noise_strength`
+DiT steps use the source context (default 1.0). `cover_noise_strength`
 blends the initial noise with source latents to start diffusion closer to
 the source (default 0.0).
 

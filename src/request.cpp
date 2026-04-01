@@ -38,7 +38,7 @@ void request_init(AceRequest * r) {
     r->inference_steps      = 0;     // 0 = auto (turbo: 8, base/sft: 50)
     r->guidance_scale       = 0.0f;  // 0 = auto (1.0 for all models)
     r->shift                = 0.0f;  // 0 = auto (turbo: 3.0, base/sft: 1.0)
-    r->audio_cover_strength = 0.5f;
+    r->audio_cover_strength = 1.0f;
     r->cover_noise_strength = 0.0f;
     r->repainting_start     = -1.0f;
     r->repainting_end       = -1.0f;
@@ -319,7 +319,7 @@ void request_dump(const AceRequest * r, FILE * f) {
     fprintf(f, "[Request] lm: temp=%.2f cfg=%.1f top_p=%.2f top_k=%d\n", r->lm_temperature, r->lm_cfg_scale,
             r->lm_top_p, r->lm_top_k);
     fprintf(f, "[Request] dit: steps=%d guidance=%.1f shift=%.1f\n", r->inference_steps, r->guidance_scale, r->shift);
-    if (r->audio_cover_strength != 0.5f || r->cover_noise_strength != 0.0f) {
+    if (r->audio_cover_strength != 1.0f || r->cover_noise_strength != 0.0f) {
         fprintf(f, "[Request] cover: strength=%.2f noise_strength=%.2f\n", r->audio_cover_strength,
                 r->cover_noise_strength);
     }

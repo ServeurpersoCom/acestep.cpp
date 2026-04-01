@@ -10,6 +10,7 @@
 #include "dit-sampler.h"
 #include "dit.h"
 #include "fsq-detok.h"
+#include "fsq-tok.h"
 #include "gguf-weights.h"
 #include "philox.h"
 #include "qwen3-enc.h"
@@ -58,6 +59,7 @@ struct AceSynth {
     CondGGML      cond_enc;
     VAEGGML       vae;
     DetokGGML     detok;
+    TokGGML       tok;
     BPETokenizer  bpe;
 
     // Metadata from DiT GGUF
@@ -68,6 +70,7 @@ struct AceSynth {
     AceSynthParams params;
     bool           have_vae;
     bool           have_detok;
+    bool           have_tok;
 
     // Derived constants
     int Oc;      // out_channels (64)
@@ -101,6 +104,7 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
     ctx->params     = *params;
     ctx->have_vae   = false;
     ctx->have_detok = false;
+    ctx->have_tok   = false;
 
     Timer timer;
 
@@ -221,6 +225,14 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
         fprintf(stderr, "[Load] Detokenizer: %.1f ms\n", timer.ms());
     }
 
+    // Tokenizer (for FSQ roundtrip in cover mode, weights in DiT GGUF)
+    timer.reset();
+    ctx->tok = {};
+    if (tok_ggml_load(&ctx->tok, params->dit_path, ctx->dit.backend, ctx->dit.cpu_backend)) {
+        ctx->have_tok = true;
+        fprintf(stderr, "[Load] Tokenizer: %.1f ms\n", timer.ms());
+    }
+
     fprintf(stderr, "[Ace-Synth] All models loaded, turbo=%s\n", ctx->is_turbo ? "yes" : "no");
     if (!params->use_fa) {
         fprintf(stderr, "[Ace-Synth] flash attention disabled\n");
@@ -277,6 +289,7 @@ int ace_synth_generate(AceSynth *         ctx,
         cover_latents.resize(T_cover * 64);
         fprintf(stderr, "[Cover] Encoded: T_cover=%d (%.2fs), %.1f ms\n", T_cover, (float) T_cover * 1920.0f / 48000.0f,
                 timer.ms());
+
         have_cover = true;
     }
 
@@ -307,6 +320,31 @@ int ace_synth_generate(AceSynth *         ctx,
         if (!have_cover) {
             fprintf(stderr, "[%s] ERROR: requires source audio\n", task.c_str());
             return -1;
+        }
+    }
+
+    // FSQ roundtrip for cover: tokenize (25Hz->5Hz) + detokenize (5Hz->25Hz).
+    // The lossy FSQ bottleneck gives the DiT creative freedom to produce a harmonic
+    // reinterpretation of the source rather than a rigid copy. The output stays
+    // rhythmically and melodically synchronized with the original (playable in sync),
+    // while the DiT works on its training-distribution latents instead of clean VAE output.
+    // Other tasks (lego, extract, repaint, complete) use clean latents directly.
+    if (task == TASK_COVER && have_cover && ctx->have_tok && ctx->have_detok) {
+        timer.reset();
+        int              T_5Hz = (T_cover + 4) / 5;
+        std::vector<int> codes(T_5Hz);
+        int              T_5Hz_actual =
+            tok_ggml_encode(&ctx->tok, cover_latents.data(), T_cover, codes.data(), ctx->silence_full.data());
+        if (T_5Hz_actual > 0) {
+            int                T_25Hz_rt = T_5Hz_actual * 5;
+            std::vector<float> rt_latents(T_25Hz_rt * 64);
+            int                ret = detok_ggml_decode(&ctx->detok, codes.data(), T_5Hz_actual, rt_latents.data());
+            if (ret >= 0) {
+                int copy_T = T_25Hz_rt < T_cover ? T_25Hz_rt : T_cover;
+                memcpy(cover_latents.data(), rt_latents.data(), (size_t) copy_T * 64 * sizeof(float));
+                fprintf(stderr, "[Cover] FSQ roundtrip: %d->%d->%d frames, %.1f ms\n", T_cover, T_5Hz_actual, copy_T,
+                        timer.ms());
+            }
         }
     }
 
@@ -921,6 +959,9 @@ void ace_synth_free(AceSynth * ctx) {
     }
     if (ctx->have_detok) {
         detok_ggml_free(&ctx->detok);
+    }
+    if (ctx->have_tok) {
+        tok_ggml_free(&ctx->tok);
     }
     if (ctx->have_vae) {
         vae_ggml_free(&ctx->vae);
