@@ -301,6 +301,8 @@
 			if (acs != null) synthParams.audio_cover_strength = acs;
 			const cns = num(app.request.cover_noise_strength);
 			if (cns != null) synthParams.cover_noise_strength = cns;
+			const rps = num(app.request.repaint_strength);
+			if (rps != null) synthParams.repaint_strength = rps;
 			// task_type and track from form
 			const t = app.request.task_type || '';
 			if (t) synthParams.task_type = t;
@@ -602,6 +604,13 @@
 						type="text"
 						placeholder={ph(d?.cover_noise_strength)}
 						bind:value={app.request.cover_noise_strength}
+					/></label
+				>
+				<label
+					>Repaint strength <input
+						type="text"
+						placeholder={ph(d?.repaint_strength)}
+						bind:value={app.request.repaint_strength}
 					/></label
 				>
 				<label

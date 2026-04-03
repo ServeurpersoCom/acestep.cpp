@@ -25,6 +25,7 @@ export interface AceRequest {
 	cover_noise_strength?: number;
 	repainting_start?: number;
 	repainting_end?: number;
+	repaint_strength?: number;
 	task_type?: string;
 	track?: string;
 	// server routing (not part of C++ AceRequest, parsed separately)

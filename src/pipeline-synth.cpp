@@ -389,6 +389,19 @@ int ace_synth_generate(AceSynth *         ctx,
         }
     }
 
+    // Resolve repaint quality params from repaint_strength.
+    // Python: _resolve_repaint_config("balanced", strength).
+    // 0.0 = aggressive, 0.5 = balanced (default), 1.0 = conservative.
+    {
+        float rs              = s.rr.repaint_strength;
+        if (rs < 0.0f) { rs = 0.0f; }
+        if (rs > 1.0f) { rs = 1.0f; }
+        float inv             = 1.0f - rs;
+        s.repaint_injection_ratio  = inv;
+        s.repaint_crossfade_frames = (int) (25.0f * inv + 0.5f);
+        s.repaint_wav_cf_sec       = 0.05f * inv;
+    }
+
     // Encode timbre from ref_audio (independent of task)
     ops_encode_timbre(ctx, ref_audio, ref_len, s);
 

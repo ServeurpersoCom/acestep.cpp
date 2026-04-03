@@ -66,6 +66,11 @@ struct SynthState {
     int repaint_t0;
     int repaint_t1;
 
+    // repaint quality (resolved from repaint_strength via _resolve_repaint_config)
+    float repaint_injection_ratio;
+    int   repaint_crossfade_frames;
+    float repaint_wav_cf_sec;
+
     // DiT instruction
     std::string instruction_str;     // main DiT instruction (set by orchestrator step 6)
     std::string nc_instruction_str;  // non-cover pass instruction (for cover_steps < 1.0 switching)

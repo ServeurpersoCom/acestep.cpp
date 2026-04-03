@@ -692,8 +692,8 @@ int ops_dit_generate(AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)
         s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
         s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
         s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(),
-        s.repaint_src.empty() ? nullptr : s.repaint_src.data(), s.repaint_t0, s.repaint_t1, 0.5f,
-        12);  // injection_ratio=0.5, crossfade_frames=12 (Python balanced/0.5)
+        s.repaint_src.empty() ? nullptr : s.repaint_src.data(), s.repaint_t0, s.repaint_t1,
+        s.repaint_injection_ratio, s.repaint_crossfade_frames);
     if (dit_rc != 0) {
         return -1;
     }
@@ -771,7 +771,7 @@ int ops_vae_decode_and_splice(AceSynth *    ctx,
                 end_s        = end_s < start_s ? start_s : (end_s > T_splice ? T_splice : end_s);
                 // skip splice if region covers everything
                 if (start_s > 0 || end_s < T_splice) {
-                    int cf_s       = (int) (0.025f * 48000.0f);  // 25ms crossfade (Python balanced/0.5)
+                    int cf_s       = (int) (s.repaint_wav_cf_sec * 48000.0f);
                     int fade_start = start_s - cf_s > 0 ? start_s - cf_s : 0;
                     int fade_end   = end_s + cf_s < T_splice ? end_s + cf_s : T_splice;
                     for (int ch = 0; ch < 2; ch++) {
@@ -799,7 +799,8 @@ int ops_vae_decode_and_splice(AceSynth *    ctx,
                             pred[si] = src_audio[(size_t) si * 2 + ch];
                         }
                     }
-                    fprintf(stderr, "[Splice Batch%d] wav splice %.1fs-%.1fs cf=25ms\n", b, s.rs, s.re);
+                    fprintf(stderr, "[Splice Batch%d] wav splice %.1fs-%.1fs cf=%.0fms\n", b, s.rs, s.re,
+                            s.repaint_wav_cf_sec * 1000.0f);
                 }
             }
         }
