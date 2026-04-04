@@ -149,6 +149,8 @@ static AceUnderstandParams g_und_params;
 // limits
 static int g_max_batch = 1;
 static int g_mp3_kbps  = 128;
+static bool g_unload_lm_before_synth = false;
+static bool g_unload_synth_before_lm = false;
 
 // log capture: intercept stderr via pipe, forward to terminal + ring buffer.
 // SSE clients connect to /logs and receive lines in real time.
@@ -381,6 +383,12 @@ static bool ensure_lm(const std::string & name) {
     // unload old
     ace_understand_free(g_ctx_understand);
     g_ctx_understand = nullptr;
+    if (g_unload_synth_before_lm && g_ctx_synth) {
+        ace_synth_free(g_ctx_synth);
+        g_ctx_synth = nullptr;
+        g_loaded_dit.clear();
+        g_loaded_lora.clear();
+    }
     ace_lm_free(g_ctx_lm);
     g_ctx_lm = nullptr;
 
@@ -681,6 +689,14 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         free(ref_interleaved);
         json_busy(res);
         return;
+    }
+
+    // optionally unload LM before synth to free VRAM
+    if (g_unload_lm_before_synth && g_ctx_lm) {
+        fprintf(stderr, "[Server] Unloading LM before synth (--unload-lm)\n");
+        ace_lm_free(g_ctx_lm);
+        g_ctx_lm = nullptr;
+        g_loaded_lm.clear();
     }
 
     // load-on-demand: resolve DiT + LoRA
@@ -1029,6 +1045,10 @@ int main(int argc, char ** argv) {
         } else if (!strcmp(argv[i], "--clamp-fp16")) {
             g_lm_params.clamp_fp16    = true;
             g_synth_params.clamp_fp16 = true;
+        } else if (!strcmp(argv[i], "--unload-lm")) {
+            g_unload_lm_before_synth = true;
+        } else if (!strcmp(argv[i], "--unload-synth")) {
+            g_unload_synth_before_lm = true;
 
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
