@@ -8,7 +8,14 @@
 // Each projection (q_proj, k_proj, v_proj, o_proj) has its own PendingCopy
 // even when destined for a fused QKV tensor. We patch each one separately,
 // so fusion proceeds normally on already merged data.
+//
+// Performance: the matmul B @ A dispatches to the best available backend
+// via ggml_backend_graph_compute. On CUDA this uses cuBLAS, on CPU it uses
+// ggml's threaded SIMD kernels. PendingCopy lookup is O(1) via hashmap.
+// Base weight dequant happens row by row to halve peak memory.
 
+#include "ggml-alloc.h"
+#include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
 #include "safetensors.h"
@@ -25,6 +32,7 @@
 #include <cstring>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 // Convert safetensors tensor data to F32 based on dtype string.
@@ -130,6 +138,7 @@ static int lora_read_alpha(const char * dir) {
             alpha = atoi(p + 1);
         }
     }
+
     // fallback: try "alpha": <int> (some configs use this)
     if (alpha == 0) {
         p = strstr(json, "\"alpha\"");
@@ -193,20 +202,94 @@ static size_t lora_requant(const float * src, void * dst, int64_t nel, int64_t n
     return 0;
 }
 
+// Round F32 data through BF16 in place to match PEFT's intermediate precision.
+// Processes in fixed chunks to avoid large stack allocations.
+static void lora_bf16_round(float * data, int64_t n) {
+    const int64_t chunk = 4096;
+    ggml_bf16_t   tmp[4096];
+    for (int64_t i = 0; i < n; i += chunk) {
+        int64_t len = (n - i < chunk) ? n - i : chunk;
+        ggml_fp32_to_bf16_row_ref(data + i, tmp, len);
+        ggml_bf16_to_fp32_row(tmp, data + i, len);
+    }
+}
+
+// Compute delta = scaling * B @ A via the best available backend.
+//
+// On CUDA: tensors are uploaded to GPU, cuBLAS does the GEMM, result
+// is downloaded back. On CPU: ggml's threaded SIMD kernels run locally.
+// The backend abstraction handles all memory management transparently.
+//
+// A is [rank, in_feat] row-major (safetensors convention).
+// B is [out_feat, rank] row-major.
+// Writes out_feat * in_feat floats into delta.
+static void lora_gemm(const float *  a,
+                      const float *  b,
+                      float *        delta,
+                      int64_t        out_feat,
+                      int64_t        rank,
+                      int64_t        in_feat,
+                      float          scaling,
+                      ggml_backend_t backend) {
+    int64_t a_nel = rank * in_feat;
+    int64_t b_nel = out_feat * rank;
+    int64_t c_nel = out_feat * in_feat;
+
+    // metadata context: tensor descriptors + graph only, no data
+    // (the backend allocates tensor memory via ggml_backend_alloc_ctx_tensors)
+    size_t                  meta   = ggml_tensor_overhead() * 6 + ggml_graph_overhead() + 4096;
+    struct ggml_init_params params = { meta, NULL, true };
+    struct ggml_context *   ctx    = ggml_init(params);
+
+    // input tensors store raw row-major data from safetensors.
+    // ggml is column-major, so row-major A[rank, in_feat] maps to ggml [in_feat, rank].
+    struct ggml_tensor * ta = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, in_feat, rank);
+    struct ggml_tensor * tb = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, rank, out_feat);
+
+    // graph: transpose A so rank becomes ne[0] (contraction dim), then GEMM + scale.
+    // ggml_cont materializes the transposed view into a contiguous tensor.
+    // on CUDA, all three ops run as GPU kernels (transpose copy + cuBLAS + scale).
+    struct ggml_tensor * ta_t   = ggml_cont(ctx, ggml_transpose(ctx, ta));
+    struct ggml_tensor * result = ggml_scale(ctx, ggml_mul_mat(ctx, ta_t, tb), scaling);
+
+    struct ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, result);
+
+    // allocate all tensor data on the backend (GPU VRAM or CPU RAM)
+    ggml_backend_buffer_t buf = ggml_backend_alloc_ctx_tensors(ctx, backend);
+
+    // upload: host to device (noop when backend is CPU)
+    ggml_backend_tensor_set(ta, a, 0, (size_t) a_nel * sizeof(float));
+    ggml_backend_tensor_set(tb, b, 0, (size_t) b_nel * sizeof(float));
+
+    // compute: transpose + matmul + scale, all on the backend
+    ggml_backend_graph_compute(backend, graph);
+
+    // download: device to host (noop when backend is CPU)
+    ggml_backend_tensor_get(result, delta, 0, (size_t) c_nel * sizeof(float));
+
+    ggml_backend_buffer_free(buf);
+    ggml_free(ctx);
+}
+
 // Main LoRA merge function.
 //
 // Call after all GGUF tensors are loaded into wctx->pending but before wctx_alloc.
 // For each LoRA pair found in the safetensors file:
 //   1. Map PEFT key to GGUF tensor name
-//   2. Find the matching PendingCopy by comparing src pointers
-//   3. Dequant base weight to F32
-//   4. Add (alpha/rank) * scale * B @ A
-//   5. Requant back to original type into a staging buffer
-//   6. Patch PendingCopy.src to point to the merged data
+//   2. Find the matching PendingCopy via hashmap (O(1) lookup)
+//   3. Compute delta = (alpha/rank) * scale * B @ A via backend GEMM
+//   4. Round delta through BF16 to match PEFT intermediate precision
+//   5. Dequant base weight row by row, add to delta
+//   6. Requant into staging buffer, patch PendingCopy.src
 //
 // The lora_path can be a .safetensors file or a directory containing
 // adapter_model.safetensors and adapter_config.json.
-static bool lora_merge(WeightCtx * wctx, const GGUFModel & gf, const char * lora_path, float scale) {
+static bool lora_merge(WeightCtx *       wctx,
+                       const GGUFModel & gf,
+                       const char *      lora_path,
+                       float             scale,
+                       ggml_backend_t    backend) {
     // resolve paths: if lora_path is a directory, look for adapter_model.safetensors
     std::string sf_path = lora_path;
     std::string dir     = lora_path;
@@ -261,6 +344,13 @@ static bool lora_merge(WeightCtx * wctx, const GGUFModel & gf, const char * lora
         }
     }
 
+    // O(1) PendingCopy lookup: map each src pointer to its index in wctx->pending
+    std::unordered_map<const void *, size_t> pending_idx;
+    pending_idx.reserve(wctx->pending.size());
+    for (size_t i = 0; i < wctx->pending.size(); i++) {
+        pending_idx[wctx->pending[i].src] = i;
+    }
+
     int merged  = 0;
     int skipped = 0;
 
@@ -294,18 +384,13 @@ static bool lora_merge(WeightCtx * wctx, const GGUFModel & gf, const char * lora
         size_t       toff     = gguf_get_tensor_offset(gf.gguf, tidx);
         const void * base_ptr = gf.mapping + gf.data_offset + toff;
 
-        WeightCtx::PendingCopy * pc = nullptr;
-        for (auto & p : wctx->pending) {
-            if (p.src == base_ptr) {
-                pc = &p;
-                break;
-            }
-        }
-        if (!pc) {
+        auto pc_it = pending_idx.find(base_ptr);
+        if (pc_it == pending_idx.end()) {
             fprintf(stderr, "[LoRA] WARNING: no PendingCopy for %s, skipping\n", gguf_name.c_str());
             skipped++;
             continue;
         }
+        WeightCtx::PendingCopy * pc = &wctx->pending[pc_it->second];
 
         // LoRA shapes (safetensors/PyTorch convention, row major):
         //   A: [rank, in_features]  shape[0]=rank, shape[1]=in_features
@@ -357,60 +442,40 @@ static bool lora_merge(WeightCtx * wctx, const GGUFModel & gf, const char * lora
             continue;
         }
 
-        // PEFT casts LoRA weights to the model dtype (typically BF16) before
-        // computing the delta. We must do the same BF16 round trip so the
-        // matmul B@A matches PEFT's merge_and_unload exactly. Do this for all
-        // base types because the LoRA was always trained against BF16 weights.
-        {
-            std::vector<ggml_bf16_t> tmp_a((size_t) a_nel);
-            std::vector<ggml_bf16_t> tmp_b((size_t) b_nel);
-            ggml_fp32_to_bf16_row_ref(a_f32.data(), tmp_a.data(), a_nel);
-            ggml_bf16_to_fp32_row((const ggml_bf16_t *) tmp_a.data(), a_f32.data(), a_nel);
-            ggml_fp32_to_bf16_row_ref(b_f32.data(), tmp_b.data(), b_nel);
-            ggml_bf16_to_fp32_row((const ggml_bf16_t *) tmp_b.data(), b_f32.data(), b_nel);
-        }
+        // PEFT casts LoRA weights to BF16 before computing the delta.
+        // We replicate this round trip so B @ A matches merge_and_unload exactly.
+        lora_bf16_round(a_f32.data(), a_nel);
+        lora_bf16_round(b_f32.data(), b_nel);
 
-        // dequant base weight to F32
-        std::vector<float> w_f32((size_t) nel);
-        lora_dequant(base_ptr, w_f32.data(), nel, ttype);
+        // delta = scaling * B @ A via backend GEMM (cuBLAS on CUDA, SIMD on CPU)
+        std::vector<float> delta((size_t) nel);
+        lora_gemm(a_f32.data(), b_f32.data(), delta.data(), out_feat, rank, in_feat, scaling, backend);
 
-        // merge: W += scaling * B @ A
-        // A is [rank, in_feat], B is [out_feat, rank], W is [out_feat, in_feat]
-        // Compute delta in F32 then round to BF16 to match PEFT's GPU behavior
-        // (BF16 matmul output -> BF16 += BF16). Without this intermediate rounding,
-        // the diffusion model diverges because it's extremely sensitive to weight values.
-        std::vector<float> delta((size_t) nel, 0.0f);
-        for (int64_t i = 0; i < out_feat; i++) {
-            for (int64_t k = 0; k < rank; k++) {
-                float b_ik = b_f32[(size_t) (i * rank + k)] * scaling;
-                for (int64_t j = 0; j < in_feat; j++) {
-                    delta[(size_t) (i * in_feat + j)] += b_ik * a_f32[(size_t) (k * in_feat + j)];
-                }
+        // round delta through BF16 to match PEFT's intermediate precision.
+        // without this, the diffusion model diverges (extremely sensitive to weight values).
+        lora_bf16_round(delta.data(), nel);
+
+        // add base weight row by row: dequant each row into a small scratch buffer,
+        // accumulate into delta, then discard. Avoids a second full-size F32 allocation.
+        size_t             row_bytes = ggml_row_size(ttype, ne0);
+        std::vector<float> row_buf((size_t) ne0);
+        for (int64_t i = 0; i < ne1; i++) {
+            const void * row_src   = (const uint8_t *) base_ptr + i * row_bytes;
+            float *      delta_row = delta.data() + i * ne0;
+            lora_dequant(row_src, row_buf.data(), ne0, ttype);
+            for (int64_t j = 0; j < ne0; j++) {
+                delta_row[j] += row_buf[j];
             }
         }
 
-        // round delta through BF16 to match PEFT's intermediate precision
-        {
-            std::vector<ggml_bf16_t> delta_bf16((size_t) nel);
-            ggml_fp32_to_bf16_row_ref(delta.data(), delta_bf16.data(), nel);
-            ggml_bf16_to_fp32_row((const ggml_bf16_t *) delta_bf16.data(), delta.data(), nel);
-        }
-
-        // add rounded delta to base weight
-        for (size_t i = 0; i < (size_t) nel; i++) {
-            w_f32[i] += delta[i];
-        }
-
-        // requant back to original type into a staging buffer.
+        // requant merged weight into a staging buffer.
         // we stash the buffer in wctx->staging so it stays alive until wctx_alloc.
-        // for quantized types the output is smaller than F32, but we allocate as
-        // float vector to reuse the existing staging infrastructure.
-        size_t max_bytes = (size_t) nel * sizeof(float);  // upper bound
+        size_t max_bytes = (size_t) nel * sizeof(float);
         size_t n_floats  = (max_bytes + sizeof(float) - 1) / sizeof(float);
         wctx->staging.emplace_back(n_floats);
         void * merged_buf = wctx->staging.back().data();
 
-        size_t merged_bytes = lora_requant(w_f32.data(), merged_buf, nel, ne0, ttype);
+        size_t merged_bytes = lora_requant(delta.data(), merged_buf, nel, ne0, ttype);
         if (merged_bytes == 0) {
             skipped++;
             continue;

@@ -13,6 +13,7 @@
 #include "ggml.h"
 #include "gguf-weights.h"
 #include "lora-merge.h"
+#include "timer.h"
 
 #include <cstdio>
 #include <cstdlib>
@@ -388,7 +389,9 @@ static bool dit_ggml_load(DiTGGML *     m,
 
     // Merge LoRA deltas into projection weights (before GPU upload and QKV fusion)
     if (lora_path) {
-        lora_merge(&m->wctx, gf, lora_path, lora_scale);
+        Timer lora_timer;
+        lora_merge(&m->wctx, gf, lora_path, lora_scale, m->backend);
+        fprintf(stderr, "[LoRA] Merge time: %.1f ms\n", lora_timer.ms());
     }
 
     // Allocate backend buffer and copy weights
