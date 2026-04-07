@@ -125,7 +125,7 @@ static void apg_forward(const float *       pred_cond,
 //
 // noise:            [N * T * Oc]  N contiguous [T, Oc] noise blocks
 // context_latents:  [N * T * ctx_ch]  N contiguous context blocks
-// enc_hidden:       [enc_S * H * N]  per-batch encoder outputs (caller-stacked)
+// enc_hidden:       [enc_S * H_enc * N]  per-batch encoder outputs (caller-stacked)
 // schedule:         array of num_steps timestep values
 // output:           [N * T * Oc]  generated latents (caller-allocated)
 static int dit_ggml_generate(DiTGGML *           model,
@@ -162,7 +162,6 @@ static int dit_ggml_generate(DiTGGML *           model,
     int             S       = T / c.patch_size;
     int             n_per   = T * Oc;              // elements per sample
     int             n_total = N * n_per;           // total output elements
-    int             H       = c.hidden_size;
 
     fprintf(stderr, "[DiT] Batch N=%d, T=%d, S=%d, enc_S=%d\n", N, T, S, enc_S);
 
@@ -184,6 +183,7 @@ static int dit_ggml_generate(DiTGGML *           model,
     fprintf(stderr, "[DiT] Graph: %d nodes\n", ggml_graph_n_nodes(gf));
 
     struct ggml_tensor * t_enc = ggml_graph_get_tensor(gf, "enc_hidden");
+    int                  H_enc = (int) t_enc->ne[0];  // encoder hidden size (from condition_embedder)
 
     // Allocate compute buffers.
     // Critical: reset FIRST (clears old state), THEN force inputs to GPU, THEN alloc.
@@ -303,19 +303,19 @@ static int dit_ggml_generate(DiTGGML *           model,
                 ggml_backend_tensor_get(model->null_condition_emb, null_emb.data(), 0, emb_n * sizeof(float));
             }
 
-            // Broadcast [H] to [enc_S, H] then to N copies [H, enc_S, N]
-            std::vector<float> null_enc_single(H * enc_S);
+            // Broadcast [H_enc] to [enc_S, H_enc] then to N copies [H_enc, enc_S, N]
+            std::vector<float> null_enc_single(H_enc * enc_S);
             for (int s = 0; s < enc_S; s++) {
-                memcpy(&null_enc_single[s * H], null_emb.data(), H * sizeof(float));
+                memcpy(&null_enc_single[s * H_enc], null_emb.data(), H_enc * sizeof(float));
             }
-            null_enc_buf.resize(H * enc_S * N);
+            null_enc_buf.resize(H_enc * enc_S * N);
             for (int b = 0; b < N; b++) {
-                memcpy(null_enc_buf.data() + b * enc_S * H, null_enc_single.data(), enc_S * H * sizeof(float));
+                memcpy(null_enc_buf.data() + b * enc_S * H_enc, null_enc_single.data(), enc_S * H_enc * sizeof(float));
             }
 
             if (dbg && dbg->enabled) {
                 debug_dump_1d(dbg, "null_condition_emb", null_emb.data(), emb_n);
-                debug_dump_2d(dbg, "null_enc_hidden", null_enc_single.data(), enc_S, H);
+                debug_dump_2d(dbg, "null_enc_hidden", null_enc_single.data(), enc_S, H_enc);
             }
 
             apg_mbufs.resize(N);
@@ -344,8 +344,8 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
     }
 
-    // enc_hidden: already [H, enc_S, N] from caller (per-batch encoded + padded)
-    std::vector<float> enc_buf(enc_hidden_data, enc_hidden_data + H * enc_S * N);
+    // enc_hidden: already [H_enc, enc_S, N] from caller (per-batch encoded + padded)
+    std::vector<float> enc_buf(enc_hidden_data, enc_hidden_data + H_enc * enc_S * N);
     ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
@@ -371,7 +371,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             }
             // swap encoder hidden states to text2music-encoded version
             if (enc_switch) {
-                memcpy(enc_buf.data(), enc_switch, H * enc_S * N * sizeof(float));
+                memcpy(enc_buf.data(), enc_switch, H_enc * enc_S * N * sizeof(float));
                 // update cross-attention mask for text2music encoder lengths
                 if (real_enc_S_switch) {
                     for (int b = 0; b < N; b++) {
@@ -471,7 +471,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             }
 
             // Unconditional pass: re-upload all inputs (scheduler clobbers input buffers during compute)
-            ggml_backend_tensor_set(t_enc, null_enc_buf.data(), 0, H * enc_S * N * sizeof(float));
+            ggml_backend_tensor_set(t_enc, null_enc_buf.data(), 0, H_enc * enc_S * N * sizeof(float));
             ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N * sizeof(float));
             if (t_t) {
                 ggml_backend_tensor_set(t_t, &t_curr, 0, sizeof(float));

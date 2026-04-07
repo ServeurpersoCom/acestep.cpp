@@ -276,8 +276,8 @@ int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthS
     // Each batch element gets its own caption, lyrics, and metadata encoded independently.
     // TextEncoder + CondEncoder run in series (cheap: ~13ms per element).
     // Results are padded to s.max_enc_S with null_cond and stacked for a single DiT batch pass.
-    int H_text = ctx->text_enc.cfg.hidden_size;  // 1024
-    int H_cond = ctx->dit.cfg.hidden_size;       // 2048
+    int H_text = ctx->text_enc.cfg.hidden_size;     // 1024
+    int H_cond = (int) ctx->dit.cond_emb_w->ne[0];  // encoder hidden size (2048)
 
     // read null_condition_emb from GPU for padding shorter encodings
     s.null_cond_vec.resize(H_cond);

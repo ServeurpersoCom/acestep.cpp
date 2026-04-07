@@ -95,9 +95,9 @@ struct DiTGGML {
     struct ggml_tensor * proj_in_w;  // [in_ch*P, H] pre-permuted F32
     struct ggml_tensor * proj_in_b;  // [hidden]
 
-    // condition_embedder: Linear(hidden, hidden)
-    struct ggml_tensor * cond_emb_w;  // [hidden, hidden]
-    struct ggml_tensor * cond_emb_b;  // [hidden]
+    // condition_embedder: Linear(encoder_H, decoder_H)
+    struct ggml_tensor * cond_emb_w;  // [encoder_H, decoder_H] projects encoder to decoder space
+    struct ggml_tensor * cond_emb_b;  // [decoder_H]
 
     // Layers
     DiTGGMLLayer layers[DIT_GGML_MAX_LAYERS];

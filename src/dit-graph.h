@@ -456,8 +456,11 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     ggml_set_input(input);
     *p_input = input;
 
-    // Encoder hidden states: [H, enc_S, N]
-    struct ggml_tensor * enc_hidden = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, H, enc_S, N);
+    // Encoder hidden states: [H_enc, enc_S, N]
+    // H_enc comes from the condition_embedder input dimension (2048 for both 2B and XL).
+    // The condition_embedder projects H_enc -> H (decoder) via cond_emb_w.
+    int                  H_enc      = (int) m->cond_emb_w->ne[0];
+    struct ggml_tensor * enc_hidden = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, H_enc, enc_S, N);
     ggml_set_name(enc_hidden, "enc_hidden");
     ggml_set_input(enc_hidden);
 
