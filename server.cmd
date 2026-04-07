@@ -2,7 +2,7 @@
 
 set PATH=%~dp0build\Release;%PATH%
 
-rem If you have both, uncomment one to use it
+rem Multi-GPU: set GGML_BACKEND to pick a device (CUDA0, CUDA1, Vulkan0...)
 rem set GGML_BACKEND=CUDA0
 rem set GGML_BACKEND=Vulkan0
 

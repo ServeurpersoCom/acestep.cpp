@@ -2,9 +2,9 @@
 
 set -eu
 
-# If you have both, uncomment one to use it
-#GGML_BACKEND=CUDA0
-#GGML_BACKEND=Vulkan0
+# Multi-GPU: set GGML_BACKEND to pick a device (CUDA0, CUDA1, Vulkan0...)
+#export GGML_BACKEND=CUDA0
+#export GGML_BACKEND=Vulkan0
 
 ./build/ace-server \
     --host 0.0.0.0 \
