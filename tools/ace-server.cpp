@@ -1058,7 +1058,6 @@ static void usage(const char * prog) {
             "Server:\n"
             "  --host <addr>           Listen address (default: 127.0.0.1)\n"
             "  --port <N>              Listen port (default: 8080)\n"
-            "  --timeout <sec>         HTTP timeout in seconds (default: 30)\n"
             "  --max-batch <N>         LM batch limit (default: 1)\n"
             "  --max-seq <N>           KV cache size (default: 8192)\n"
             "\n"
@@ -1076,7 +1075,6 @@ int main(int argc, char ** argv) {
 
     const char * host       = "127.0.0.1";
     int          port       = 8080;
-    int          timeout    = 30;
     const char * models_dir = nullptr;
     const char * loras_dir  = nullptr;
 
@@ -1110,8 +1108,6 @@ int main(int argc, char ** argv) {
             host = argv[++i];
         } else if (!strcmp(argv[i], "--port") && i + 1 < argc) {
             port = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--timeout") && i + 1 < argc) {
-            timeout = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--max-batch") && i + 1 < argc) {
             g_max_batch = atoi(argv[++i]);
 
@@ -1211,9 +1207,9 @@ int main(int argc, char ** argv) {
     httplib::Server svr;
     g_svr = &svr;
 
-    // httplib defaults to 5s which kills slow mobile/proxy connections
-    svr.set_read_timeout(timeout);
-    svr.set_write_timeout(timeout);
+    // httplib defaults to 5s which kills long generation requests.
+    svr.set_read_timeout(600);
+    svr.set_write_timeout(600);
 
     // SO_REUSEADDR: allow rebind after TIME_WAIT (normal restart).
     // no SO_REUSEPORT: fail if another process is actively listening.
