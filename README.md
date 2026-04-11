@@ -27,7 +27,7 @@ Alternative: `./models.sh` downloads the default set automatically (needs `pip i
 ## Build
 
 ```
-git clone --recurse-submodules https://github.com/Serveurperso/acestep.cpp
+git clone --recurse-submodules https://github.com/ServeurpersoCom/acestep.cpp.git
 cd acestep.cpp
 ```
 
