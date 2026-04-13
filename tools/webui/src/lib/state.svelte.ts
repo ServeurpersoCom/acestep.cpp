@@ -82,6 +82,15 @@ export function setRequest(incoming: AceRequest) {
 	app.srcRangeEnd = incoming.repainting_end ?? null;
 }
 
+// sync srcRange to request fields (srcRange is the UI source of truth,
+// request fields are the serialization layer read by FIELDS helpers)
+$effect.root(() => {
+	$effect(() => {
+		app.request.repainting_start = app.srcRangeStart ?? undefined;
+		app.request.repainting_end = app.srcRangeEnd ?? undefined;
+	});
+});
+
 // persist on every change
 $effect.root(() => {
 	$effect(() => {

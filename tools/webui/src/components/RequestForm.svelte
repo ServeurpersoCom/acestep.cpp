@@ -24,6 +24,13 @@
 		TASK_COMPLETE,
 		TRACK_NAMES
 	} from '../lib/config.js';
+	import {
+		num,
+		buildSparse,
+		clearSection,
+		withCurrentSettings,
+		pickSections
+	} from '../lib/fields.js';
 	import type { AceRequest, Song } from '../lib/types.js';
 
 	let busyLm = $state(false);
@@ -267,66 +274,11 @@
 		toast('Opened: ' + name, 4000, true);
 	}
 
-	// convert string or number to number, return undefined if empty/NaN
-	function num(v: unknown): number | undefined {
-		if (v == null || v === '') return undefined;
-		const n = Number(v);
-		return isNaN(n) ? undefined : n;
-	}
-
 	// snapshot app.request into a clean AceRequest with proper types.
 	// bind:value guarantees app.request always matches the DOM.
 	function buildRequest(): AceRequest {
-		const r = app.request;
-		const out: AceRequest = { caption: String(r.caption || '') };
-		if (r.lyrics) out.lyrics = String(r.lyrics);
-		if (r.audio_codes) out.audio_codes = String(r.audio_codes);
-		if (r.vocal_language) out.vocal_language = String(r.vocal_language);
-		if (r.keyscale) out.keyscale = String(r.keyscale);
-		if (r.timesignature) out.timesignature = String(r.timesignature);
-		const bpm = num(r.bpm);
-		if (bpm != null) out.bpm = bpm;
-		const duration = num(r.duration);
-		if (duration != null) out.duration = duration;
-		const seed = num(r.seed);
-		if (seed != null) out.seed = seed;
-		const lm_temperature = num(r.lm_temperature);
-		if (lm_temperature != null) out.lm_temperature = lm_temperature;
-		const lm_cfg_scale = num(r.lm_cfg_scale);
-		if (lm_cfg_scale != null) out.lm_cfg_scale = lm_cfg_scale;
-		const lm_top_p = num(r.lm_top_p);
-		if (lm_top_p != null) out.lm_top_p = lm_top_p;
-		const lm_top_k = num(r.lm_top_k);
-		if (lm_top_k != null) out.lm_top_k = lm_top_k;
-		if (r.lm_negative_prompt) out.lm_negative_prompt = String(r.lm_negative_prompt);
-		const inference_steps = num(r.inference_steps);
-		if (inference_steps != null) out.inference_steps = inference_steps;
-		const guidance_scale = num(r.guidance_scale);
-		if (guidance_scale != null) out.guidance_scale = guidance_scale;
-		const shift = num(r.shift);
-		if (shift != null) out.shift = shift;
-		const audio_cover_strength = num(r.audio_cover_strength);
-		if (audio_cover_strength != null) out.audio_cover_strength = audio_cover_strength;
-		const cover_noise_strength = num(r.cover_noise_strength);
-		if (cover_noise_strength != null) out.cover_noise_strength = cover_noise_strength;
-		const lm_batch_size = num(r.lm_batch_size);
-		if (lm_batch_size != null && lm_batch_size >= 1) out.lm_batch_size = lm_batch_size;
-		const synth_batch_size = num(r.synth_batch_size);
-		if (synth_batch_size != null && synth_batch_size >= 1) out.synth_batch_size = synth_batch_size;
-		if (r.task_type) out.task_type = String(r.task_type);
-		if (r.track) out.track = String(r.track);
-		if (r.infer_method) out.infer_method = String(r.infer_method);
-		if (r.synth_model) out.synth_model = String(r.synth_model);
-		if (r.lm_model) out.lm_model = String(r.lm_model);
-		if (r.lora && loraList.includes(String(r.lora))) out.lora = String(r.lora);
-		const lora_scale = num(r.lora_scale);
-		if (lora_scale != null) out.lora_scale = lora_scale;
-		const repaint_strength = num(r.repaint_strength);
-		if (repaint_strength != null) out.repaint_strength = repaint_strength;
-		if (app.srcRangeStart != null) out.repainting_start = app.srcRangeStart;
-		if (app.srcRangeEnd != null) out.repainting_end = app.srcRangeEnd;
-		const peak_clip = num(r.peak_clip);
-		if (peak_clip != null) out.peak_clip = peak_clip;
+		const out = buildSparse(app.request);
+		if (out.lora && !loraList.includes(String(out.lora))) delete out.lora;
 		return out;
 	}
 
@@ -341,16 +293,7 @@
 	// synth params are form-global, not per-pending: preserve them across switches.
 	function loadPending(index: number) {
 		const r = app.pendingRequests[index];
-		setRequest({
-			...r,
-			inference_steps: app.request.inference_steps,
-			guidance_scale: app.request.guidance_scale,
-			shift: app.request.shift,
-			seed: app.request.seed,
-			audio_cover_strength: app.request.audio_cover_strength,
-			cover_noise_strength: app.request.cover_noise_strength,
-			synth_batch_size: app.request.synth_batch_size
-		});
+		setRequest(withCurrentSettings(r, app.request));
 		app.pendingIndex = index;
 	}
 
@@ -376,23 +319,7 @@
 			if (results.length > 0) {
 				app.pendingRequests = results;
 				app.pendingIndex = 0;
-				setRequest({
-					...results[0],
-					inference_steps: app.request.inference_steps,
-					guidance_scale: app.request.guidance_scale,
-					shift: app.request.shift,
-					seed: app.request.seed,
-					audio_cover_strength: app.request.audio_cover_strength,
-					cover_noise_strength: app.request.cover_noise_strength,
-					repaint_strength: app.request.repaint_strength,
-					synth_batch_size: app.request.synth_batch_size,
-					lm_batch_size: app.request.lm_batch_size,
-					lm_temperature: app.request.lm_temperature,
-					lm_cfg_scale: app.request.lm_cfg_scale,
-					lm_top_p: app.request.lm_top_p,
-					lm_top_k: app.request.lm_top_k,
-					lm_negative_prompt: app.request.lm_negative_prompt
-				});
+				setRequest(withCurrentSettings(results[0], app.request));
 			}
 		} catch (e: unknown) {
 			toast(e instanceof Error ? e.message : String(e));
@@ -438,39 +365,11 @@
 			const synthBatch = Math.max(1, Number(app.request.synth_batch_size) || 1);
 			const userSeed = num(app.request.seed);
 			const hasSeed = userSeed != null && userSeed >= 0;
-			const synthParams: Partial<AceRequest> = {};
-			const steps = num(app.request.inference_steps);
-			if (steps != null) synthParams.inference_steps = steps;
-			const cfg = num(app.request.guidance_scale);
-			if (cfg != null) synthParams.guidance_scale = cfg;
-			const sh = num(app.request.shift);
-			if (sh != null) synthParams.shift = sh;
-			const acs = num(app.request.audio_cover_strength);
-			if (acs != null) synthParams.audio_cover_strength = acs;
-			const cns = num(app.request.cover_noise_strength);
-			if (cns != null) synthParams.cover_noise_strength = cns;
-			const rps = num(app.request.repaint_strength);
-			if (rps != null) synthParams.repaint_strength = rps;
-			// task_type and track from form
-			const t = app.request.task_type || '';
-			if (t) synthParams.task_type = t;
-			if (app.request.track) synthParams.track = app.request.track;
-			// infer_method from form
-			const im = app.request.infer_method || '';
-			if (im) synthParams.infer_method = im;
-			const b = num(app.request.peak_clip);
-			if (b != null) synthParams.peak_clip = b;
-			// model routing from form
-			if (app.request.synth_model) synthParams.synth_model = app.request.synth_model;
-			if (app.request.lora && loraList.includes(String(app.request.lora)))
-				synthParams.lora = app.request.lora;
-			const loraScale = num(app.request.lora_scale);
-			if (loraScale != null) synthParams.lora_scale = loraScale;
-			// repaint/lego: inject range (each field independent, backend handles defaults)
-			if (t === TASK_REPAINT || t === TASK_LEGO) {
-				if (app.srcRangeStart != null) synthParams.repainting_start = app.srcRangeStart;
-				if (app.srcRangeEnd != null) synthParams.repainting_end = app.srcRangeEnd;
-			}
+			const synthParams = pickSections(app.request, ['flow', 'toolbar', 'routing']);
+			// seed and synth_batch_size are per-expansion, handled below
+			delete synthParams.seed;
+			delete synthParams.synth_batch_size;
+			if (synthParams.lora && !loraList.includes(String(synthParams.lora))) delete synthParams.lora;
 
 			// resolve seeds, build server payload and local expanded list for SongCard mapping.
 			// server receives synth_batch_size and expands internally (groups by T for GPU batch).
@@ -552,22 +451,11 @@
 	}
 
 	function clearMetadata() {
-		app.request.vocal_language = '';
-		app.request.bpm = undefined;
-		app.request.duration = undefined;
-		app.request.keyscale = '';
-		app.request.timesignature = '';
+		clearSection(app.request, 'metadata');
 	}
 
 	function clearFlowMatching() {
-		app.request.inference_steps = undefined;
-		app.request.guidance_scale = undefined;
-		app.request.shift = undefined;
-		app.request.audio_cover_strength = undefined;
-		app.request.cover_noise_strength = undefined;
-		app.request.repaint_strength = undefined;
-		app.request.infer_method = '';
-		app.request.seed = undefined;
+		clearSection(app.request, 'flow');
 		app.srcRangeStart = null;
 		app.srcRangeEnd = null;
 	}
