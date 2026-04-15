@@ -713,10 +713,13 @@ Output:
   Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
   --wav                   Output WAV instead of MP3
-  --wav-format <fmt>      WAV audio format (default: pcm16)
+  --wav-format <fmt>      WAV audio format (default: wav16)
                             Requires use of --wav
-                            Supported values: pcm16, pcm24, and fp32
-                            (fp32 disables .wav normalization & peak clip)
+                            Supported values: wav, wav16, wav24, wav32
+                              wav/wav16: 16-bit signed-integer PCM audio
+                              wav24: 24-bit signed-integer PCM audio
+                              wav32: 32-bit IEEE floating-point PCM audio
+                                (wav32 disables normalization & peak clip)
 
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 256)
@@ -799,9 +802,12 @@ Memory control:
 
 Output:
   --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
-  --wav-format <fmt>      WAV audio format (default: pcm16)
-                            Supported values: pcm16, pcm24, and fp32
-                            (fp32 disables .wav normalization & peak clip)
+  --wav-format <fmt>      WAV audio format (default: wav16)
+                            Supported values: wav, wav16, wav24, wav32
+                              wav/wav16: 16-bit signed-integer PCM audio
+                              wav24: 24-bit signed-integer PCM audio
+                              wav32: 32-bit IEEE floating-point PCM audio
+                                (wav32 disables normalization & peak clip)
 
 Server:
   --host <addr>           Listen address (default: 127.0.0.1)
@@ -930,10 +936,13 @@ Output:
   -o <path>               Output file (auto-named if omitted)
   --q8                    Quantize latent to int8 (~13 kbit/s)
   --q4                    Quantize latent to int4 (~6.8 kbit/s)
-  --wav-format <fmt>      WAV audio format (default: pcm16)
+  --wav-format <fmt>      WAV audio format (default: wav16)
                             Requires use of --decode
-                            Supported values: pcm16, pcm24, and fp32
-                            (fp32 disables .wav normalization & peak clip)
+                            Supported values: wav, wav16, wav24, wav32
+                              wav/wav16: 16-bit signed-integer PCM audio
+                              wav24: 24-bit signed-integer PCM audio
+                              wav32: 32-bit IEEE floating-point PCM audio
+                                (wav32 disables normalization & peak clip)
 
 Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)
                song.latent -> song.wav
@@ -993,9 +1002,13 @@ Usage: mp3-codec -i <input> -o <o> [options]
   -i <path>          Input file (WAV or MP3)
   -o <path>          Output file (WAV or MP3)
   -b <kbps>          Bitrate for MP3 encoding (default: 128)
-  --wav-format <fmt> WAV audio format (default: pcm16)
+  --wav-format <fmt> WAV audio format (default: wav16)
                        Requires use of -o with a .wav extension
-                       Supported values: pcm16, pcm24, and fp32
+                       Supported values: wav, wav16, wav24, wav32
+                         wav/wav16: 16-bit signed-integer PCM audio
+                         wav24: 24-bit signed-integer PCM audio
+                         wav32: 32-bit IEEE floating-point PCM audio
+                           (wav32 disables normalization & peak clip)
 
 Mode is auto-detected from output extension.
 
@@ -1003,7 +1016,7 @@ Examples:
   mp3-codec -i song.wav -o song.mp3
   mp3-codec -i song.wav -o song.mp3 -b 192
   mp3-codec -i song.mp3 -o song.wav
-  mp3-codec -i song.mp3 -o song.wav --wav-format fp32
+  mp3-codec -i song.mp3 -o song.wav --wav-format wav32
 ```
 
 ## ace-understand reference

@@ -32,10 +32,13 @@ static void usage(const char * prog) {
             "  Default: MP3 at 128 kbps. input.json -> input0.mp3, input1.mp3, ...\n"
             "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
             "  --wav                   Output WAV instead of MP3\n\n"
-            "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "  --wav-format <fmt>      WAV audio format (default: wav16)\n"
             "                            Requires use of --wav\n"
-            "                            Supported values: pcm16, pcm24, and fp32\n"
-            "                            (fp32 disables .wav normalization & peak clip)\n"
+            "                            Supported values: wav, wav16, wav24, wav32\n"
+            "                              wav/wav16: 16-bit signed-integer PCM audio\n"
+            "                              wav24: 24-bit signed-integer PCM audio\n"
+            "                              wav32: 32-bit IEEE floating-point PCM audio\n"
+            "                                (wav32 disables normalization & peak clip)\n\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
@@ -69,7 +72,7 @@ int main(int argc, char ** argv) {
     int                       vae_overlap    = 64;
     bool                      output_wav     = false;  // default MP3, --wav forces WAV
     const char *              wav_format_str = nullptr;
-    WavFormat                 wav_format     = WAV_FORMAT_PCM_S16;
+    WavFormat                 wav_format     = WAV_FORMAT_S16;
     int                       mp3_kbps       = 128;
 
     for (int i = 1; i < argc; i++) {

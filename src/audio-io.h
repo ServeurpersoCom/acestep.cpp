@@ -587,11 +587,96 @@ inline std::string audio_encode_wav_ieee_f32(const float * audio, int T_audio, i
     return out;
 }
 
+enum AudioFileKind {
+    AUDIO_FILE_KIND_MP3,
+    AUDIO_FILE_KIND_WAV,
+};
+
+enum AudioFileFormat {
+    AUDIO_FILE_FORMAT_MP3,
+    AUDIO_FILE_FORMAT_WAV_S16,
+    AUDIO_FILE_FORMAT_WAV_S24,
+    AUDIO_FILE_FORMAT_WAV_IEEE_F32,
+};
+
 enum WavFormat {
-    WAV_FORMAT_PCM_S16,
-    WAV_FORMAT_PCM_S24,
+    WAV_FORMAT_S16,
+    WAV_FORMAT_S24,
     WAV_FORMAT_IEEE_F32,
 };
+
+inline AudioFileKind convert_audio_file_format_to_kind(AudioFileFormat format) {
+    switch (format) {
+        case AUDIO_FILE_FORMAT_MP3:
+            return AUDIO_FILE_KIND_MP3;
+        case AUDIO_FILE_FORMAT_WAV_S16:
+            return AUDIO_FILE_KIND_WAV;
+        case AUDIO_FILE_FORMAT_WAV_S24:
+            return AUDIO_FILE_KIND_WAV;
+        case AUDIO_FILE_FORMAT_WAV_IEEE_F32:
+            return AUDIO_FILE_KIND_WAV;
+    }
+
+    assert(false && "unsupported AudioFileFormat");
+    std::terminate();
+}
+
+inline bool convert_audio_file_format_to_wav_format(AudioFileFormat format, WavFormat& out) {
+    switch (format) {
+        case AUDIO_FILE_FORMAT_MP3:
+            return false;
+        case AUDIO_FILE_FORMAT_WAV_S16:
+            out = WAV_FORMAT_S16;
+            return true;
+        case AUDIO_FILE_FORMAT_WAV_S24:
+            out = WAV_FORMAT_S24;
+            return true;
+        case AUDIO_FILE_FORMAT_WAV_IEEE_F32:
+            out = WAV_FORMAT_IEEE_F32;
+            return true;
+    }
+
+    assert(false && "unsupported AudioFileFormat");
+    std::terminate();
+}
+
+inline AudioFileFormat convert_wav_format_to_audio_file_format(WavFormat format) {
+    switch (format) {
+        case WAV_FORMAT_S16:
+            return AUDIO_FILE_FORMAT_WAV_S16;
+        case WAV_FORMAT_S24:
+            return AUDIO_FILE_FORMAT_WAV_S24;
+        case WAV_FORMAT_IEEE_F32:
+            return AUDIO_FILE_FORMAT_WAV_IEEE_F32;
+    }
+
+    assert(false && "unsupported WavFormat");
+    std::terminate();
+}
+
+static bool parse_audio_file_format(const char* s, AudioFileFormat& out) {
+    if (!s) {
+        return false;
+    }
+
+    AudioFileFormat parsed;
+    if (std::strcmp(s, "mp3") == 0) {
+        parsed = AUDIO_FILE_FORMAT_MP3;
+    } else if (std::strcmp(s, "wav") == 0) {
+        parsed = AUDIO_FILE_FORMAT_WAV_S16;
+    } else if (std::strcmp(s, "wav16") == 0) {
+        parsed = AUDIO_FILE_FORMAT_WAV_S16;
+    } else if (std::strcmp(s, "wav24") == 0) {
+        parsed = AUDIO_FILE_FORMAT_WAV_S24;
+    } else if (std::strcmp(s, "wav32") == 0) {
+        parsed = AUDIO_FILE_FORMAT_WAV_IEEE_F32;
+    } else {
+        return false;
+    }
+
+    out = parsed;
+    return true;
+}
 
 static bool parse_optional_wav_format(const char* s, WavFormat& out) {
     if (!s) {
@@ -599,11 +684,13 @@ static bool parse_optional_wav_format(const char* s, WavFormat& out) {
     }
 
     WavFormat parsed;
-    if (std::strcmp(s, "pcm16") == 0) {
-        parsed = WAV_FORMAT_PCM_S16;
-    } else if (std::strcmp(s, "pcm24") == 0) {
-        parsed = WAV_FORMAT_PCM_S24;
-    } else if (std::strcmp(s, "fp32") == 0) {
+    if (std::strcmp(s, "wav") == 0) {
+        parsed = WAV_FORMAT_S16;
+    } else if (std::strcmp(s, "wav16") == 0) {
+        parsed = WAV_FORMAT_S16;
+    } else if (std::strcmp(s, "wav24") == 0) {
+        parsed = WAV_FORMAT_S24;
+    } else if (std::strcmp(s, "wav32") == 0) {
         parsed = WAV_FORMAT_IEEE_F32;
     } else {
         return false;
@@ -613,17 +700,33 @@ static bool parse_optional_wav_format(const char* s, WavFormat& out) {
     return true;
 }
 
-inline bool should_normalize_wav_audio(WavFormat wav_format) {
-    switch (wav_format) {
-        case WAV_FORMAT_PCM_S16:
+inline bool should_normalize_audio(AudioFileFormat format) {
+    switch (format) {
+        case AUDIO_FILE_FORMAT_MP3:
             return true;
-        case WAV_FORMAT_PCM_S24:
+        case AUDIO_FILE_FORMAT_WAV_S16:
+            return true;
+        case AUDIO_FILE_FORMAT_WAV_S24:
+            return true;
+        case AUDIO_FILE_FORMAT_WAV_IEEE_F32:
+            return false;
+    }
+
+    assert(false && "unsupported AudioFileFormat");
+    std::terminate();
+}
+
+inline bool should_normalize_wav_audio(WavFormat format) {
+    switch (format) {
+        case WAV_FORMAT_S16:
+            return true;
+        case WAV_FORMAT_S24:
             return true;
         case WAV_FORMAT_IEEE_F32:
             return false;
     }
 
-    assert(false && "unsupported wav_format");
+    assert(false && "unsupported WavFormat");
     std::terminate();
 }
 
@@ -639,15 +742,15 @@ inline bool should_normalize_wav_audio(WavFormat wav_format) {
 // Returns empty string on failure.
 inline std::string audio_encode_wav(const float * audio, int T_audio, int sr, WavFormat wav_format) {
     switch (wav_format) {
-        case WAV_FORMAT_PCM_S16:
+        case WAV_FORMAT_S16:
             return audio_encode_wav_pcm_s16(audio, T_audio, sr);
-        case WAV_FORMAT_PCM_S24:
+        case WAV_FORMAT_S24:
             return audio_encode_wav_pcm_s24(audio, T_audio, sr);
         case WAV_FORMAT_IEEE_F32:
             return audio_encode_wav_ieee_f32(audio, T_audio, sr);
     }
 
-    assert(false && "unsupported wav_format");
+    assert(false && "unsupported WavFormat");
     std::terminate();
 }
 

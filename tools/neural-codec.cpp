@@ -316,10 +316,13 @@ static void print_usage(const char * prog) {
             "  -o <path>               Output file (auto-named if omitted)\n"
             "  --q8                    Quantize latent to int8 (~13 kbit/s)\n"
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n\n"
-            "  --wav-format <fmt>      WAV audio format (default: pcm16)\n"
+            "  --wav-format <fmt>      WAV audio format (default: wav16)\n"
             "                            Requires use of --decode\n"
-            "                            Supported values: pcm16, pcm24, and fp32\n"
-            "                            (fp32 disables .wav normalization & peak clip)\n"
+            "                            Supported values: wav, wav16, wav24, wav32\n"
+            "                              wav/wav16: 16-bit signed-integer PCM audio\n"
+            "                              wav24: 24-bit signed-integer PCM audio\n"
+            "                              wav32: 32-bit IEEE floating-point PCM audio\n"
+            "                                (wav32 disables normalization & peak clip)\n\n"
             "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
             "               song.latent -> song.wav\n\n"
             "Memory control:\n"
@@ -346,7 +349,7 @@ int main(int argc, char ** argv) {
     const char * input_path     = NULL;
     const char * output_path    = NULL;
     const char * wav_format_str = nullptr;
-    WavFormat    wav_format     = WAV_FORMAT_PCM_S16;
+    WavFormat    wav_format     = WAV_FORMAT_S16;
     int          chunk_size     = 256;
     int          overlap        = 64;
     int          mode           = -1;  // 0 = encode, 1 = decode

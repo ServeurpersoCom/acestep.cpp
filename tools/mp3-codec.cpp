@@ -44,9 +44,13 @@ int main(int argc, char ** argv) {
                 "  -i <path>          Input file (WAV or MP3)\n"
                 "  -o <path>          Output file (WAV or MP3)\n"
                 "  -b <kbps>          Bitrate for MP3 encoding (default: 128)\n"
-                "  --wav-format <fmt> WAV audio format (default: pcm16)\n"
+                "  --wav-format <fmt> WAV audio format (default: wav16)\n"
                 "                       Requires use of -o with a .wav extension\n"
-                "                       Supported values: pcm16, pcm24, and fp32\n"
+                "                       Supported values: wav, wav16, wav24, wav32\n"
+                "                         wav/wav16: 16-bit signed-integer PCM audio\n"
+                "                         wav24: 24-bit signed-integer PCM audio\n"
+                "                         wav32: 32-bit IEEE floating-point PCM audio\n"
+                "                           (wav32 disables normalization & peak clip)\n"
                 "\n"
                 "Mode is auto-detected from output extension.\n"
                 "\n"
@@ -62,7 +66,7 @@ int main(int argc, char ** argv) {
     const char * output  = NULL;
     int          bitrate = 128;
     const char * wav_format_str = nullptr;
-    WavFormat    wav_format     = WAV_FORMAT_PCM_S16;
+    WavFormat    wav_format     = WAV_FORMAT_S16;
 
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "-i") == 0 && i + 1 < argc) {
