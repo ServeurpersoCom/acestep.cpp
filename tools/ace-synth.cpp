@@ -138,7 +138,7 @@ int main(int argc, char ** argv) {
         usage(argv[0]);
         return 1;
     }
-    if (!parse_audio_file_format(audio_file_format_str, audio_file_format)) {
+    if (audio_file_format_str != nullptr && !parse_audio_file_format(audio_file_format_str, audio_file_format)) {
         fprintf(stderr, "[CLI] ERROR: --output requires a supported value\n");
         usage(argv[0]);
         return 1;
