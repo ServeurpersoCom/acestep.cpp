@@ -48,3 +48,9 @@ int ace_understand_generate(AceUnderstand *    ctx,
                             void * cancel_data     = nullptr);
 
 void ace_understand_free(AceUnderstand * ctx);
+
+// Read the LM ModelKey the context builds for store_require_lm. Must match
+// the one ace_lm builds for the same path and batch settings, otherwise the
+// store loads the LM twice under --keep-loaded.
+struct ModelKey;
+const ModelKey * ace_understand_lm_key(const AceUnderstand * ctx);

@@ -44,3 +44,9 @@ int ace_lm_generate(AceLm *            ctx,
                     int    mode            = LM_MODE_GENERATE);
 
 void ace_lm_free(AceLm * ctx);
+
+// Read the LM ModelKey the context builds for store_require_lm. Useful for
+// tests that verify both ace_lm and ace_understand resolve to the same LM
+// instance when their params are propagated consistently.
+struct ModelKey;
+const ModelKey * ace_lm_lm_key(const AceLm * ctx);

@@ -3,19 +3,20 @@
 
 Run from tests/ directory:
     ./test-philox.py
+
+The binary lives in ../build/test-philox (built by cmake).
 """
 import subprocess, sys, os, random
 import numpy as np
 
 COUNT = 64 * 25 * 120  # 64ch * 25Hz * 120s = 192000 (2 minutes, max duration)
 
+BIN = "../build/test-philox"
+OUT = "philox-noise.f32"
+
 def build():
-    if not os.path.isfile("test-philox.cpp"):
-        print("ERROR: test-philox.cpp not found (run from tests/ directory)")
-        sys.exit(1)
-    r = subprocess.run(["make", "test-philox"], capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"Build failed:\n{r.stderr}")
+    if not os.path.isfile(BIN):
+        print(f"ERROR: {BIN} not found, run 'cmake --build build --target test-philox' first")
         sys.exit(1)
 
 def compare(seed):
@@ -24,9 +25,8 @@ def compare(seed):
         print("ERROR: CUDA required")
         sys.exit(1)
 
-    subprocess.run(["./test-philox", str(seed), str(COUNT), "philox-noise.f32"],
-                   capture_output=True)
-    cpp = np.fromfile("philox-noise.f32", dtype=np.float32)
+    subprocess.run([BIN, str(seed), str(COUNT), OUT], capture_output=True)
+    cpp = np.fromfile(OUT, dtype=np.float32)
 
     gen = torch.Generator(device="cuda").manual_seed(seed)
     py = torch.randn([COUNT], generator=gen, device="cuda", dtype=torch.bfloat16)

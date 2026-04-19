@@ -847,3 +847,7 @@ void ace_lm_free(AceLm * ctx) {
     }
     delete ctx;
 }
+
+const ModelKey * ace_lm_lm_key(const AceLm * ctx) {
+    return ctx ? &ctx->lm_key : nullptr;
+}

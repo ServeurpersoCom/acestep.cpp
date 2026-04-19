@@ -418,3 +418,7 @@ void ace_understand_free(AceUnderstand * ctx) {
     }
     delete ctx;
 }
+
+const ModelKey * ace_understand_lm_key(const AceUnderstand * ctx) {
+    return ctx && ctx->have_lm ? &ctx->lm_key : nullptr;
+}
