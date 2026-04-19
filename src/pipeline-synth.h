@@ -1,19 +1,12 @@
 #pragma once
 // pipeline-synth.h: ACE-Step synthesis pipeline
 //
-// Three module categories:
-//   Resident (loaded at init, kept for the pipeline's lifetime):
-//     TextEnc, CondEnc, FSQ tok, FSQ detok, BPE. All small (< 1 GB total).
-//   Ephemeral (loaded and freed inside a single op):
-//     VAE encoder. Used twice per job (source + timbre), always brief.
-//   Lazy-shared (loaded on first use, kept until the caller releases):
-//     DiT, VAE decoder. Large, reused across every group of a batch.
-//
-// The ops self-load their lazy-shared modules (via ace_synth_dit_load /
-// ace_synth_vae_load, both idempotent), so no module sits in VRAM outside
-// its exclusive usage window. The caller unloads a module once it is done
-// with it (typically: unload DiT between phase 1 and phase 2, unload the
-// VAE decoder after phase 2).
+// A lightweight context bound to a ModelStore. The pipeline holds no GPU
+// modules: each op (text encoding, cond encoding, FSQ roundtrip, DiT denoise,
+// VAE decode) acquires its own modules from the store with RAII release.
+// STRICT policy keeps at most one module resident at a time. NEVER policy
+// caches everything across calls. DiT weight swap between phases is an
+// invisible consequence of the store, not an orchestration concern anymore.
 
 #include "request.h"
 
@@ -21,6 +14,7 @@
 
 struct AceSynth;
 struct AceSynthJob;
+struct ModelStore;
 
 struct AceSynthParams {
     const char * text_encoder_path;  // Qwen3 text encoder GGUF (required)
@@ -45,26 +39,17 @@ struct AceAudio {
 
 void ace_synth_default_params(AceSynthParams * p);
 
-// Load the resident modules and cache DiT metadata. DiT and VAE weights are
-// not allocated here; they are brought in lazily by the ops that need them.
-// Returns NULL on failure.
-AceSynth * ace_synth_load(const AceSynthParams * params);
-
-// Lazy-shared module lifecycle. Both pairs are idempotent: load returns
-// true if the module is already resident, unload is a no-op if absent.
-// Normally called by the ops themselves; exposed for the orchestrator to
-// unload a module between phases (so the next phase sees the full VRAM).
-bool ace_synth_dit_load(AceSynth * ctx);
-void ace_synth_dit_unload(AceSynth * ctx);
-bool ace_synth_vae_load(AceSynth * ctx);
-void ace_synth_vae_unload(AceSynth * ctx);
+// Build a lightweight synth context bound to a ModelStore. Reads DiT metadata
+// (config, silence, null_cond, is_turbo) through the store so text encoding
+// and T resolution can run before the DiT itself is ever loaded. All GPU
+// modules are acquired per op, never owned by the context. NULL on failure.
+AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params);
 
 // Phase 1: encode sources, build context, run all DiT denoising steps.
-// ops_dit_generate lazy-loads the DiT right before the denoising loop,
-// so VAE-encoder, text and cond passes run with no DiT in VRAM. After
-// the first group of a batch the DiT stays resident (load is idempotent)
-// and subsequent groups reuse it. Call ace_synth_dit_unload when the
-// batch is done.
+// Modules are acquired as needed: VAE encoder for source and timbre, FSQ
+// tokenizer and detokenizer for cover-mode roundtrip, text encoder + cond
+// encoder for prompt embedding, DiT for denoising. In STRICT each module is
+// released before the next acquires, so VRAM hosts one at a time.
 // Produces a job that carries DiT latents in RAM for later VAE decoding.
 // reqs[batch_n]: each request has its own caption, lyrics, metadata, audio_codes, and seed.
 //   The first request (reqs[0]) is used for shared params (mode, duration, DiT settings).
@@ -83,10 +68,9 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     bool (*cancel)(void *) = nullptr,
                                     void * cancel_data     = nullptr);
 
-// Phase 2: VAE decode and waveform splice.
-// ops_vae_decode_and_splice lazy-loads the decoder on first use and leaves
-// it resident for the subsequent jobs of the same batch. Call
-// ace_synth_vae_unload when done.
+// Phase 2: VAE decode and waveform splice. Acquires the VAE decoder and FSQ
+// detokenizer from the store; in STRICT this evicts the DiT from phase 1
+// transparently.
 // splice_src / splice_len: interleaved stereo source reused for repaint/lego wave splicing.
 //   Pass NULL when the job did not carry a source audio.
 // out[batch_n] allocated by caller, filled with audio buffers.
@@ -106,5 +90,4 @@ void ace_synth_job_free(AceSynthJob * job);
 
 void ace_audio_free(AceAudio * audio);
 
-// Free the pipeline. Also releases any residual DiT or VAE still loaded.
 void ace_synth_free(AceSynth * ctx);

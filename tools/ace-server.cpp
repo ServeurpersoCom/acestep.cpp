@@ -30,6 +30,7 @@
 
 #include "audio-io.h"
 #include "model-registry.h"
+#include "model-store.h"
 #include "pipeline-lm.h"
 #include "pipeline-synth.h"
 #include "pipeline-understand.h"
@@ -170,10 +171,10 @@ static void worker_main() {
     }
 }
 
-// pipeline contexts. NULL when not loaded.
-static AceLm *         g_ctx_lm         = nullptr;
-static AceSynth *      g_ctx_synth      = nullptr;
-static AceUnderstand * g_ctx_understand = nullptr;
+// central GGML module store shared across pipelines. Policy picked at startup
+// from --keep-loaded: STRICT by default (one GPU module resident at a time),
+// NEVER when the flag is set (accumulate across requests).
+static ModelStore * g_store = nullptr;
 
 // model registry (populated at startup from GGUF metadata)
 static ModelRegistry g_registry;
@@ -490,136 +491,6 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     yyjson_doc_free(doc);
 }
 
-// load LM. frees understand (shared pointers become invalid) but does not rebuild it.
-// returns false on failure (caller returns 500).
-static bool ensure_lm(const std::string & name) {
-    if (g_ctx_lm && g_loaded_lm == name) {
-        return true;
-    }
-
-    const ModelEntry * entry = registry_find(g_registry.lm, name.c_str());
-    if (!entry) {
-        fprintf(stderr, "[Server] LM not found: %s\n", name.c_str());
-        return false;
-    }
-
-    // understand holds shared LM pointers, free before LM reload
-    ace_understand_free(g_ctx_understand);
-    g_ctx_understand = nullptr;
-    g_loaded_und_dit.clear();
-    ace_lm_free(g_ctx_lm);
-    g_ctx_lm = nullptr;
-
-    // load new
-    fprintf(stderr, "[Server] Loading LM: %s\n", name.c_str());
-    g_lm_params.model_path = entry->path.c_str();
-    g_ctx_lm               = ace_lm_load(&g_lm_params);
-    if (!g_ctx_lm) {
-        fprintf(stderr, "[Server] FATAL: LM load failed\n");
-        g_loaded_lm.clear();
-        return false;
-    }
-
-    g_loaded_lm = name;
-    return true;
-}
-
-// load understand pipeline (LM + tokenizer from DiT).
-// reloads when LM or DiT changes. tokenizer weights differ between DiT variants.
-static bool ensure_understand(const std::string & lm_name, const std::string & dit_name) {
-    if (!ensure_lm(lm_name)) {
-        return false;
-    }
-
-    // already loaded with the same DiT tokenizer
-    if (g_ctx_understand && g_loaded_und_dit == dit_name) {
-        return true;
-    }
-
-    // update dit_path for the tokenizer
-    const ModelEntry * dit = registry_find(g_registry.dit, dit_name.c_str());
-    if (dit) {
-        g_und_params.dit_path = dit->path.c_str();
-    }
-
-    // (re)build understand with shared LM
-    ace_understand_free(g_ctx_understand);
-    g_ctx_understand = nullptr;
-
-    g_und_params.shared_model = ace_lm_get_model(g_ctx_lm);
-    g_und_params.shared_bpe   = ace_lm_get_bpe(g_ctx_lm);
-    g_ctx_understand          = ace_understand_load(&g_und_params);
-    if (!g_ctx_understand) {
-        fprintf(stderr, "[Server] FATAL: understand load failed\n");
-        g_loaded_und_dit.clear();
-        return false;
-    }
-
-    g_loaded_und_dit = dit_name;
-    return true;
-}
-
-// load synth pipeline (DiT + adapter + text-enc + VAE). frees previous context first.
-// returns false on failure (caller returns 500).
-static bool ensure_synth(const std::string & dit_name, const std::string & adapter_name, float adapter_scale) {
-    if (g_ctx_synth && g_loaded_dit == dit_name && g_loaded_adapter == adapter_name &&
-        g_loaded_adapter_scale == adapter_scale) {
-        return true;
-    }
-
-    // need text-encoder + vae singletons
-    if (g_registry.text_enc.empty() || g_registry.vae.empty()) {
-        fprintf(stderr, "[Server] Missing Text-Enc or VAE in registry\n");
-        return false;
-    }
-
-    const ModelEntry * dit = registry_find(g_registry.dit, dit_name.c_str());
-    if (!dit) {
-        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
-        return false;
-    }
-
-    // unload old
-    ace_synth_free(g_ctx_synth);
-    g_ctx_synth = nullptr;
-
-    // set paths
-    g_synth_params.text_encoder_path = g_registry.text_enc[0].path.c_str();
-    g_synth_params.dit_path          = dit->path.c_str();
-    g_synth_params.vae_path          = g_registry.vae[0].path.c_str();
-
-    // resolve adapter
-    if (!adapter_name.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, adapter_name.c_str());
-        if (!adapter) {
-            fprintf(stderr, "[Server] Adapter not found: %s\n", adapter_name.c_str());
-            g_loaded_dit.clear();
-            g_loaded_adapter.clear();
-            return false;
-        }
-        g_synth_params.adapter_path  = adapter->path.c_str();
-        g_synth_params.adapter_scale = adapter_scale;
-    } else {
-        g_synth_params.adapter_path  = nullptr;
-        g_synth_params.adapter_scale = 1.0f;
-    }
-
-    fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
-            adapter_name.empty() ? "" : " Adapter=", adapter_name.c_str());
-    g_ctx_synth = ace_synth_load(&g_synth_params);
-    if (!g_ctx_synth) {
-        fprintf(stderr, "[Server] FATAL: synth load failed\n");
-        g_loaded_dit.clear();
-        g_loaded_adapter.clear();
-        return false;
-    }
-
-    g_loaded_dit           = dit_name;
-    g_loaded_adapter       = adapter_name;
-    g_loaded_adapter_scale = adapter_scale;
-    return true;
-}
-
 // LM worker: generates metadata + lyrics + codes, stores JSON result in job.
 static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, ServerFields sf, int lm_batch_size, int mode) {
     if (job->cancel.load()) {
@@ -627,31 +498,45 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, ServerFields
         return;
     }
 
-    // load
-    std::string lm_name = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
-    if (!ensure_lm(lm_name)) {
+    // Resolve model name and build per-request params from the template.
+    std::string        lm_name = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
+    const ModelEntry * entry   = registry_find(g_registry.lm, lm_name.c_str());
+    if (!entry) {
+        fprintf(stderr, "[Server] LM not found: %s\n", lm_name.c_str());
+        job->status.store(2);
+        return;
+    }
+    AceLmParams p = g_lm_params;
+    p.model_path  = entry->path.c_str();
+
+    // Acquire a fresh LM ctx from the shared store. Under EVICT_STRICT the
+    // module is reloaded if another pipeline evicted it; under EVICT_NEVER
+    // the store returns the cached instance.
+    AceLm * ctx = ace_lm_load(g_store, &p);
+    if (!ctx) {
+        fprintf(stderr, "[Server] FATAL: LM load failed\n");
         job->status.store(2);
         return;
     }
 
-    // execute
+    // Execute and always free the ctx, success or failure: the store decides
+    // whether the underlying GPU module stays resident.
     std::vector<AceRequest> out(lm_batch_size);
-    int rc = ace_lm_generate(g_ctx_lm, &ace_req, lm_batch_size, out.data(), NULL, NULL, server_cancel_job,
+    int rc = ace_lm_generate(ctx, &ace_req, lm_batch_size, out.data(), NULL, NULL, server_cancel_job,
                              (void *) &job->cancel, mode);
-
-    // free
-    if (!g_keep_loaded) {
-        ace_understand_free(g_ctx_understand);
-        g_ctx_understand = nullptr;
-        ace_lm_free(g_ctx_lm);
-        g_ctx_lm = nullptr;
-        g_loaded_lm.clear();
-        g_loaded_und_dit.clear();
-    }
+    ace_lm_free(ctx);
 
     if (rc != 0) {
         job->status.store(job->cancel.load() ? 3 : 2);
         return;
+    }
+
+    // Sticky name hint for resolve_name under --keep-loaded. Master clears it
+    // in the default mode since the ctx is gone; we match that behavior.
+    if (g_keep_loaded) {
+        g_loaded_lm = lm_name;
+    } else {
+        g_loaded_lm.clear();
     }
 
     // serialize output as a JSON array
@@ -759,9 +644,48 @@ static void synth_worker(std::shared_ptr<Job>    job,
         return;
     }
 
-    // Load resident modules (TextEnc, CondEnc, FSQ). DiT and VAE are phased.
-    std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
-    if (!ensure_synth(dit_name, sf.adapter, sf.adapter_scale)) {
+    // Resolve DiT, adapter and the text-encoder / VAE singletons.
+    std::string        dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
+    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
+    if (!dit) {
+        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
+        free(src_interleaved);
+        free(ref_interleaved);
+        job->status.store(2);
+        return;
+    }
+    if (g_registry.text_enc.empty() || g_registry.vae.empty()) {
+        fprintf(stderr, "[Server] Missing Text-Enc or VAE in registry\n");
+        free(src_interleaved);
+        free(ref_interleaved);
+        job->status.store(2);
+        return;
+    }
+
+    AceSynthParams p    = g_synth_params;
+    p.text_encoder_path = g_registry.text_enc[0].path.c_str();
+    p.dit_path          = dit->path.c_str();
+    p.vae_path          = g_registry.vae[0].path.c_str();
+    p.adapter_path      = nullptr;
+    p.adapter_scale     = 1.0f;
+    if (!sf.adapter.empty()) {
+        const AdapterEntry * adapter = registry_find_adapter(g_registry, sf.adapter.c_str());
+        if (!adapter) {
+            fprintf(stderr, "[Server] Adapter not found: %s\n", sf.adapter.c_str());
+            free(src_interleaved);
+            free(ref_interleaved);
+            job->status.store(2);
+            return;
+        }
+        p.adapter_path  = adapter->path.c_str();
+        p.adapter_scale = sf.adapter_scale;
+    }
+    fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
+            sf.adapter.empty() ? "" : " Adapter=", sf.adapter.c_str());
+
+    AceSynth * ctx = ace_synth_load(g_store, &p);
+    if (!ctx) {
+        fprintf(stderr, "[Server] FATAL: synth load failed\n");
         free(src_interleaved);
         free(ref_interleaved);
         job->status.store(2);
@@ -789,18 +713,16 @@ static void synth_worker(std::shared_ptr<Job>    job,
         }
     }
 
-    // Two-phase run: DiT resident for all groups, unload, then VAE for all jobs.
-    const int rc = synth_batch_run(g_ctx_synth, groups, src_interleaved, src_len, ref_interleaved, ref_len,
-                                   audio.data(), server_cancel_job, (void *) &job->cancel);
+    // Two-phase run. The store acquires and releases GPU modules around each
+    // op (STRICT) or keeps them across ops (NEVER). The synth ctx is always
+    // freed at the end of this handler.
+    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, audio.data(),
+                                   server_cancel_job, (void *) &job->cancel);
+    ace_synth_free(ctx);
+    free(src_interleaved);
+    free(ref_interleaved);
+
     if (rc != 0) {
-        if (!g_keep_loaded) {
-            ace_synth_free(g_ctx_synth);
-            g_ctx_synth = nullptr;
-            g_loaded_dit.clear();
-            g_loaded_adapter.clear();
-        }
-        free(src_interleaved);
-        free(ref_interleaved);
         for (auto & a : audio) {
             ace_audio_free(&a);
         }
@@ -808,15 +730,18 @@ static void synth_worker(std::shared_ptr<Job>    job,
         return;
     }
 
-    // Drop the pipeline unless --keep-loaded asks to keep it around.
-    if (!g_keep_loaded) {
-        ace_synth_free(g_ctx_synth);
-        g_ctx_synth = nullptr;
+    // Sticky name hints for resolve_name under --keep-loaded. Master clears
+    // them in the default mode since the ctx is gone; we match that behavior.
+    if (g_keep_loaded) {
+        g_loaded_dit           = dit_name;
+        g_loaded_adapter       = sf.adapter;
+        g_loaded_adapter_scale = sf.adapter_scale;
+    } else {
         g_loaded_dit.clear();
         g_loaded_adapter.clear();
+        g_loaded_adapter_scale = 1.0f;
     }
-    free(src_interleaved);
-    free(ref_interleaved);
+
     const int total_tracks = total_alloc;
 
     // encode each track (peak normalize + encode)
@@ -1005,33 +930,49 @@ static void understand_worker(std::shared_ptr<Job> job,
         return;
     }
 
-    // load (LM + tokenizer from selected DiT)
-    std::string lm_name  = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
-    std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
-    if (!ensure_understand(lm_name, dit_name)) {
+    // Resolve LM + DiT (the DiT path carries the tokenizer weights).
+    std::string        lm_name  = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
+    std::string        dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
+    const ModelEntry * lm_entry = registry_find(g_registry.lm, lm_name.c_str());
+    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
+    if (!lm_entry || !dit) {
+        fprintf(stderr, "[Server] LM or DiT not found: lm=%s dit=%s\n", lm_name.c_str(), dit_name.c_str());
+        free(src_interleaved);
+        job->status.store(2);
+        return;
+    }
+
+    AceUnderstandParams p = g_und_params;
+    p.model_path          = lm_entry->path.c_str();
+    p.dit_path            = dit->path.c_str();
+
+    AceUnderstand * ctx = ace_understand_load(g_store, &p);
+    if (!ctx) {
+        fprintf(stderr, "[Server] FATAL: understand load failed\n");
         free(src_interleaved);
         job->status.store(2);
         return;
     }
 
     AceRequest out;
-    int rc = ace_understand_generate(g_ctx_understand, src_interleaved, src_len, &ace_req, &out, server_cancel_job,
-                                     (void *) &job->cancel);
-
-    // free
-    if (!g_keep_loaded) {
-        ace_understand_free(g_ctx_understand);
-        g_ctx_understand = nullptr;
-        ace_lm_free(g_ctx_lm);
-        g_ctx_lm = nullptr;
-        g_loaded_lm.clear();
-        g_loaded_und_dit.clear();
-    }
+    int        rc = ace_understand_generate(ctx, src_interleaved, src_len, &ace_req, &out, server_cancel_job,
+                                            (void *) &job->cancel);
+    ace_understand_free(ctx);
     free(src_interleaved);
 
     if (rc != 0) {
         job->status.store(job->cancel.load() ? 3 : 2);
         return;
+    }
+
+    // Sticky name hints for resolve_name under --keep-loaded. Master clears
+    // them in the default mode since the ctx is gone; we match that behavior.
+    if (g_keep_loaded) {
+        g_loaded_lm      = lm_name;
+        g_loaded_und_dit = dit_name;
+    } else {
+        g_loaded_lm.clear();
+        g_loaded_und_dit.clear();
     }
 
     job->result_body = "[" + request_to_json(&out) + "]";
@@ -1363,13 +1304,22 @@ int main(int argc, char ** argv) {
 
     // init understand params (vae for audio encoding, dit resolved per-request)
     ace_understand_default_params(&g_und_params);
-    g_und_params.use_fa  = g_lm_params.use_fa;
-    g_und_params.use_fsm = g_lm_params.use_fsm;
+    g_und_params.use_fa      = g_lm_params.use_fa;
+    g_und_params.use_fsm     = g_lm_params.use_fsm;
+    g_und_params.max_seq     = g_lm_params.max_seq;         // must match ace_lm: part of the LM ModelKey
+    g_und_params.max_batch   = g_lm_params.max_batch;       // must match ace_lm: part of the LM ModelKey
+    g_und_params.vae_chunk   = g_synth_params.vae_chunk;    // share --vae-chunk with /synth
+    g_und_params.vae_overlap = g_synth_params.vae_overlap;  // share --vae-overlap with /synth
     if (have_vae) {
         g_und_params.vae_path = g_registry.vae[0].path.c_str();
     }
 
     bool have_understand = have_lm && have_dit && have_vae;
+
+    // central store: one policy for the whole server lifetime. STRICT keeps
+    // at most one GPU module resident at a time; --keep-loaded flips it to
+    // NEVER and lets the working set accumulate across requests.
+    g_store = store_create(g_keep_loaded ? EVICT_NEVER : EVICT_STRICT);
 
     // setup HTTP server
     httplib::Server svr;
@@ -1491,11 +1441,9 @@ int main(int argc, char ** argv) {
     cv_work.notify_one();
     worker.join();
 
-    // cleanup (all _free functions handle NULL)
+    // cleanup
     fprintf(stderr, "[Server] Shutting down...\n");
-    ace_understand_free(g_ctx_understand);
-    ace_synth_free(g_ctx_synth);
-    ace_lm_free(g_ctx_lm);
+    store_free(g_store);
     fprintf(stderr, "[Server] Done\n");
 
     return 0;

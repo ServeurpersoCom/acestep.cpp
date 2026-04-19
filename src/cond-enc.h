@@ -80,20 +80,18 @@ struct CondGGML {
     WeightCtx            wctx;
 };
 
-// Init
-static void cond_ggml_init_backend(CondGGML * m) {
+// Load from ACEStep DiT GGUF
+// gguf_path: path to the DiT .gguf file
+// Tensors have prefix "encoder." for lyric/timbre, and "null_condition_emb"
+static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
+    // Backend init
     BackendPair bp    = backend_init("CondEncoder");
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
     m->sched          = backend_sched_new(bp, 8192);
     m->use_flash_attn = bp.has_gpu;
     m->clamp_fp16     = false;
-}
 
-// Load from ACEStep DiT GGUF
-// gguf_path: path to the DiT .gguf file
-// Tensors have prefix "encoder." for lyric/timbre, and "null_condition_emb"
-static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
     m->lyric_cfg  = qwen3_lyric_config();
     m->timbre_cfg = qwen3_timbre_config();
 

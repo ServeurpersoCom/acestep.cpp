@@ -9,53 +9,40 @@
 //   pipeline-synth.cpp      orchestrator: load, phases, free
 //   pipeline-synth-ops.cpp  primitives:   encode, context, noise, dit, vae
 
-#include "bpe.h"
-#include "cond-enc.h"
 #include "debug.h"
-#include "dit.h"
-#include "fsq-detok.h"
-#include "fsq-tok.h"
+#include "model-store.h"
 #include "pipeline-synth.h"
-#include "qwen3-enc.h"
 #include "request.h"
 #include "timer.h"
-#include "vae.h"
 
 #include <string>
 #include <vector>
 
-// AceSynth carries the resident modules, the CPU-side DiT metadata cached at
-// load time, and the slots for the on-demand DiT and VAE decoder. have_dit
-// and have_vae track VRAM residency and gate the phase entry points.
+// AceSynth is a thin handle over a ModelStore. It carries the ModelKeys the
+// ops use to acquire modules and a pointer to the DiT metadata owned by the
+// store (silence_latent, null_cond, config, is_turbo). No GPU module is ever
+// owned here: each op performs its own require/release against the store.
 struct AceSynth {
-    // Resident modules (loaded once at ace_synth_load)
-    Qwen3GGML    text_enc;
-    CondGGML     cond_enc;
-    DetokGGML    detok;
-    TokGGML      tok;
-    BPETokenizer bpe;
-
-    // Lazy-shared modules (loaded via ace_synth_dit_load / ace_synth_vae_load)
-    DiTGGML dit;
-    VAEGGML vae;
-    bool    have_dit;
-    bool    have_vae;
-
-    // CPU-side DiT state, populated at ace_synth_load from the GGUF metadata.
-    // Lets text encoding and T resolution run without the DiT in VRAM.
-    DiTGGMLConfig      dit_cfg;
-    std::vector<float> silence_full;   // [15000, 64] f32, from silence_latent tensor
-    std::vector<float> null_cond_cpu;  // [hidden_size] f32, from null_condition_emb (empty when the model has none)
-    bool               is_turbo;
-
-    // Config
+    ModelStore *   store;
     AceSynthParams params;
-    bool           have_detok;
-    bool           have_tok;
 
-    // Derived constants
+    // CPU metadata pointer. Owned by the store, valid for the store lifetime
+    // (always longer than AceSynth). Gives ops access to silence_full,
+    // null_cond_cpu, is_turbo and the DiT config without loading the DiT.
+    const DiTMeta * meta;
+
+    // Derived constants mirrored for inline use in ops.
     int Oc;      // out_channels (64)
     int ctx_ch;  // in_channels - Oc (128)
+
+    // ModelKeys for the seven GPU modules the pipeline touches.
+    ModelKey text_enc_key;   // Qwen3 text encoder, from text_encoder_path
+    ModelKey cond_enc_key;   // condition encoder, from dit_path
+    ModelKey fsq_tok_key;    // FSQ tokenizer, from dit_path
+    ModelKey fsq_detok_key;  // FSQ detokenizer, from dit_path
+    ModelKey dit_key;        // DiT, from dit_path (+ adapter_path, adapter_scale)
+    ModelKey vae_enc_key;    // VAE encoder, from vae_path
+    ModelKey vae_dec_key;    // VAE decoder, from vae_path
 };
 
 // Transient state for a single job, shared by reference across the primitive

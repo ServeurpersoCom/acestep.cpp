@@ -6,6 +6,7 @@
 
 #include "bpe.h"
 #include "metadata-fsm.h"
+#include "model-store.h"
 #include "prompt.h"
 #include "qwen3-lm.h"
 #include "sampling.h"
@@ -22,11 +23,9 @@
 #include <vector>
 
 struct AceLm {
-    Qwen3LM      model;
-    BPETokenizer bpe;
-    MetadataFSM  fsm;
+    ModelStore * store;
     AceLmParams  params;
-    double       load_ms;  // total load time (BPE + model + FSM)
+    ModelKey     lm_key;
 };
 
 // Batched Phase 1: N text generations with shared prompt, different seeds.
@@ -551,51 +550,26 @@ void ace_lm_default_params(AceLmParams * p) {
     p->clamp_fp16    = false;
 }
 
-AceLm * ace_lm_load(const AceLmParams * params) {
-    if (!params->model_path) {
-        fprintf(stderr, "[Ace-LM] ERROR: model_path is NULL\n");
+AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
+    if (!store || !params || !params->model_path) {
+        fprintf(stderr, "[Ace-LM] ERROR: store and model_path are required\n");
         return NULL;
     }
 
-    Timer   t_load;
     AceLm * ctx = new AceLm();
+    ctx->store  = store;
     ctx->params = *params;
 
-    // Load BPE tokenizer from model GGUF
-    if (!load_bpe_from_gguf(&ctx->bpe, params->model_path)) {
-        fprintf(stderr, "[Ace-LM] ERROR: failed to load BPE from %s\n", params->model_path);
-        delete ctx;
-        return NULL;
-    }
+    // KV sets sized for worst case: CFG needs 2x batch.
+    ctx->lm_key.kind          = MODEL_LM;
+    ctx->lm_key.path          = params->model_path;
+    ctx->lm_key.max_seq       = params->max_seq;
+    ctx->lm_key.n_kv_sets     = 2 * params->max_batch;
+    ctx->lm_key.adapter_path  = "";
+    ctx->lm_key.adapter_scale = 1.0f;
 
-    // Allocate enough KV sets for worst case: CFG needs 2x batch
-    int n_kv_sets = 2 * params->max_batch;
-
-    if (!qw3lm_load(&ctx->model, params->model_path, params->max_seq, n_kv_sets)) {
-        fprintf(stderr, "[Ace-LM] ERROR: failed to load model from %s\n", params->model_path);
-        delete ctx;
-        return NULL;
-    }
-    if (!params->use_fa) {
-        ctx->model.use_flash_attn = false;
-    }
-    ctx->model.clamp_fp16 = params->clamp_fp16;
-
-    // Pre-extract partial LM head for phase2 (audio code tokens only).
-    // Uses a contiguous GPU tensor instead of ggml_view_2d on quantized weights.
-    qw3lm_build_partial_head(&ctx->model, TOKEN_IM_END);
-
-    // Init FSM (needs BPE + vocab size from loaded model)
-    if (params->use_fsm) {
-        ctx->fsm.init(ctx->bpe, ctx->model.cfg.vocab_size);
-    }
-
-    fprintf(stderr, "[Ace-LM] Loaded: vocab=%d, max_seq=%d, max_batch=%d, kv_sets=%d, fa=%s\n",
-            ctx->model.cfg.vocab_size, params->max_seq, params->max_batch, n_kv_sets,
-            ctx->model.use_flash_attn ? "yes" : "no");
-    if (!params->use_fsm) {
-        fprintf(stderr, "[Ace-LM] FSM constrained decoding disabled\n");
-    }
+    fprintf(stderr, "[Ace-LM] Ready: path=%s, max_seq=%d, max_batch=%d, fa=%s, fsm=%s\n", params->model_path,
+            params->max_seq, params->max_batch, params->use_fa ? "yes" : "no", params->use_fsm ? "yes" : "no");
     if (!params->use_batch_cfg) {
         fprintf(stderr, "[Ace-LM] Batched CFG disabled (split N=1 forwards)\n");
     }
@@ -603,7 +577,6 @@ AceLm * ace_lm_load(const AceLmParams * params) {
         fprintf(stderr, "[Ace-LM] FP16 clamp enabled\n");
     }
 
-    ctx->load_ms = t_load.ms();
     return ctx;
 }
 
@@ -626,6 +599,51 @@ int ace_lm_generate(AceLm *            ctx,
     if (req->caption.empty()) {
         fprintf(stderr, "[Ace-LM] ERROR: caption is empty\n");
         return -1;
+    }
+
+    // Acquire GPU LM from the store. RAII releases it on scope exit.
+    Qwen3LM * model = store_require_lm(ctx->store, ctx->lm_key);
+    if (!model) {
+        fprintf(stderr, "[Ace-LM] ERROR: store_require_lm failed\n");
+        return -1;
+    }
+    ModelHandle lm_guard(ctx->store, model);
+
+    // Runtime flags: safe to set on every require (cache-hit or fresh load).
+    if (!ctx->params.use_fa) {
+        model->use_flash_attn = false;
+    }
+    model->clamp_fp16 = ctx->params.clamp_fp16;
+
+    // Fresh load only: allocate the partial LM head for phase2 audio codes.
+    // Contiguous GPU tensor instead of ggml_view_2d on quantized weights.
+    // Cached on the model itself, freed by qw3lm_free when the store evicts.
+    if (!model->lm_head_buf) {
+        qw3lm_build_partial_head(model, TOKEN_IM_END);
+    }
+
+    // CPU-resident tokenizer and FSM template. Owned by the store, never
+    // evicted. FSM must be copied before mutation since the template is shared.
+    BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.model_path);
+    if (!bpe) {
+        fprintf(stderr, "[Ace-LM] ERROR: store_bpe failed\n");
+        return -1;
+    }
+
+    MetadataFSM * fsm_template = nullptr;
+    if (ctx->params.use_fsm) {
+        fsm_template = store_fsm(ctx->store, ctx->params.model_path, model->cfg.vocab_size);
+        if (!fsm_template) {
+            fprintf(stderr, "[Ace-LM] ERROR: store_fsm failed\n");
+            return -1;
+        }
+    }
+
+    // Local mutable FSM for this call. A copy is mandatory: force_field and
+    // apply_mask mutate state that must not bleed across requests.
+    MetadataFSM local_fsm;
+    if (fsm_template) {
+        local_fsm = *fsm_template;
     }
 
     Timer t_total;
@@ -679,13 +697,13 @@ int ace_lm_generate(AceLm *            ctx,
             if (ace.lyrics == "[Instrumental]") {
                 user_msg += "\n\ninstrumental: true";
             }
-            prompt = build_custom_prompt(ctx->bpe, sys.c_str(), user_msg.c_str());
+            prompt = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
         } else if (mode == LM_MODE_FORMAT) {
             std::string sys      = std::string("# Instruction\n") + LM_FORMAT_INSTRUCTION + "\n";
             std::string user_msg = "# Caption\n" + ace.caption + "\n\n# Lyric\n" + ace.lyrics;
-            prompt               = build_custom_prompt(ctx->bpe, sys.c_str(), user_msg.c_str());
+            prompt               = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
         } else {
-            prompt = build_lm_prompt(ctx->bpe, ace);
+            prompt = build_lm_prompt(*bpe, ace);
         }
         std::vector<int> uncond;
 
@@ -699,10 +717,10 @@ int ace_lm_generate(AceLm *            ctx,
         int   fill_top_k = top_k;
 
         if (fill_cfg > 1.0f) {
-            uncond = build_lm_prompt_uncond(ctx->bpe, ace, neg_prompt);
+            uncond = build_lm_prompt_uncond(*bpe, ace, neg_prompt);
         }
 
-        ctx->fsm.reset();
+        local_fsm.reset();
         MetadataFSM * active_fsm = nullptr;
 
         if (ctx->params.use_fsm) {
@@ -712,21 +730,21 @@ int ace_lm_generate(AceLm *            ctx,
             // Force user-provided values into the KV cache so the LM
             // generates lyrics and codes conditioned on the right metadata.
             if (ace.bpm > 0) {
-                ctx->fsm.force_field(ctx->bpe, MetadataFSM::BPM_VALUE, std::to_string(ace.bpm));
+                local_fsm.force_field(*bpe, MetadataFSM::BPM_VALUE, std::to_string(ace.bpm));
             }
             if (ace.duration > 0) {
-                ctx->fsm.force_field(ctx->bpe, MetadataFSM::DURATION_VALUE, std::to_string((int) ace.duration));
+                local_fsm.force_field(*bpe, MetadataFSM::DURATION_VALUE, std::to_string((int) ace.duration));
             }
             if (!ace.keyscale.empty()) {
-                ctx->fsm.force_field(ctx->bpe, MetadataFSM::KEYSCALE_VALUE, ace.keyscale);
+                local_fsm.force_field(*bpe, MetadataFSM::KEYSCALE_VALUE, ace.keyscale);
             }
             if (!ace.vocal_language.empty() && ace.vocal_language != "unknown") {
-                ctx->fsm.force_field(ctx->bpe, MetadataFSM::LANGUAGE_VALUE, ace.vocal_language);
+                local_fsm.force_field(*bpe, MetadataFSM::LANGUAGE_VALUE, ace.vocal_language);
             }
             if (!ace.timesignature.empty()) {
-                ctx->fsm.force_field(ctx->bpe, MetadataFSM::TIMESIG_VALUE, ace.timesignature);
+                local_fsm.force_field(*bpe, MetadataFSM::TIMESIG_VALUE, ace.timesignature);
             }
-            active_fsm = &ctx->fsm;
+            active_fsm = &local_fsm;
         }
 
         const char * mode_name = skip_codes ? (mode == LM_MODE_INSPIRE ? "inspire" : "format") : "fill";
@@ -734,8 +752,8 @@ int ace_lm_generate(AceLm *            ctx,
                 gen_lyrics ? "generate" : "keep", has_all_metas ? "complete" : "fill gaps", prompt.size(), fill_cfg,
                 lm_batch_size);
 
-        auto phase1_texts = generate_phase1_batch(&ctx->model, &ctx->bpe, prompt, 2048, temperature, fill_top_p,
-                                                  fill_top_k, seed, lm_batch_size, active_fsm, gen_lyrics, fill_cfg,
+        auto phase1_texts = generate_phase1_batch(model, bpe, prompt, 2048, temperature, fill_top_p, fill_top_k, seed,
+                                                  lm_batch_size, active_fsm, gen_lyrics, fill_cfg,
                                                   uncond.empty() ? nullptr : &uncond, !gen_lyrics, cancel, cancel_data);
         if (phase1_texts.empty()) {
             return -1;
@@ -748,7 +766,7 @@ int ace_lm_generate(AceLm *            ctx,
 
         int n_kv_reset = (fill_cfg > 1.0f) ? 2 * lm_batch_size : lm_batch_size;
         for (int i = 0; i < n_kv_reset; i++) {
-            qw3lm_reset_kv(&ctx->model, i);
+            qw3lm_reset_kv(model, i);
         }
     }
 
@@ -759,7 +777,7 @@ int ace_lm_generate(AceLm *            ctx,
     // Debug: dump tokens/logits
     if (!user_has_codes && (dump_logits || dump_tokens)) {
         std::string cot        = build_cot_yaml(aces[0]);
-        auto        dbg_prompt = build_lm_prompt_with_cot(ctx->bpe, aces[0], cot);
+        auto        dbg_prompt = build_lm_prompt_with_cot(*bpe, aces[0], cot);
 
         if (dump_tokens) {
             FILE * f = fopen(dump_tokens, "w");
@@ -773,17 +791,16 @@ int ace_lm_generate(AceLm *            ctx,
             }
         }
         if (dump_logits) {
-            std::vector<float> dbg_logits(ctx->model.cfg.vocab_size);
-            qw3lm_forward(&ctx->model, dbg_prompt.data(), (int) dbg_prompt.size(), 0, dbg_logits.data());
+            std::vector<float> dbg_logits(model->cfg.vocab_size);
+            qw3lm_forward(model, dbg_prompt.data(), (int) dbg_prompt.size(), 0, dbg_logits.data());
             FILE * f = fopen(dump_logits, "wb");
             if (f) {
-                fwrite(dbg_logits.data(), sizeof(float), ctx->model.cfg.vocab_size, f);
+                fwrite(dbg_logits.data(), sizeof(float), model->cfg.vocab_size, f);
                 fclose(f);
-                fprintf(stderr, "[LM-Debug] Logits -> %s (%d floats, argmax=%d)\n", dump_logits,
-                        ctx->model.cfg.vocab_size,
+                fprintf(stderr, "[LM-Debug] Logits -> %s (%d floats, argmax=%d)\n", dump_logits, model->cfg.vocab_size,
                         (int) (std::max_element(dbg_logits.begin(), dbg_logits.end()) - dbg_logits.begin()));
             }
-            qw3lm_reset_kv(&ctx->model, 0);
+            qw3lm_reset_kv(model, 0);
         }
     }
 
@@ -793,8 +810,8 @@ int ace_lm_generate(AceLm *            ctx,
         fprintf(stderr, "[LM-Generate] %s mode, no audio code generation\n",
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
-        batch_codes = run_phase2_batch(&ctx->model, ctx->bpe, aces, temperature, top_p, top_k, seed, lm_batch_size,
-                                       cfg_scale, neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
+        batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
+                                       neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
         if (batch_codes.empty()) {
             return -1;
         }
@@ -820,7 +837,7 @@ int ace_lm_generate(AceLm *            ctx,
         out[b].lm_batch_size = 1;  // each output is a standalone enriched request
     }
 
-    fprintf(stderr, "[Ace-LM] Load %.0f | Total %.0fms | seed=%lld\n", ctx->load_ms, t_total.ms(), dit_seed);
+    fprintf(stderr, "[Ace-LM] Total %.0fms | seed=%lld\n", t_total.ms(), dit_seed);
     return 0;
 }
 
@@ -828,14 +845,5 @@ void ace_lm_free(AceLm * ctx) {
     if (!ctx) {
         return;
     }
-    qw3lm_free(&ctx->model);
     delete ctx;
-}
-
-Qwen3LM * ace_lm_get_model(AceLm * ctx) {
-    return ctx ? &ctx->model : nullptr;
-}
-
-BPETokenizer * ace_lm_get_bpe(AceLm * ctx) {
-    return ctx ? &ctx->bpe : nullptr;
 }

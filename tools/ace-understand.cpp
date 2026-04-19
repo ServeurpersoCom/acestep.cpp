@@ -10,6 +10,7 @@
 // See --help for full option list.
 
 #include "audio-io.h"
+#include "model-store.h"
 #include "pipeline-understand.h"
 #include "request.h"
 #include "version.h"
@@ -128,8 +129,10 @@ int main(int argc, char ** argv) {
     params.dump_dir   = dump_dir;
 
     // load pipeline
-    AceUnderstand * ctx = ace_understand_load(&params);
+    ModelStore *    store = store_create(EVICT_STRICT);
+    AceUnderstand * ctx   = ace_understand_load(store, &params);
     if (!ctx) {
+        store_free(store);
         return 1;
     }
 
@@ -142,6 +145,7 @@ int main(int argc, char ** argv) {
     if (request_path) {
         if (!request_parse(&req, request_path)) {
             ace_understand_free(ctx);
+            store_free(store);
             return 1;
         }
         request_dump(&req, stderr);
@@ -156,6 +160,7 @@ int main(int argc, char ** argv) {
         if (!planar) {
             fprintf(stderr, "[Ace-Understand] FATAL: cannot read %s\n", src_audio_path);
             ace_understand_free(ctx);
+            store_free(store);
             return 1;
         }
         fprintf(stderr, "[Ace-Understand] %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
@@ -170,6 +175,7 @@ int main(int argc, char ** argv) {
     int        rc = ace_understand_generate(ctx, src_interleaved, src_len, &req, &out, NULL, NULL);
     free(src_interleaved);
     ace_understand_free(ctx);
+    store_free(store);
 
     if (rc != 0) {
         return 1;

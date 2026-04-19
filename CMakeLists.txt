@@ -58,12 +58,12 @@ add_subdirectory(vendor/cpp-httplib)
 # Shared compile options and ggml linkage
 macro(link_ggml_backends target)
     target_include_directories(${target} PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_BINARY_DIR}
+        ${CMAKE_SOURCE_DIR}/src
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_BINARY_DIR}
     )
     target_include_directories(${target} SYSTEM PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}/ggml/include
+        ${CMAKE_SOURCE_DIR}/ggml/include
     )
     if(MSVC)
         target_compile_options(${target} PRIVATE /W4 /wd4100 /wd4505)
@@ -101,6 +101,7 @@ endif()
 # Core library (shared between binaries)
 add_library(acestep-core STATIC
     src/request.cpp
+    src/model-store.cpp
     src/pipeline-lm.cpp
     src/pipeline-synth.cpp
     src/pipeline-synth-ops.cpp
@@ -167,3 +168,5 @@ else()
     target_link_libraries(mp3-codec PRIVATE m)
 endif()
 target_link_libraries(mp3-codec PRIVATE Threads::Threads)
+
+add_subdirectory(tests)

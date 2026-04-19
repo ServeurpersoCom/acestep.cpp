@@ -302,18 +302,16 @@ static void qwen3_load_layer(WeightCtx *         wctx,
     ly->down_proj = gf_load_tensor(wctx, gf, prefix + ".mlp.down_proj.weight");
 }
 
-// Backend init
-static void qwen3_init_backend(Qwen3GGML * m) {
+// Load standalone text encoder (Qwen3-Embedding) from GGUF
+// gguf_path: path to the .gguf file
+static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * gguf_path) {
+    // Backend init
     BackendPair bp    = backend_init("TextEncoder");
     m->backend        = bp.backend;
     m->cpu_backend    = bp.cpu_backend;
     m->sched          = backend_sched_new(bp, 4096);
     m->use_flash_attn = bp.has_gpu;
-}
 
-// Load standalone text encoder (Qwen3-Embedding) from GGUF
-// gguf_path: path to the .gguf file
-static bool qwen3_load_text_encoder(Qwen3GGML * m, const char * gguf_path) {
     m->cfg = {
         /*hidden_size*/ 1024,
         /*intermediate_size*/ 3072,

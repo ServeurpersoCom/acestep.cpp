@@ -42,23 +42,26 @@ static std::vector<int> parse_codes_string(const std::string & s) {
     return codes;
 }
 
-// Module: VAE encoder (ephemeral).
 int ops_encode_src(const AceSynth * ctx, const float * src_audio, int src_len, SynthState & s) {
-    // Cover mode: load VAE encoder and encode source audio
+    // Cover mode: acquire VAE encoder from the store, encode source audio, release.
     s.have_cover = false;
     s.T_cover    = 0;
     if (src_audio && src_len > 0) {
         s.timer.reset();
         int T_audio = src_len;
 
-        VAEEncoder vae_enc = {};
-        vae_enc_load(&vae_enc, ctx->params.vae_path);
+        VAEEncoder * vae_enc = store_require_vae_enc(ctx->store, ctx->vae_enc_key);
+        if (!vae_enc) {
+            fprintf(stderr, "[Encode-Src] FATAL: store_require_vae_enc failed\n");
+            return -1;
+        }
+        ModelHandle vae_enc_guard(ctx->store, vae_enc);
+
         int max_T_lat = (T_audio / 1920) + 64;
         s.cover_latents.resize(max_T_lat * 64);
 
-        s.T_cover = vae_enc_encode_tiled(&vae_enc, src_audio, T_audio, s.cover_latents.data(), max_T_lat,
+        s.T_cover = vae_enc_encode_tiled(vae_enc, src_audio, T_audio, s.cover_latents.data(), max_T_lat,
                                          ctx->params.vae_chunk, ctx->params.vae_overlap);
-        vae_enc_free(&vae_enc);
         if (s.T_cover < 0) {
             fprintf(stderr, "[Encode-Src] FATAL: encode failed\n");
             return -1;
@@ -73,7 +76,7 @@ int ops_encode_src(const AceSynth * ctx, const float * src_audio, int src_len, S
     return 0;
 }
 
-void ops_fsq_roundtrip(AceSynth * ctx, SynthState & s) {
+void ops_fsq_roundtrip(const AceSynth * ctx, SynthState & s) {
     // FSQ roundtrip for cover: tokenize (25Hz->5Hz) + detokenize (5Hz->25Hz).
     // The lossy 5:1 temporal compression destroys micro-timings, ornaments and
     // transients. The DiT receives degraded latents and diverges from the source,
@@ -81,24 +84,56 @@ void ops_fsq_roundtrip(AceSynth * ctx, SynthState & s) {
     // cover-nofsq skips this call and feeds clean 25Hz VAE latents directly,
     // producing remixes that stay close to the source.
     // Other tasks (lego, extract, repaint, complete) also use clean latents.
-    if (s.have_cover && ctx->have_tok && ctx->have_detok) {
-        s.timer.reset();
-        int              T_5Hz = (s.T_cover + 4) / 5;
-        std::vector<int> codes(T_5Hz);
-        int              T_5Hz_actual =
-            tok_ggml_encode(&ctx->tok, s.cover_latents.data(), s.T_cover, codes.data(), ctx->silence_full.data());
-        if (T_5Hz_actual > 0) {
-            int                T_25Hz_rt = T_5Hz_actual * 5;
-            std::vector<float> rt_latents(T_25Hz_rt * 64);
-            int                ret = detok_ggml_decode(&ctx->detok, codes.data(), T_5Hz_actual, rt_latents.data());
-            if (ret >= 0) {
-                int copy_T = T_25Hz_rt < s.T_cover ? T_25Hz_rt : s.T_cover;
-                memcpy(s.cover_latents.data(), rt_latents.data(), (size_t) copy_T * 64 * sizeof(float));
-                fprintf(stderr, "[FSQ-Roundtrip] %d->%d->%d frames, %.1f ms\n", s.T_cover, T_5Hz_actual, copy_T,
-                        s.timer.ms());
-            }
-        }
+    if (!s.have_cover) {
+        return;
     }
+    s.timer.reset();
+    int              T_5Hz = (s.T_cover + 4) / 5;
+    std::vector<int> codes(T_5Hz);
+
+    // Tokenizer scope: acquire, encode 25Hz latents to 5Hz codes, release.
+    int T_5Hz_actual;
+    {
+        TokGGML * tok = store_require_fsq_tok(ctx->store, ctx->fsq_tok_key);
+        if (!tok) {
+            fprintf(stderr, "[FSQ-Roundtrip] FATAL: store_require_fsq_tok failed\n");
+            return;
+        }
+        ModelHandle tok_guard(ctx->store, tok);
+        if (!ctx->params.use_fa) {
+            tok->use_flash_attn = false;
+        }
+
+        T_5Hz_actual =
+            tok_ggml_encode(tok, s.cover_latents.data(), s.T_cover, codes.data(), ctx->meta->silence_full.data());
+    }
+    if (T_5Hz_actual <= 0) {
+        return;
+    }
+
+    // Detokenizer scope: acquire, decode 5Hz codes back to 25Hz latents, release.
+    int                T_25Hz_rt = T_5Hz_actual * 5;
+    std::vector<float> rt_latents(T_25Hz_rt * 64);
+    int                ret;
+    {
+        DetokGGML * detok = store_require_fsq_detok(ctx->store, ctx->fsq_detok_key);
+        if (!detok) {
+            fprintf(stderr, "[FSQ-Roundtrip] FATAL: store_require_fsq_detok failed\n");
+            return;
+        }
+        ModelHandle detok_guard(ctx->store, detok);
+        if (!ctx->params.use_fa) {
+            detok->use_flash_attn = false;
+        }
+
+        ret = detok_ggml_decode(detok, codes.data(), T_5Hz_actual, rt_latents.data());
+    }
+    if (ret < 0) {
+        return;
+    }
+    int copy_T = T_25Hz_rt < s.T_cover ? T_25Hz_rt : s.T_cover;
+    memcpy(s.cover_latents.data(), rt_latents.data(), (size_t) copy_T * 64 * sizeof(float));
+    fprintf(stderr, "[FSQ-Roundtrip] %d->%d->%d frames, %.1f ms\n", s.T_cover, T_5Hz_actual, copy_T, s.timer.ms());
 }
 
 int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
@@ -113,7 +148,7 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
     s.shift          = s.rr.shift;
 
     if (s.num_steps <= 0) {
-        s.num_steps = ctx->is_turbo ? 8 : 50;
+        s.num_steps = ctx->meta->is_turbo ? 8 : 50;
     }
     if (s.num_steps > 100) {
         fprintf(stderr, "[Resolve-Params] WARNING: inference_steps %d clamped to 100\n", s.num_steps);
@@ -122,14 +157,14 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
 
     if (s.guidance_scale <= 0.0f) {
         s.guidance_scale = 1.0f;
-    } else if (ctx->is_turbo && s.guidance_scale > 1.0f) {
+    } else if (ctx->meta->is_turbo && s.guidance_scale > 1.0f) {
         fprintf(stderr, "[Resolve-Params] WARNING: turbo model, forcing guidance_scale=1.0 (was %.1f)\n",
                 s.guidance_scale);
         s.guidance_scale = 1.0f;
     }
 
     if (s.shift <= 0.0f) {
-        s.shift = ctx->is_turbo ? 3.0f : 1.0f;
+        s.shift = ctx->meta->is_turbo ? 3.0f : 1.0f;
     }
 
     // Audio codes: scan all requests to determine s.T from the longest code set.
@@ -149,10 +184,6 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
     if (s.have_codes) {
         fprintf(stderr, "[Resolve-Params] max audio codes across batch: %d (%.1fs @ 5Hz)\n", s.max_codes_len,
                 (float) s.max_codes_len / 5.0f);
-    }
-    if (s.have_codes && !ctx->have_detok) {
-        fprintf(stderr, "[Resolve-Params] FATAL: detokenizer not found\n");
-        return -1;
     }
 
     return 0;
@@ -184,8 +215,8 @@ int ops_resolve_T(const AceSynth * ctx, SynthState & s) {
     } else {
         s.T = (int) (s.duration * FRAMES_PER_SECOND);
     }
-    s.T     = ((s.T + ctx->dit_cfg.patch_size - 1) / ctx->dit_cfg.patch_size) * ctx->dit_cfg.patch_size;
-    s.S     = s.T / ctx->dit_cfg.patch_size;
+    s.T     = ((s.T + ctx->meta->cfg.patch_size - 1) / ctx->meta->cfg.patch_size) * ctx->meta->cfg.patch_size;
+    s.S     = s.T / ctx->meta->cfg.patch_size;
     s.enc_S = 0;
 
     fprintf(stderr, "[Resolve-T] T=%d, S=%d\n", s.T, s.S);
@@ -200,24 +231,29 @@ int ops_resolve_T(const AceSynth * ctx, SynthState & s) {
     return 0;
 }
 
-// Module: VAE encoder (ephemeral).
 void ops_encode_timbre(const AceSynth * ctx, const float * ref_audio, int ref_len, SynthState & s) {
     // Timbre features from ref_audio (independent of src_audio).
     // VAE-encode ref_audio and pass all frames to the timbre encoder.
     // NULL ref_audio = single silence frame (no timbre conditioning).
     if (ref_audio && ref_len > 0) {
         s.timer.reset();
-        VAEEncoder ref_vae = {};
-        vae_enc_load(&ref_vae, ctx->params.vae_path);
+        VAEEncoder * ref_vae = store_require_vae_enc(ctx->store, ctx->vae_enc_key);
+        if (!ref_vae) {
+            fprintf(stderr, "[Encode-Timbre] WARNING: store_require_vae_enc failed, using silence\n");
+            s.S_ref_timbre = 1;
+            s.timbre_feats.assign(ctx->meta->silence_full.data(), ctx->meta->silence_full.data() + 64);
+            return;
+        }
+        ModelHandle ref_vae_guard(ctx->store, ref_vae);
+
         int                max_T_ref = (ref_len / 1920) + 64;
         std::vector<float> ref_latents(max_T_ref * 64);
-        int                T_ref = vae_enc_encode_tiled(&ref_vae, ref_audio, ref_len, ref_latents.data(), max_T_ref,
+        int                T_ref = vae_enc_encode_tiled(ref_vae, ref_audio, ref_len, ref_latents.data(), max_T_ref,
                                                         ctx->params.vae_chunk, ctx->params.vae_overlap);
-        vae_enc_free(&ref_vae);
         if (T_ref < 0) {
             fprintf(stderr, "[Encode-Timbre] WARNING: ref_audio encode failed, using silence\n");
             s.S_ref_timbre = 1;
-            s.timbre_feats.assign(ctx->silence_full.data(), ctx->silence_full.data() + 64);
+            s.timbre_feats.assign(ctx->meta->silence_full.data(), ctx->meta->silence_full.data() + 64);
         } else {
             s.S_ref_timbre = T_ref;
             s.timbre_feats.assign(ref_latents.data(), ref_latents.data() + (size_t) T_ref * 64);
@@ -226,124 +262,170 @@ void ops_encode_timbre(const AceSynth * ctx, const float * ref_audio, int ref_le
         }
     } else {
         s.S_ref_timbre = 1;
-        s.timbre_feats.assign(ctx->silence_full.data(), ctx->silence_full.data() + 64);
+        s.timbre_feats.assign(ctx->meta->silence_full.data(), ctx->meta->silence_full.data() + 64);
     }
 }
 
-int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
-    // 3. Per-batch text encoding.
-    // Each batch element gets its own caption, lyrics, and metadata encoded independently.
-    // TextEncoder + CondEncoder run in series (cheap: ~13ms per element).
-    // Results are padded to s.max_enc_S with null_cond and stacked for a single DiT batch pass.
-    int H_text = ctx->text_enc.cfg.hidden_size;        // 1024
-    int H_cond = ctx->cond_enc.lyric_cfg.hidden_size;  // encoder hidden size (2048)
+// Per-batch CPU-resident forward from the text encoder.
+// Lives in a local array between the text_enc and cond_enc phases so the
+// two GPU modules never need to coexist under EVICT_STRICT.
+struct TextEncForward {
+    std::vector<float> text_hidden;  // [S_text * H_text] f32
+    std::vector<float> lyric_embed;  // [S_lyric * H_text] f32
+    int                S_text;
+    int                S_lyric;
+};
 
-    // null_condition_emb cached on CPU at ace_synth_load. Empty when the model has none.
-    s.null_cond_vec.resize(H_cond);
-    if (!ctx->null_cond_cpu.empty()) {
-        memcpy(s.null_cond_vec.data(), ctx->null_cond_cpu.data(), H_cond * sizeof(float));
+// Build the text/lyric prompt pair that feeds the text encoder for one batch
+// element. instruction is the DiT instruction header (main or non-cover).
+static void build_prompt_strings(const AceRequest &  rb,
+                                 const std::string & instruction,
+                                 float               duration,
+                                 std::string &       text_out,
+                                 std::string &       lyric_out) {
+    char bpm_b[16] = "N/A";
+    if (rb.bpm > 0) {
+        snprintf(bpm_b, sizeof(bpm_b), "%d", rb.bpm);
     }
+    const char * keyscale_b = rb.keyscale.empty() ? "N/A" : rb.keyscale.c_str();
+    const char * timesig_b  = rb.timesignature.empty() ? "N/A" : rb.timesignature.c_str();
+    const char * language_b = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
 
-    // instruction_str must be set by the orchestrator. Empty means unknown task or bug.
+    char metas_b[512];
+    snprintf(metas_b, sizeof(metas_b), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
+             bpm_b, timesig_b, keyscale_b, (int) duration);
+    text_out = std::string("# Instruction\n") + instruction + "\n\n" + "# Caption\n" + rb.caption + "\n\n" +
+               "# Metas\n" + metas_b + "<|endoftext|>\n";
+    lyric_out = std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
+}
+
+int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
+    // Per-batch text encoding in two GPU phases to keep EVICT_STRICT at one
+    // module resident at a time:
+    //   Phase A: acquire text_enc, run all qwen3 forwards (main and optional
+    //            non-cover) into CPU-resident TextEncForward, release.
+    //   Phase B: acquire cond_enc, run all cond_ggml forwards consuming those
+    //            cached hidden states into s.per_enc / s.per_enc_nc, release.
+    // Intermediate CPU footprint peaks at roughly batch_n * 2 * S * H_text * 4
+    // bytes (a few MB), negligible next to the GPU modules.
     if (s.instruction_str.empty()) {
         fprintf(stderr, "[Encode-Text] FATAL: instruction_str is empty (unknown task or orchestrator bug)\n");
         return -1;
     }
 
-    // encode each batch element independently
-    s.per_enc.resize(batch_n);
-    s.per_enc_S.resize(batch_n);
+    s.need_enc_switch = s.use_source_context && !s.is_repaint && !s.is_lego_region && s.rr.audio_cover_strength < 1.0f;
 
-    for (int b = 0; b < batch_n; b++) {
-        const AceRequest & rb = reqs[b];
-
-        // per-batch metadata
-        char bpm_b[16] = "N/A";
-        if (rb.bpm > 0) {
-            snprintf(bpm_b, sizeof(bpm_b), "%d", rb.bpm);
-        }
-        const char * keyscale_b = rb.keyscale.empty() ? "N/A" : rb.keyscale.c_str();
-        const char * timesig_b  = rb.timesignature.empty() ? "N/A" : rb.timesignature.c_str();
-        const char * language_b = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
-
-        char metas_b[512];
-        snprintf(metas_b, sizeof(metas_b), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
-                 bpm_b, timesig_b, keyscale_b, (int) s.duration);
-        std::string text_str = std::string("# Instruction\n") + s.instruction_str + "\n\n" + "# Caption\n" +
-                               rb.caption + "\n\n" + "# Metas\n" + metas_b + "<|endoftext|>\n";
-        std::string lyric_str =
-            std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
-
-        // tokenize
-        auto text_ids  = bpe_encode(&ctx->bpe, text_str.c_str(), true);
-        auto lyric_ids = bpe_encode(&ctx->bpe, lyric_str.c_str(), true);
-        int  S_text    = (int) text_ids.size();
-        int  S_lyric   = (int) lyric_ids.size();
-
-        // TextEncoder forward
-        std::vector<float> text_hidden(H_text * S_text);
-        qwen3_forward(&ctx->text_enc, text_ids.data(), S_text, text_hidden.data());
-
-        // lyric embedding (vocab lookup)
-        std::vector<float> lyric_embed(H_text * S_lyric);
-        qwen3_embed_lookup(&ctx->text_enc, lyric_ids.data(), S_lyric, lyric_embed.data());
-
-        // CondEncoder forward
-        s.timer.reset();
-        cond_ggml_forward(&ctx->cond_enc, text_hidden.data(), S_text, lyric_embed.data(), S_lyric,
-                          s.timbre_feats.data(), s.S_ref_timbre, s.per_enc[b], &s.per_enc_S[b]);
-        fprintf(stderr, "[Encode-Text Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n", b, S_text, S_lyric, s.per_enc_S[b],
-                s.timer.ms());
-
-        if (b == 0) {
-            debug_dump_2d(&s.dbg, "text_hidden", text_hidden.data(), S_text, H_text);
-            debug_dump_2d(&s.dbg, "lyric_embed", lyric_embed.data(), S_lyric, H_text);
-            debug_dump_2d(&s.dbg, "enc_hidden", s.per_enc[b].data(), s.per_enc_S[b], H_cond);
-        }
+    BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
+    if (!bpe) {
+        fprintf(stderr, "[Encode-Text] FATAL: store_bpe failed\n");
+        return -1;
     }
 
-    // second encoding pass using s.nc_instruction_str (set by orchestrator).
-    // used after s.cover_steps when audio_cover_strength < 1.0 (s.context switches to silence).
-    s.need_enc_switch = s.use_source_context && !s.is_repaint && !s.is_lego_region && s.rr.audio_cover_strength < 1.0f;
-    s.per_enc_nc.resize(batch_n);
-    s.per_enc_S_nc.assign(batch_n, 0);
+    std::vector<TextEncForward> main_fwd(batch_n);
+    std::vector<TextEncForward> nc_fwd(s.need_enc_switch ? batch_n : 0);
+    int                         H_text = 0;
 
-    if (s.need_enc_switch) {
+    // Phase A: text encoder.
+    {
+        Qwen3GGML * te = store_require_text_enc(ctx->store, ctx->text_enc_key);
+        if (!te) {
+            fprintf(stderr, "[Encode-Text] FATAL: store_require_text_enc failed\n");
+            return -1;
+        }
+        ModelHandle te_guard(ctx->store, te);
+        if (!ctx->params.use_fa) {
+            te->use_flash_attn = false;
+        }
+
+        H_text = te->cfg.hidden_size;
+
         for (int b = 0; b < batch_n; b++) {
-            const AceRequest & rb = reqs[b];
+            std::string text_str;
+            std::string lyric_str;
+            build_prompt_strings(reqs[b], s.instruction_str, s.duration, text_str, lyric_str);
 
-            char bpm_b[16] = "N/A";
-            if (rb.bpm > 0) {
-                snprintf(bpm_b, sizeof(bpm_b), "%d", rb.bpm);
-            }
-            const char * keyscale_b = rb.keyscale.empty() ? "N/A" : rb.keyscale.c_str();
-            const char * timesig_b  = rb.timesignature.empty() ? "N/A" : rb.timesignature.c_str();
-            const char * language_b = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
-
-            char metas_b[512];
-            snprintf(metas_b, sizeof(metas_b),
-                     "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n", bpm_b, timesig_b,
-                     keyscale_b, (int) s.duration);
-            std::string text_str = std::string("# Instruction\n") + s.nc_instruction_str + "\n\n" + "# Caption\n" +
-                                   rb.caption + "\n\n" + "# Metas\n" + metas_b + "<|endoftext|>\n";
-            std::string lyric_str =
-                std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
-
-            auto text_ids  = bpe_encode(&ctx->bpe, text_str.c_str(), true);
-            auto lyric_ids = bpe_encode(&ctx->bpe, lyric_str.c_str(), true);
+            auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
+            auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
             int  S_text    = (int) text_ids.size();
             int  S_lyric   = (int) lyric_ids.size();
 
-            std::vector<float> text_hidden(H_text * S_text);
-            qwen3_forward(&ctx->text_enc, text_ids.data(), S_text, text_hidden.data());
+            main_fwd[b].S_text  = S_text;
+            main_fwd[b].S_lyric = S_lyric;
+            main_fwd[b].text_hidden.resize((size_t) H_text * S_text);
+            qwen3_forward(te, text_ids.data(), S_text, main_fwd[b].text_hidden.data());
+            main_fwd[b].lyric_embed.resize((size_t) H_text * S_lyric);
+            qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, main_fwd[b].lyric_embed.data());
+        }
 
-            std::vector<float> lyric_embed(H_text * S_lyric);
-            qwen3_embed_lookup(&ctx->text_enc, lyric_ids.data(), S_lyric, lyric_embed.data());
+        if (s.need_enc_switch) {
+            for (int b = 0; b < batch_n; b++) {
+                std::string text_str;
+                std::string lyric_str;
+                build_prompt_strings(reqs[b], s.nc_instruction_str, s.duration, text_str, lyric_str);
 
-            cond_ggml_forward(&ctx->cond_enc, text_hidden.data(), S_text, lyric_embed.data(), S_lyric,
-                              s.timbre_feats.data(), s.S_ref_timbre, s.per_enc_nc[b], &s.per_enc_S_nc[b]);
-            fprintf(stderr, "[Encode-Text Batch%d] non-cover: %d+%d tokens -> enc_S=%d\n", b, S_text, S_lyric,
-                    s.per_enc_S_nc[b]);
+                auto text_ids  = bpe_encode(bpe, text_str.c_str(), true);
+                auto lyric_ids = bpe_encode(bpe, lyric_str.c_str(), true);
+                int  S_text    = (int) text_ids.size();
+                int  S_lyric   = (int) lyric_ids.size();
+
+                nc_fwd[b].S_text  = S_text;
+                nc_fwd[b].S_lyric = S_lyric;
+                nc_fwd[b].text_hidden.resize((size_t) H_text * S_text);
+                qwen3_forward(te, text_ids.data(), S_text, nc_fwd[b].text_hidden.data());
+                nc_fwd[b].lyric_embed.resize((size_t) H_text * S_lyric);
+                qwen3_embed_lookup(te, lyric_ids.data(), S_lyric, nc_fwd[b].lyric_embed.data());
+            }
+        }
+
+        // Debug dump of sample 0 while text_hidden and lyric_embed are live.
+        debug_dump_2d(&s.dbg, "text_hidden", main_fwd[0].text_hidden.data(), main_fwd[0].S_text, H_text);
+        debug_dump_2d(&s.dbg, "lyric_embed", main_fwd[0].lyric_embed.data(), main_fwd[0].S_lyric, H_text);
+    }
+
+    // Phase B: condition encoder.
+    int H_cond = 0;
+    s.per_enc.resize(batch_n);
+    s.per_enc_S.resize(batch_n);
+    s.per_enc_nc.resize(batch_n);
+    s.per_enc_S_nc.assign(batch_n, 0);
+    {
+        CondGGML * ce = store_require_cond_enc(ctx->store, ctx->cond_enc_key);
+        if (!ce) {
+            fprintf(stderr, "[Encode-Text] FATAL: store_require_cond_enc failed\n");
+            return -1;
+        }
+        ModelHandle ce_guard(ctx->store, ce);
+        if (!ctx->params.use_fa) {
+            ce->use_flash_attn = false;
+        }
+        ce->clamp_fp16 = ctx->params.clamp_fp16;
+
+        H_cond = ce->lyric_cfg.hidden_size;
+
+        // null_condition_emb lives on the DiTMeta. Empty when the model has none.
+        s.null_cond_vec.resize(H_cond);
+        if (!ctx->meta->null_cond_cpu.empty()) {
+            memcpy(s.null_cond_vec.data(), ctx->meta->null_cond_cpu.data(), H_cond * sizeof(float));
+        }
+
+        for (int b = 0; b < batch_n; b++) {
+            s.timer.reset();
+            cond_ggml_forward(ce, main_fwd[b].text_hidden.data(), main_fwd[b].S_text, main_fwd[b].lyric_embed.data(),
+                              main_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc[b],
+                              &s.per_enc_S[b]);
+            fprintf(stderr, "[Encode-Text Batch%d] %d+%d tokens -> enc_S=%d, %.1f ms\n", b, main_fwd[b].S_text,
+                    main_fwd[b].S_lyric, s.per_enc_S[b], s.timer.ms());
+        }
+        debug_dump_2d(&s.dbg, "enc_hidden", s.per_enc[0].data(), s.per_enc_S[0], H_cond);
+
+        if (s.need_enc_switch) {
+            for (int b = 0; b < batch_n; b++) {
+                cond_ggml_forward(ce, nc_fwd[b].text_hidden.data(), nc_fwd[b].S_text, nc_fwd[b].lyric_embed.data(),
+                                  nc_fwd[b].S_lyric, s.timbre_feats.data(), s.S_ref_timbre, s.per_enc_nc[b],
+                                  &s.per_enc_S_nc[b]);
+                fprintf(stderr, "[Encode-Text Batch%d] non-cover: %d+%d tokens -> enc_S=%d\n", b, nc_fwd[b].S_text,
+                        nc_fwd[b].S_lyric, s.per_enc_S_nc[b]);
+            }
         }
     }
 
@@ -360,9 +442,9 @@ int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthS
     }
     s.enc_S = s.max_enc_S;
 
-    s.enc_hidden.resize(H_cond * s.max_enc_S * batch_n);
+    s.enc_hidden.resize((size_t) H_cond * s.max_enc_S * batch_n);
     for (int b = 0; b < batch_n; b++) {
-        float * dst = s.enc_hidden.data() + b * s.max_enc_S * H_cond;
+        float * dst = s.enc_hidden.data() + (size_t) b * s.max_enc_S * H_cond;
         memcpy(dst, s.per_enc[b].data(), (size_t) s.per_enc_S[b] * H_cond * sizeof(float));
         for (int si = s.per_enc_S[b]; si < s.max_enc_S; si++) {
             memcpy(dst + si * H_cond, s.null_cond_vec.data(), H_cond * sizeof(float));
@@ -371,10 +453,10 @@ int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthS
 
     // pad and stack text2music encoding (same s.max_enc_S for graph compatibility)
     if (s.need_enc_switch) {
-        s.enc_hidden_nc.resize(H_cond * s.max_enc_S * batch_n);
+        s.enc_hidden_nc.resize((size_t) H_cond * s.max_enc_S * batch_n);
         s.per_enc_S_nc_final.resize(batch_n);
         for (int b = 0; b < batch_n; b++) {
-            float * dst = s.enc_hidden_nc.data() + b * s.max_enc_S * H_cond;
+            float * dst = s.enc_hidden_nc.data() + (size_t) b * s.max_enc_S * H_cond;
             memcpy(dst, s.per_enc_nc[b].data(), (size_t) s.per_enc_S_nc[b] * H_cond * sizeof(float));
             for (int si = s.per_enc_S_nc[b]; si < s.max_enc_S; si++) {
                 memcpy(dst + si * H_cond, s.null_cond_vec.data(), H_cond * sizeof(float));
@@ -390,7 +472,7 @@ int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthS
     return 0;
 }
 
-int ops_build_context(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
+int ops_build_context(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
     // Build s.context: [batch_n, s.T, s.ctx_ch] = src_latents[64] + chunk_mask[64]
     // Cover/Lego/Repaint: shared s.context replicated (s.cover_latents from src_audio).
     // Passthrough: per-batch detokenized FSQ codes + silence padding, mask = 1.0.
@@ -422,9 +504,9 @@ int ops_build_context(AceSynth * ctx, const AceRequest * reqs, int batch_n, Synt
             // lego keeps full cover everywhere (DiT hears the whole backing track).
             const float * src;
             if (s.is_repaint && in_region) {
-                src = ctx->silence_full.data() + t * s.Oc;
+                src = ctx->meta->silence_full.data() + t * s.Oc;
             } else {
-                src = (t < s.T_cover) ? s.cover_latents.data() + t * s.Oc : ctx->silence_full.data() + t * s.Oc;
+                src = (t < s.T_cover) ? s.cover_latents.data() + t * s.Oc : ctx->meta->silence_full.data() + t * s.Oc;
             }
             // region tasks: explicit 0/1 mask. all others: 1.0 (training distribution).
             float mask_val;
@@ -452,37 +534,66 @@ int ops_build_context(AceSynth * ctx, const AceRequest * reqs, int batch_n, Synt
             return -1;
         }
 
-        // Text2music / codes passthrough: per-batch context with per-batch audio_codes
-        for (int b = 0; b < batch_n; b++) {
-            float * ctx_dst = s.context.data() + b * s.T * s.ctx_ch;
+        // Decode batch items with audio codes through the FSQ detokenizer, cached
+        // in CPU buffers before the fill loop so the detokenizer is held for the
+        // shortest possible window under STRICT.
+        std::vector<std::vector<float>> decoded_per_b(batch_n);
+        std::vector<int>                decoded_T_per_b(batch_n, 0);
 
-            // decode this batch item's audio codes (if any)
-            int                decoded_T = 0;
-            std::vector<float> decoded_latents;
-            std::vector<int>   codes_b = parse_codes_string(reqs[b].audio_codes);
-            if (!codes_b.empty()) {
+        bool any_codes = false;
+        for (int b = 0; b < batch_n; b++) {
+            if (!parse_codes_string(reqs[b].audio_codes).empty()) {
+                any_codes = true;
+                break;
+            }
+        }
+
+        if (any_codes) {
+            DetokGGML * detok = store_require_fsq_detok(ctx->store, ctx->fsq_detok_key);
+            if (!detok) {
+                fprintf(stderr, "[Build-Context] FATAL: store_require_fsq_detok failed\n");
+                return -1;
+            }
+            ModelHandle detok_guard(ctx->store, detok);
+            if (!ctx->params.use_fa) {
+                detok->use_flash_attn = false;
+            }
+
+            for (int b = 0; b < batch_n; b++) {
+                std::vector<int> codes_b = parse_codes_string(reqs[b].audio_codes);
+                if (codes_b.empty()) {
+                    continue;
+                }
                 s.timer.reset();
                 int T_5Hz        = (int) codes_b.size();
                 int T_25Hz_codes = T_5Hz * 5;
-                decoded_latents.resize(T_25Hz_codes * s.Oc);
+                decoded_per_b[b].resize((size_t) T_25Hz_codes * s.Oc);
 
-                int ret = detok_ggml_decode(&ctx->detok, codes_b.data(), T_5Hz, decoded_latents.data());
+                int ret = detok_ggml_decode(detok, codes_b.data(), T_5Hz, decoded_per_b[b].data());
                 if (ret < 0) {
                     fprintf(stderr, "[Build-Context Batch%d] FATAL: detokenizer decode failed\n", b);
                     return -1;
                 }
                 fprintf(stderr, "[Build-Context Batch%d] Detokenizer: %.1f ms, %d codes\n", b, s.timer.ms(), T_5Hz);
 
-                decoded_T = T_25Hz_codes < s.T ? T_25Hz_codes : s.T;
+                decoded_T_per_b[b] = T_25Hz_codes < s.T ? T_25Hz_codes : s.T;
                 if (b == 0) {
-                    debug_dump_2d(&s.dbg, "detok_output", decoded_latents.data(), T_25Hz_codes, s.Oc);
+                    debug_dump_2d(&s.dbg, "detok_output", decoded_per_b[b].data(), T_25Hz_codes, s.Oc);
                 }
             }
+        }
 
-            // fill s.context: decoded latents then silence, mask = 1.0 (training distribution)
+        // Fill s.context: decoded latents then silence, mask = 1.0 (training distribution).
+        // The detokenizer is already released at this point; the CPU buffers in
+        // decoded_per_b carry everything we need.
+        for (int b = 0; b < batch_n; b++) {
+            float *       ctx_dst   = s.context.data() + b * s.T * s.ctx_ch;
+            const float * decoded   = decoded_per_b[b].data();
+            int           decoded_T = decoded_T_per_b[b];
+
             for (int t = 0; t < s.T; t++) {
-                const float * src = (t < decoded_T) ? decoded_latents.data() + t * s.Oc :
-                                                      ctx->silence_full.data() + (t - decoded_T) * s.Oc;
+                const float * src =
+                    (t < decoded_T) ? decoded + t * s.Oc : ctx->meta->silence_full.data() + (t - decoded_T) * s.Oc;
                 for (int c = 0; c < s.Oc; c++) {
                     ctx_dst[t * s.ctx_ch + c] = src[c];
                 }
@@ -507,7 +618,7 @@ void ops_build_context_silence(const AceSynth * ctx, int batch_n, SynthState & s
             // Build silence s.context: all frames use silence_latent
             std::vector<float> silence_single(s.T * s.ctx_ch);
             for (int t = 0; t < s.T; t++) {
-                const float * src = ctx->silence_full.data() + t * s.Oc;
+                const float * src = ctx->meta->silence_full.data() + t * s.Oc;
                 for (int c = 0; c < s.Oc; c++) {
                     silence_single[t * s.ctx_ch + c] = src[c];
                 }
@@ -606,20 +717,26 @@ void ops_init_noise_and_repaint(const AceSynth * ctx, const AceRequest * reqs, i
         s.repaint_src.resize(s.T * s.Oc);
         for (int t = 0; t < s.T; t++) {
             const float * src =
-                (t < s.T_cover) ? s.cover_latents.data() + t * s.Oc : ctx->silence_full.data() + t * s.Oc;
+                (t < s.T_cover) ? s.cover_latents.data() + t * s.Oc : ctx->meta->silence_full.data() + t * s.Oc;
             memcpy(s.repaint_src.data() + t * s.Oc, src, s.Oc * sizeof(float));
         }
     }
 }
 
-// Module: DiT (lazy-shared).
-int ops_dit_generate(AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data) {
-    if (!ace_synth_dit_load(ctx)) {
+int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data) {
+    DiTGGML * dit = store_require_dit(ctx->store, ctx->dit_key);
+    if (!dit) {
+        fprintf(stderr, "[DiT-Generate] FATAL: store_require_dit failed\n");
         return -1;
     }
+    ModelHandle dit_guard(ctx->store, dit);
+    if (!ctx->params.use_fa) {
+        dit->use_flash_attn = false;
+    }
+
     s.timer.reset();
     int dit_rc = dit_ggml_generate(
-        &ctx->dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
+        dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
         s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
         s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
         s.per_S.data(), s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
@@ -635,18 +752,21 @@ int ops_dit_generate(AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)
     return 0;
 }
 
-// Module: VAE decoder (lazy-shared).
-int ops_vae_decode_and_splice(AceSynth *    ctx,
-                              int           batch_n,
-                              AceAudio *    out,
-                              SynthState &  s,
-                              const float * src_audio,
-                              int           src_len,
+int ops_vae_decode_and_splice(const AceSynth * ctx,
+                              int              batch_n,
+                              AceAudio *       out,
+                              SynthState &     s,
+                              const float *    src_audio,
+                              int              src_len,
                               bool (*cancel)(void *),
                               void * cancel_data) {
-    if (!ace_synth_vae_load(ctx)) {
+    VAEGGML * vae = store_require_vae_dec(ctx->store, ctx->vae_dec_key);
+    if (!vae) {
+        fprintf(stderr, "[VAE-Decode] FATAL: store_require_vae_dec failed\n");
         return -1;
     }
+    ModelHandle vae_guard(ctx->store, vae);
+
     int                T_latent    = s.T;
     int                T_audio_max = T_latent * 1920;
     std::vector<float> audio(2 * T_audio_max);
@@ -655,8 +775,8 @@ int ops_vae_decode_and_splice(AceSynth *    ctx,
         float * dit_out = s.output.data() + b * s.Oc * s.T;
 
         s.timer.reset();
-        int T_audio = vae_ggml_decode_tiled(&ctx->vae, dit_out, T_latent, audio.data(), T_audio_max,
-                                            ctx->params.vae_chunk, ctx->params.vae_overlap, cancel, cancel_data);
+        int T_audio = vae_ggml_decode_tiled(vae, dit_out, T_latent, audio.data(), T_audio_max, ctx->params.vae_chunk,
+                                            ctx->params.vae_overlap, cancel, cancel_data);
         if (T_audio < 0) {
             // check if this was a cancellation or a real error
             if (cancel && cancel(cancel_data)) {

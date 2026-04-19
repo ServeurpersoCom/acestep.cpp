@@ -1,13 +1,15 @@
 #pragma once
 // pipeline-lm.h: ACE-Step LM pipeline
 //
-// Loads Qwen3 causal LM once, then enriches requests:
-// text caption -> metadata + lyrics + audio codes.
+// A lightweight context bound to a ModelStore. On each generate call the
+// pipeline acquires the Qwen3 LM, BPE tokenizer and FSM template from the
+// store and releases the LM through RAII before returning.
 
 #include "request.h"
 #include "task-types.h"
 
 struct AceLm;
+struct ModelStore;
 
 struct AceLmParams {
     const char * model_path;     // LM GGUF (required)
@@ -21,8 +23,9 @@ struct AceLmParams {
 
 void ace_lm_default_params(AceLmParams * p);
 
-// Load model, tokenizer, FSM. NULL on failure.
-AceLm * ace_lm_load(const AceLmParams * params);
+// Build a lightweight LM context bound to a ModelStore. The GPU model is
+// acquired per request, never owned by the context. NULL on invalid input.
+AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params);
 
 // Enrich request with metadata, lyrics, audio codes.
 // out[lm_batch_size] allocated by caller, filled with enriched copies of req.
@@ -41,10 +44,3 @@ int ace_lm_generate(AceLm *            ctx,
                     int    mode            = LM_MODE_GENERATE);
 
 void ace_lm_free(AceLm * ctx);
-
-// Accessors for sharing the internal LM with other pipelines (e.g. understand).
-// Pointers are valid for the lifetime of the AceLm context.
-struct Qwen3LM;
-struct BPETokenizer;
-Qwen3LM *      ace_lm_get_model(AceLm * ctx);
-BPETokenizer * ace_lm_get_bpe(AceLm * ctx);

@@ -257,6 +257,14 @@ static bool dit_ggml_load(DiTGGML *    m,
                           const char * gguf_path,
                           const char * adapter_path  = nullptr,
                           float        adapter_scale = 1.0f) {
+    // Backend init. flash_attn_ext accumulates in F16 on CPU, causing audible
+    // drift over 24 layers x 8 steps: use F32 manual attention on CPU instead.
+    BackendPair bp    = backend_init("DiT");
+    m->backend        = bp.backend;
+    m->cpu_backend    = bp.cpu_backend;
+    m->sched          = backend_sched_new(bp, 8192);
+    m->use_flash_attn = bp.has_gpu;
+
     GGUFModel gf;
     if (!gf_load(&gf, gguf_path)) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
@@ -430,17 +438,6 @@ static bool dit_ggml_load(DiTGGML *    m,
     fprintf(stderr, "[Load] DiT: %d layers, H=%d, Nh=%d/%d, D=%d\n", cfg.n_layers, cfg.hidden_size, cfg.n_heads,
             cfg.n_kv_heads, cfg.head_dim);
     return true;
-}
-
-// Backend init
-static void dit_ggml_init_backend(DiTGGML * m) {
-    BackendPair bp    = backend_init("DiT");
-    m->backend        = bp.backend;
-    m->cpu_backend    = bp.cpu_backend;
-    m->sched          = backend_sched_new(bp, 8192);
-    // flash_attn_ext accumulates in F16 on CPU, causing audible drift over
-    // 24 layers x 8 steps. Use F32 manual attention on CPU instead.
-    m->use_flash_attn = bp.has_gpu;
 }
 
 static void dit_ggml_free(DiTGGML * m) {

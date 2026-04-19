@@ -1,6 +1,7 @@
 // ace-lm.cpp: ACE-Step LLM CLI
 // Thin wrapper: parses args, calls pipeline-lm, writes output files.
 
+#include "model-store.h"
 #include "pipeline-lm.h"
 #include "request.h"
 #include "version.h"
@@ -101,9 +102,11 @@ int main(int argc, char ** argv) {
     }
 
     // Load model (KV cache sized for request batch)
-    params.max_batch = lm_batch_size;
-    AceLm * ctx      = ace_lm_load(&params);
+    params.max_batch   = lm_batch_size;
+    ModelStore * store = store_create(EVICT_STRICT);
+    AceLm *      ctx   = ace_lm_load(store, &params);
     if (!ctx) {
+        store_free(store);
         return 1;
     }
 
@@ -111,6 +114,7 @@ int main(int argc, char ** argv) {
     std::vector<AceRequest> out(lm_batch_size);
     if (ace_lm_generate(ctx, &req, lm_batch_size, out.data(), dump_logits, dump_tokens) != 0) {
         ace_lm_free(ctx);
+        store_free(store);
         return 1;
     }
 
@@ -129,5 +133,6 @@ int main(int argc, char ** argv) {
     }
 
     ace_lm_free(ctx);
+    store_free(store);
     return 0;
 }

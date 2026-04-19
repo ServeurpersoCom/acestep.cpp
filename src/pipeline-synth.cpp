@@ -1,14 +1,11 @@
 // pipeline-synth.cpp: ACE-Step synthesis pipeline implementation
 //
-// Resident modules loaded at init: TextEnc, CondEnc, FSQ tok, FSQ detok, BPE.
-// DiT and VAE decoder are loaded on demand via explicit phase calls.
-// Phase 1 (DiT) and phase 2 (VAE) run on independent jobs so the caller can
-// batch many jobs through the DiT while it is resident, unload it, then feed
-// the latents to the VAE decoder with the largest tiles the GPU can hold.
+// Thin orchestrator over a ModelStore. Holds no GPU module, no CPU-cached
+// DiT state of its own: the store exposes DiTMeta (silence, null_cond, cfg,
+// is_turbo) and each op acquires the GPU modules it needs on the fly.
 
 #include "pipeline-synth.h"
 
-#include "gguf-weights.h"
 #include "pipeline-synth-impl.h"
 #include "pipeline-synth-ops.h"
 #include "task-types.h"
@@ -34,60 +31,11 @@ void ace_synth_default_params(AceSynthParams * p) {
     p->dump_dir          = NULL;
 }
 
-// Read silence_latent, null_condition_emb and is_turbo from the DiT GGUF
-// without touching the big tensors. Called once at ace_synth_load.
-// Returns false on any missing metadata or tensor read error.
-static bool load_dit_cpu_side(AceSynth * ctx, const char * dit_path) {
-    GGUFModel gf = {};
-    if (!gf_load(&gf, dit_path)) {
-        fprintf(stderr, "[Synth-Load] FATAL: cannot reopen %s for metadata\n", dit_path);
-        return false;
+AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
+    if (!store || !params) {
+        fprintf(stderr, "[Synth-Load] ERROR: store and params are required\n");
+        return NULL;
     }
-
-    ctx->is_turbo = gf_get_bool(gf, "acestep.is_turbo");
-
-    // silence_latent: [15000, 64] f32 needed by FSQ tokenizer padding and by
-    // repaint src buffer construction when T extends past the source coverage.
-    const void * sl_data = gf_get_data(gf, "silence_latent");
-    if (!sl_data) {
-        fprintf(stderr, "[Synth-Load] FATAL: silence_latent not found in %s\n", dit_path);
-        gf_close(&gf);
-        return false;
-    }
-    ctx->silence_full.resize(15000 * 64);
-    memcpy(ctx->silence_full.data(), sl_data, 15000 * 64 * sizeof(float));
-    fprintf(stderr, "[Synth-Load] silence_latent: [15000, 64] from GGUF\n");
-
-    // null_condition_emb: [H_cond] BF16 or F32. Absent on some trained variants.
-    // Used by ops_encode_text to pad shorter encodings up to max_enc_S.
-    struct ggml_tensor * nce_meta = ggml_get_tensor(gf.meta, "null_condition_emb");
-    if (nce_meta) {
-        int          emb_n = (int) ggml_nelements(nce_meta);
-        const void * raw   = gf_get_data(gf, "null_condition_emb");
-        ctx->null_cond_cpu.resize(emb_n);
-        if (nce_meta->type == GGML_TYPE_BF16) {
-            const uint16_t * s = (const uint16_t *) raw;
-            for (int i = 0; i < emb_n; i++) {
-                uint32_t w = (uint32_t) s[i] << 16;
-                memcpy(&ctx->null_cond_cpu[i], &w, 4);
-            }
-        } else if (nce_meta->type == GGML_TYPE_F32) {
-            memcpy(ctx->null_cond_cpu.data(), raw, emb_n * sizeof(float));
-        } else {
-            fprintf(stderr, "[Synth-Load] FATAL: null_condition_emb unexpected type %d\n", nce_meta->type);
-            gf_close(&gf);
-            return false;
-        }
-        fprintf(stderr, "[Synth-Load] null_condition_emb: [%d] cached (CFG available)\n", emb_n);
-    } else {
-        ctx->null_cond_cpu.clear();
-    }
-
-    gf_close(&gf);
-    return true;
-}
-
-AceSynth * ace_synth_load(const AceSynthParams * params) {
     if (!params->dit_path) {
         fprintf(stderr, "[Synth-Load] ERROR: dit_path is NULL\n");
         return NULL;
@@ -101,162 +49,57 @@ AceSynth * ace_synth_load(const AceSynthParams * params) {
         return NULL;
     }
 
-    AceSynth * ctx  = new AceSynth();
-    ctx->params     = *params;
-    ctx->have_dit   = false;
-    ctx->have_vae   = false;
-    ctx->have_detok = false;
-    ctx->have_tok   = false;
+    AceSynth * ctx = new AceSynth();
+    ctx->store     = store;
+    ctx->params    = *params;
 
-    Timer timer;
-
-    // Cache DiT metadata (config + silence + null_cond + is_turbo) from the GGUF.
-    // No tensor weights touched, no GPU buffer allocated for the DiT yet.
-    if (!dit_ggml_load_config(&ctx->dit_cfg, params->dit_path)) {
+    // DiTMeta: config + silence_latent + null_condition_emb + is_turbo,
+    // fetched once, valid for the store lifetime. Avoids loading the DiT
+    // itself just to read a few CPU-side tensors.
+    ctx->meta = store_dit_meta(store, params->dit_path);
+    if (!ctx->meta) {
+        fprintf(stderr, "[Synth-Load] FATAL: DiT metadata unavailable for %s\n", params->dit_path);
         delete ctx;
         return NULL;
     }
-    if (!load_dit_cpu_side(ctx, params->dit_path)) {
-        delete ctx;
-        return NULL;
-    }
+    ctx->Oc     = ctx->meta->cfg.out_channels;           // 64
+    ctx->ctx_ch = ctx->meta->cfg.in_channels - ctx->Oc;  // 128
 
-    ctx->Oc     = ctx->dit_cfg.out_channels;           // 64
-    ctx->ctx_ch = ctx->dit_cfg.in_channels - ctx->Oc;  // 128
+    // ModelKeys. Each path identifies its GGUF; adapter info rides with the
+    // DiT key because two DiTs with different adapters are distinct modules.
+    ctx->text_enc_key.kind = MODEL_TEXT_ENC;
+    ctx->text_enc_key.path = params->text_encoder_path;
 
-    // BPE tokenizer (CPU only)
-    timer.reset();
-    if (!load_bpe_from_gguf(&ctx->bpe, params->text_encoder_path)) {
-        fprintf(stderr, "[Synth-Load] FATAL: BPE load failed from %s\n", params->text_encoder_path);
-        delete ctx;
-        return NULL;
-    }
-    fprintf(stderr, "[Synth-Load] BPE tokenizer: %.1f ms\n", timer.ms());
+    ctx->cond_enc_key.kind = MODEL_COND_ENC;
+    ctx->cond_enc_key.path = params->dit_path;
 
-    // Text encoder (Qwen3 embedding branch)
-    timer.reset();
-    ctx->text_enc = {};
-    qwen3_init_backend(&ctx->text_enc);
-    if (!params->use_fa) {
-        ctx->text_enc.use_flash_attn = false;
-    }
-    if (!qwen3_load_text_encoder(&ctx->text_enc, params->text_encoder_path)) {
-        fprintf(stderr, "[Synth-Load] FATAL: TextEncoder load failed\n");
-        delete ctx;
-        return NULL;
-    }
-    fprintf(stderr, "[Synth-Load] TextEncoder: %.1f ms\n", timer.ms());
+    ctx->fsq_tok_key.kind = MODEL_FSQ_TOK;
+    ctx->fsq_tok_key.path = params->dit_path;
 
-    // Condition encoder (lyric + timbre + text projector)
-    timer.reset();
-    ctx->cond_enc = {};
-    cond_ggml_init_backend(&ctx->cond_enc);
-    if (!params->use_fa) {
-        ctx->cond_enc.use_flash_attn = false;
-    }
-    ctx->cond_enc.clamp_fp16 = params->clamp_fp16;
-    if (!cond_ggml_load(&ctx->cond_enc, params->dit_path)) {
-        fprintf(stderr, "[Synth-Load] FATAL: CondEncoder load failed\n");
-        qwen3_free(&ctx->text_enc);
-        delete ctx;
-        return NULL;
-    }
-    fprintf(stderr, "[Synth-Load] ConditionEncoder: %.1f ms\n", timer.ms());
+    ctx->fsq_detok_key.kind = MODEL_FSQ_DETOK;
+    ctx->fsq_detok_key.path = params->dit_path;
 
-    // Detokenizer: weights embedded in the DiT GGUF. Required for audio_codes input.
-    timer.reset();
-    ctx->detok = {};
-    if (detok_ggml_load(&ctx->detok, params->dit_path)) {
-        if (!params->use_fa) {
-            ctx->detok.use_flash_attn = false;
-        }
-        ctx->have_detok = true;
-        fprintf(stderr, "[Synth-Load] Detokenizer: %.1f ms\n", timer.ms());
-    }
+    ctx->dit_key.kind          = MODEL_DIT;
+    ctx->dit_key.path          = params->dit_path;
+    ctx->dit_key.adapter_path  = params->adapter_path ? params->adapter_path : "";
+    ctx->dit_key.adapter_scale = params->adapter_scale;
 
-    // Tokenizer: weights embedded in the DiT GGUF. Used by cover-mode FSQ roundtrip.
-    timer.reset();
-    ctx->tok = {};
-    if (tok_ggml_load(&ctx->tok, params->dit_path)) {
-        if (!params->use_fa) {
-            ctx->tok.use_flash_attn = false;
-        }
-        ctx->have_tok = true;
-        fprintf(stderr, "[Synth-Load] Tokenizer: %.1f ms\n", timer.ms());
-    }
+    ctx->vae_enc_key.kind = MODEL_VAE_ENC;
+    ctx->vae_enc_key.path = params->vae_path;
 
-    fprintf(stderr, "[Synth-Load] Resident modules loaded, turbo=%s, DiT+VAE loaded on demand\n",
-            ctx->is_turbo ? "yes" : "no");
+    ctx->vae_dec_key.kind = MODEL_VAE_DEC;
+    ctx->vae_dec_key.path = params->vae_path;
+
+    fprintf(stderr, "[Synth-Load] Ready: turbo=%s, fa=%s, batch_cfg=%s\n", ctx->meta->is_turbo ? "yes" : "no",
+            params->use_fa ? "yes" : "no", params->use_batch_cfg ? "yes" : "no");
     if (params->clamp_fp16) {
         fprintf(stderr, "[Synth-Load] FP16 clamp enabled\n");
     }
-    if (!params->use_batch_cfg) {
-        fprintf(stderr, "[Synth-Load] Batched DiT CFG disabled (split 2-pass forwards)\n");
+    if (params->adapter_path) {
+        fprintf(stderr, "[Synth-Load] Adapter: %s (scale=%.2f)\n", params->adapter_path, params->adapter_scale);
     }
 
     return ctx;
-}
-
-bool ace_synth_dit_load(AceSynth * ctx) {
-    if (!ctx) {
-        return false;
-    }
-    if (ctx->have_dit) {
-        return true;
-    }
-
-    Timer timer;
-    ctx->dit = {};
-    dit_ggml_init_backend(&ctx->dit);
-    if (!ctx->params.use_fa) {
-        ctx->dit.use_flash_attn = false;
-    }
-    fprintf(stderr, "[Synth-Phase] DiT backend init: %.1f ms\n", timer.ms());
-
-    timer.reset();
-    if (!dit_ggml_load(&ctx->dit, ctx->params.dit_path, ctx->params.adapter_path, ctx->params.adapter_scale)) {
-        fprintf(stderr, "[Synth-Phase] FATAL: DiT load failed\n");
-        dit_ggml_free(&ctx->dit);
-        return false;
-    }
-    fprintf(stderr, "[Synth-Phase] DiT weight load: %.1f ms (fa=%s)\n", timer.ms(),
-            ctx->dit.use_flash_attn ? "yes" : "no");
-
-    ctx->have_dit = true;
-    return true;
-}
-
-void ace_synth_dit_unload(AceSynth * ctx) {
-    if (!ctx || !ctx->have_dit) {
-        return;
-    }
-    dit_ggml_free(&ctx->dit);
-    ctx->have_dit = false;
-    fprintf(stderr, "[Synth-Phase] DiT unloaded\n");
-}
-
-bool ace_synth_vae_load(AceSynth * ctx) {
-    if (!ctx) {
-        return false;
-    }
-    if (ctx->have_vae) {
-        return true;
-    }
-    Timer timer;
-    ctx->vae = {};
-    vae_ggml_load(&ctx->vae, ctx->params.vae_path);
-    ctx->have_vae = true;
-    fprintf(stderr, "[Synth-Phase] VAE weight load: %.1f ms\n", timer.ms());
-    return true;
-}
-
-void ace_synth_vae_unload(AceSynth * ctx) {
-    if (!ctx || !ctx->have_vae) {
-        return;
-    }
-    vae_ggml_free(&ctx->vae);
-    ctx->have_vae = false;
-    fprintf(stderr, "[Synth-Phase] VAE unloaded\n");
 }
 
 // Phase 1: everything up to and including DiT generate. The produced job
@@ -428,7 +271,7 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
             s.instruction_str         = dit_instr_lego(track_upper);
             validate_track_names(s.rr.track, "Lego");
             fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
-            if (ctx->is_turbo) {
+            if (ctx->meta->is_turbo) {
                 fprintf(stderr, "[Synth-Run] WARNING: lego requires base model, turbo output incoherent\n");
             }
         } else if (s.task == TASK_EXTRACT) {
@@ -437,7 +280,7 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
             s.instruction_str         = dit_instr_extract(track_upper);
             validate_track_names(s.rr.track, "Extract");
             fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
-            if (ctx->is_turbo) {
+            if (ctx->meta->is_turbo) {
                 fprintf(stderr, "[Synth-Run] WARNING: extract requires base model, turbo output incoherent\n");
             }
         } else if (s.task == TASK_COMPLETE) {
@@ -446,7 +289,7 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
             s.instruction_str         = dit_instr_complete(track_upper);
             validate_track_names(s.rr.track, "Complete");
             fprintf(stderr, "[Synth-Run] task=%s\n", s.task.c_str());
-            if (ctx->is_turbo) {
+            if (ctx->meta->is_turbo) {
                 fprintf(stderr, "[Synth-Run] WARNING: complete requires base model, turbo output incoherent\n");
             }
         }
@@ -500,9 +343,9 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
     // Noise tensor (Philox), cover noise blend, per_S, repaint_src buffer
     ops_init_noise_and_repaint(ctx, reqs, batch_n, s);
 
-    // DiT denoising loop. ops_dit_generate lazy-loads the DiT on first call;
-    // subsequent groups of the same batch reuse it. Latents land in s.output
-    // and stay in job memory until phase 2 feeds them to the VAE.
+    // DiT denoising loop. ops_dit_generate acquires the DiT from the store for
+    // the duration of the loop and releases it on scope exit. Latents land in
+    // s.output and stay in job memory until phase 2 feeds them to the VAE.
     if (ops_dit_generate(ctx, batch_n, s, cancel, cancel_data) != 0) {
         delete job;
         return NULL;
@@ -551,15 +394,5 @@ void ace_synth_free(AceSynth * ctx) {
     if (!ctx) {
         return;
     }
-    ace_synth_dit_unload(ctx);
-    ace_synth_vae_unload(ctx);
-    if (ctx->have_detok) {
-        detok_ggml_free(&ctx->detok);
-    }
-    if (ctx->have_tok) {
-        tok_ggml_free(&ctx->tok);
-    }
-    cond_ggml_free(&ctx->cond_enc);
-    qwen3_free(&ctx->text_enc);
     delete ctx;
 }

@@ -2,6 +2,7 @@
 // Thin wrapper: parses args, calls pipeline-synth, writes output files.
 
 #include "audio-io.h"
+#include "model-store.h"
 #include "pipeline-synth.h"
 #include "request.h"
 #include "synth-batch-runner.h"
@@ -153,8 +154,13 @@ int main(int argc, char ** argv) {
     params.vae_overlap       = vae_overlap;
     params.dump_dir          = dump_dir;
 
-    AceSynth * ctx = ace_synth_load(&params);
+    // Local store with the default STRICT policy: at most one GPU module
+    // resident at a time for this one-shot CLI. No module sharing across runs,
+    // so EVICT_STRICT frees the DiT before the VAE loads, and so on.
+    ModelStore * store = store_create(EVICT_STRICT);
+    AceSynth *   ctx   = ace_synth_load(store, &params);
     if (!ctx) {
+        store_free(store);
         return 1;
     }
 
@@ -167,6 +173,7 @@ int main(int argc, char ** argv) {
         if (!planar) {
             fprintf(stderr, "[Ace-Synth] FATAL: cannot read --src-audio %s\n", src_audio_path);
             ace_synth_free(ctx);
+            store_free(store);
             return 1;
         }
         fprintf(stderr, "[Ace-Synth] Source audio: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
@@ -187,6 +194,7 @@ int main(int argc, char ** argv) {
             free(src_interleaved);
             free(ref_interleaved);
             ace_synth_free(ctx);
+            store_free(store);
             return 1;
         }
         fprintf(stderr, "[Ace-Synth] Reference audio: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
@@ -205,6 +213,7 @@ int main(int argc, char ** argv) {
         if (!request_parse(&reqs[ri], rpath)) {
             fprintf(stderr, "[Ace-Synth] FATAL: failed to parse %s\n", rpath);
             ace_synth_free(ctx);
+            store_free(store);
             free(src_interleaved);
             free(ref_interleaved);
             return 1;
@@ -213,6 +222,7 @@ int main(int argc, char ** argv) {
         if (reqs[ri].caption.empty() && reqs[ri].task_type != TASK_LEGO && reqs[ri].task_type != TASK_EXTRACT) {
             fprintf(stderr, "[Ace-Synth] FATAL: caption is empty in %s\n", rpath);
             ace_synth_free(ctx);
+            store_free(store);
             free(src_interleaved);
             free(ref_interleaved);
             return 1;
@@ -281,6 +291,7 @@ int main(int argc, char ** argv) {
         free(src_interleaved);
         free(ref_interleaved);
         ace_synth_free(ctx);
+        store_free(store);
         return 1;
     }
 
@@ -301,6 +312,7 @@ int main(int argc, char ** argv) {
     free(src_interleaved);
     free(ref_interleaved);
     ace_synth_free(ctx);
+    store_free(store);
     fprintf(stderr, "[Ace-Synth] All done\n");
     return 0;
 }

@@ -17,7 +17,7 @@ struct SynthState;
 int ops_encode_src(const AceSynth * ctx, const float * src_audio, int src_len, SynthState & s);
 
 // FSQ roundtrip on cover_latents (cover mode only).
-void ops_fsq_roundtrip(AceSynth * ctx, SynthState & s);
+void ops_fsq_roundtrip(const AceSynth * ctx, SynthState & s);
 
 // Resolve shared DiT params (steps, guidance, shift) and scan audio_codes.
 int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
@@ -33,10 +33,10 @@ void ops_encode_timbre(const AceSynth * ctx, const float * ref_audio, int ref_le
 
 // Per-batch text + lyric encoding (main pass + optional non-cover pass).
 // Stacks results into s.enc_hidden / s.enc_hidden_nc.
-int ops_encode_text(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
+int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
 
 // Build DiT context tensor [batch_n, T, ctx_ch] = src_latents(64) | mask(64).
-int ops_build_context(AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
+int ops_build_context(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
 
 // Build silence context + cover_steps for audio_cover_strength switching.
 void ops_build_context_silence(const AceSynth * ctx, int batch_n, SynthState & s);
@@ -45,18 +45,18 @@ void ops_build_context_silence(const AceSynth * ctx, int batch_n, SynthState & s
 void ops_init_noise_and_repaint(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
 
 // Run the DiT denoising loop.
-int ops_dit_generate(AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data);
+int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data);
 
 // Phase 2 primitive.
 
 // VAE decode all batch items + waveform splice for repaint/lego regions.
 // src_audio is interleaved PCM for splice (padded for outpainting).
 // Returns 0 on success, -1 on error/cancel.
-int ops_vae_decode_and_splice(AceSynth *    ctx,
-                              int           batch_n,
-                              AceAudio *    out,
-                              SynthState &  s,
-                              const float * src_audio,
-                              int           src_len,
+int ops_vae_decode_and_splice(const AceSynth * ctx,
+                              int              batch_n,
+                              AceAudio *       out,
+                              SynthState &     s,
+                              const float *    src_audio,
+                              int              src_len,
                               bool (*cancel)(void *),
                               void * cancel_data);

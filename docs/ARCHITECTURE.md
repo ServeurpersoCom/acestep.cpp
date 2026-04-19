@@ -105,6 +105,57 @@ config metadata so no external file is needed at runtime.
 
 </details>
 
+## VRAM policy
+
+Two modes, one flag, no in-between.
+
+**Default mode** optimises VRAM. At most one GPU module is resident at a
+time. The store evicts whatever was loaded before bringing in the next
+module, so VAE tile activations never sit next to DiT weights or LM
+weights. This is the mode that lets the full ACE-Step stack run on
+consumer cards: the DiT loads for denoising, evicts when done, the VAE
+loads for decode, evicts, and so on.
+
+**`--keep-loaded` mode** optimises latency. Everything stays resident
+across requests. No reload, no eviction. This is the mode for workstations
+with generous VRAM where startup overhead would dominate the request
+latency. No "smart" rules kick in: if the user asks for keep-loaded, they
+get exactly that.
+
+**Invariant held under both modes.** Exactly one LM instance lives in the
+process, shared between `ace-lm` (generate) and `ace-understand`.
+Duplicating the Qwen3 LM would cost gigabytes and buy nothing. The
+ModelStore enforces this by keying the LM on `(path, max_seq, n_kv_sets)`
+with identical values across both pipelines.
+
+## ModelStore
+
+A single `ModelStore` instance owns every GPU module the server or the
+CLIs touch: Qwen3 LM, DiT (with optional adapter), VAE encoder, VAE
+decoder, Qwen3 text encoder, condition encoder, FSQ tokenizer, FSQ
+detokenizer. Pipelines never load or free modules themselves. They ask
+the store for a module with `store_require_*`, use it, and release it
+when the scope ends. A thin RAII handle (`ModelHandle`) pairs the require
+with the release so no early return, error path or exception can leak a
+resident module.
+
+The store keys each module by the fields that actually change what gets
+loaded. For an LM that means `(path, max_seq, n_kv_sets)`. For a DiT that
+means `(path, adapter_path, adapter_scale)`. For every other module it is
+just `(path)`. Two requires with the same key return the same pointer, so
+pipelines that share a module naturally share the resident weights.
+
+CPU-only helpers (BPE merges, FSM decoding template, DiT metadata like
+silence_latent and null_condition_emb) have their own accessors and stay
+resident for the whole process lifetime. They total a few megabytes and
+cost nothing to keep.
+
+The chosen eviction policy (STRICT or NEVER, see above) decides what the
+store does on release. STRICT unloads the module immediately once no
+pipeline holds a handle on it, so VAE tiles never compete for VRAM with
+an LM or a DiT. NEVER keeps everything loaded for maximum throughput on
+machines that have the budget.
+
 ## CLI
 
 `ace-lm` generates lyrics and audio codes, `ace-synth` synthesizes audio.
@@ -767,15 +818,30 @@ Cancel: POST /job?id=N&cancel=1 stops a specific job.
 
 `--models` scans a directory for GGUF files and classifies each by its
 `general.architecture` metadata into LM, Text-Enc, DiT, and VAE buckets.
-Each request loads the model, executes, and frees it. With `--keep-loaded`,
-models persist in VRAM and are reused across requests. GPU access is
-serialized by the single worker thread (no mutex needed).
+All module lifetime decisions go through the [ModelStore](#modelstore):
+default mode keeps one GPU module resident at a time, `--keep-loaded`
+keeps the whole working set resident. Requests are serialized by a single
+worker thread, no GPU mutex.
 
-| Pipeline | GGUF architectures needed | Enables | VRAM (approx) |
-|:---------|:--------------------------|:--------|:--------------|
-| LM | `acestep-lm` | /lm | ~7 GB (batch=1) |
-| Synth | `acestep-text-enc` + `acestep-dit` + `acestep-vae` | /synth | ~12 GB |
-| Understand | `acestep-lm` + `acestep-dit` + `acestep-vae` | /understand | ~7 GB |
+The VRAM numbers below assume Q8 quantisation of a 1.7B LM and a 2B DiT.
+"Peak" is what you need under the default (STRICT) mode, where only one
+module is live at once. "Working set" is what you need under
+`--keep-loaded`, where everything stays resident plus the VAE tile
+activations during decode. Larger LMs (4B), XL DiT (4B) or heavier
+quantisation raise both columns.
+
+| Pipeline | Modules reached | Peak (default) | Working set (`--keep-loaded`) |
+|:---------|:----------------|:---------------|:------------------------------|
+| LM | Qwen3 LM + KV cache | ~2-3 GB | ~2-3 GB |
+| Synth | Qwen3 text-enc, cond-enc, DiT, VAE enc, VAE dec, FSQ tok/detok | ~2-3 GB (DiT or VAE tiles) | ~3-4 GB + tiles |
+| Understand | Qwen3 LM, VAE enc, FSQ tok | ~2-3 GB (LM or VAE tiles) | ~2-3 GB + tiles |
+
+VAE tile activations scale with `--vae-chunk` and `--vae-overlap`. The
+defaults of 256 / 64 latent frames account for roughly a gigabyte of
+transient buffers during encode or decode, less with smaller chunks.
+Under STRICT those tiles get the full GPU budget alone; under
+`--keep-loaded` they sit on top of everything else, so larger cards
+earn back the latency they spend reloading.
 
 Endpoints whose pipeline has no models in the registry return 501.
 
@@ -888,18 +954,22 @@ default AceRequest (source of truth for webui dropdowns and placeholders):
 
 ### Concurrency
 
-A single GPU mutex serializes all compute. LM and synth workers run in
-detached threads and block on the mutex until the GPU is free. Understand
-uses try_lock and returns 503 instantly if the GPU is busy.
+One worker thread consumes jobs from a FIFO queue. LM, synth and
+understand requests all land in that same queue and run serially: the
+worker calls the pipeline, which goes through the `ModelStore` for its
+GPU modules. No GPU mutex, no try_lock, no 503 on busy: the HTTP handler
+enqueues and returns a job id immediately, the client polls and the
+worker runs in its own time.
 
-Completed jobs are stored in memory (LRU, 10 entries). A disconnected
-client can poll and fetch the result after reconnecting. Each job has
-its own cancel flag so multi-user cancel is safe.
+Completed jobs sit in memory and are evicted FIFO once the pool exceeds
+32 entries, so a disconnected client can poll and fetch the result after
+reconnecting. Each job has its own cancel flag, set through `POST
+/job?id=N&cancel=1` and polled by the worker between DiT or LM steps.
 
-By default, each request loads its model, executes, and frees it.
-With `--keep-loaded`, models persist in VRAM and are reused. If the
-requested model differs from the one currently loaded, the old model
-is freed and the new one is loaded before processing.
+Model loading and eviction are not this section's concern: see
+[ModelStore](#modelstore) for the full story. The short version is that
+`--keep-loaded` keeps everything resident across requests, the default
+mode keeps one module at a time.
 
 Request bodies are limited to 256 MB (source + reference audio, up to
 10 minutes WAV each).
