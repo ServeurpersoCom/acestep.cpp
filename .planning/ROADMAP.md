@@ -25,7 +25,14 @@
   3. On first page load against a server started with `--mp3-bitrate 64`, the bitrate selector shows 64 kbps as the selected value
   4. A `/synth` request with `"mp3_bitrate": 200` (not in the valid preset list) returns HTTP 400
   5. A `/synth` request that omits `mp3_bitrate` encodes at the server's `g_mp3_kbps` default without error
-**Plans**: TBD
+**Plans**: 4 plans
+
+Plans:
+- [ ] 01-01-PLAN.md — C++ ServerFields + validated parse + synth_worker per-request bitrate + startup guard
+- [ ] 01-02-PLAN.md — TypeScript state (app.mp3Bitrate), localStorage persistence, api.ts submit wiring
+- [ ] 01-03-PLAN.md — Svelte bitrate selector UI + props-seeding $effect + synthesize() call sites
+- [ ] 01-04-PLAN.md — server.sh CFG-01 comment + buildwebui.sh + human end-to-end checkpoint
+
 **UI hint**: yes
 
 ---
@@ -34,4 +41,4 @@
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. MP3 Bitrate Control | 0/0 | Not started | - |
+| 1. MP3 Bitrate Control | 0/4 | Ready | - |
