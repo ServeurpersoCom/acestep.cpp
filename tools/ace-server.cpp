@@ -864,7 +864,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
         if (output_wav) {
             encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000, wav_fmt);
         } else {
-            encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, g_mp3_kbps, server_cancel_job,
+            const int kbps = (sf.mp3_bitrate > 0) ? sf.mp3_bitrate : g_mp3_kbps;
+            encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, kbps, server_cancel_job,
                                           (void *) &job->cancel);
         }
         ace_audio_free(&audio[b]);
@@ -1320,6 +1321,18 @@ int main(int argc, char ** argv) {
             // output
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             g_mp3_kbps = atoi(argv[++i]);
+            {
+                static const int valid_bitrates[] = {32,40,48,56,64,80,96,112,128,160,192,224,256,320};
+                static const int n_valid = (int)(sizeof(valid_bitrates)/sizeof(valid_bitrates[0]));
+                bool ok = false;
+                for (int i2 = 0; i2 < n_valid; i2++) {
+                    if (valid_bitrates[i2] == g_mp3_kbps) { ok = true; break; }
+                }
+                if (!ok) {
+                    fprintf(stderr, "error: --mp3-bitrate %d is not valid. Valid values: 32,40,48,56,64,80,96,112,128,160,192,224,256,320\n", g_mp3_kbps);
+                    return 1;
+                }
+            }
 
             // server
         } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {
