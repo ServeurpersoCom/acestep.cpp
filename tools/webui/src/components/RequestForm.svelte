@@ -891,20 +891,20 @@
 			title="Percentile peak normalization to 0 dB. 0 = no clipping (100th percentile). 10 = default (99.999%, clips ~58 samples / 1.2 ms). 999 = aggressive (99.9%, clips ~5760 samples / 120 ms)."
 		/>
 		{#if app.format === 'mp3'}
-		<select
-			bind:value={app.mp3Bitrate}
-			title="MP3 encoding bitrate. Higher = better quality, larger file. 128 kbps is the server default. Changes apply to this request only."
-		>
-			{#if ![96,128,160,192,256,320].includes(app.mp3Bitrate)}
-			<option value={app.mp3Bitrate}>{app.mp3Bitrate} kbps (server default)</option>
-			{/if}
-			<option value={96}>96 kbps</option>
-			<option value={128}>128 kbps</option>
-			<option value={160}>160 kbps</option>
-			<option value={192}>192 kbps</option>
-			<option value={256}>256 kbps</option>
-			<option value={320}>320 kbps</option>
-		</select>
+			<select
+				bind:value={app.mp3Bitrate}
+				title="MP3 encoding bitrate. Higher = better quality, larger file. 128 kbps is the server default. Changes apply to this request only."
+			>
+				{#if ![96, 128, 160, 192, 256, 320].includes(app.mp3Bitrate)}
+					<option value={app.mp3Bitrate}>{app.mp3Bitrate} kbps (server default)</option>
+				{/if}
+				<option value={96}>96 kbps</option>
+				<option value={128}>128 kbps</option>
+				<option value={160}>160 kbps</option>
+				<option value={192}>192 kbps</option>
+				<option value={256}>256 kbps</option>
+				<option value={320}>320 kbps</option>
+			</select>
 		{/if}
 		<select
 			bind:value={app.format}
