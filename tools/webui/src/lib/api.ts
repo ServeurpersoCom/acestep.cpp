@@ -40,9 +40,13 @@ export function lmSubmitFormat(req: AceRequest): Promise<string> {
 }
 
 // POST /synth: submit synth request, returns job ID
-export function synthSubmit(reqs: AceRequest[], format: string): Promise<string> {
+export function synthSubmit(reqs: AceRequest[], format: string, mp3Bitrate = 0): Promise<string> {
 	const url = format !== 'mp3' ? `synth?format=${format}` : 'synth';
-	const body = reqs.length === 1 ? JSON.stringify(reqs[0]) : JSON.stringify(reqs);
+	// Inject mp3_bitrate into the request object(s) when encoding as MP3 with a valid preset bitrate.
+	// mp3_bitrate is a ServerFields key, not an AceRequest field — inject at serialization time only.
+	const inject = (format === 'mp3' && mp3Bitrate > 0) ? { mp3_bitrate: mp3Bitrate } : {};
+	const single = { ...reqs[0], ...inject };
+	const body = reqs.length === 1 ? JSON.stringify(single) : JSON.stringify(reqs.map(r => ({ ...r, ...inject })));
 	return submitJob(url, {
 		method: 'POST',
 		headers: { 'Content-Type': 'application/json' },
@@ -55,10 +59,13 @@ export function synthSubmitWithAudio(
 	reqs: AceRequest[],
 	srcAudio: Blob | null,
 	refAudio: Blob | null,
-	format: string
+	format: string,
+	mp3Bitrate = 0
 ): Promise<string> {
 	const url = format !== 'mp3' ? `synth?format=${format}` : 'synth';
-	const body = reqs.length === 1 ? JSON.stringify(reqs[0]) : JSON.stringify(reqs);
+	const inject = (format === 'mp3' && mp3Bitrate > 0) ? { mp3_bitrate: mp3Bitrate } : {};
+	const single = { ...reqs[0], ...inject };
+	const body = reqs.length === 1 ? JSON.stringify(single) : JSON.stringify(reqs.map(r => ({ ...r, ...inject })));
 	const form = new FormData();
 	form.append('request', new Blob([body], { type: 'application/json' }), 'request.json');
 	if (srcAudio) form.append('audio', srcAudio, 'src.audio');
