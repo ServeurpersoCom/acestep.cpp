@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { RotateCcw, Download, FolderOpen } from '@lucide/svelte';
-	import { app, toast, setRequest } from '../lib/state.svelte.js';
+	import { app, toast, setRequest, serverMp3Bitrate } from '../lib/state.svelte.js';
 	import { rollDice } from '../lib/dice.js';
 	import {
 		lmSubmit,
@@ -71,6 +71,7 @@
 	$effect(() => {
 		if (app.props && app.mp3Bitrate === 0) {
 			const serverDefault = Number(app.props.cli.mp3_bitrate) || 128;
+			serverMp3Bitrate = serverDefault;
 			app.mp3Bitrate = serverDefault;
 		}
 	});
@@ -896,8 +897,8 @@
 				bind:value={app.mp3Bitrate}
 				title="MP3 encoding bitrate. Higher = better quality, larger file. 128 kbps is the server default. Changes apply to this request only."
 			>
-				{#if !VALID_MP3_BITRATES.includes(app.mp3Bitrate)}
-					<option value={app.mp3Bitrate}>{app.mp3Bitrate} kbps (server default)</option>
+				{#if serverMp3Bitrate > 0 && !VALID_MP3_BITRATES.includes(serverMp3Bitrate)}
+					<option value={serverMp3Bitrate}>{serverMp3Bitrate} kbps (server default)</option>
 				{/if}
 				{#each VALID_MP3_BITRATES as kbps}
 					<option value={kbps}>{kbps} kbps</option>
