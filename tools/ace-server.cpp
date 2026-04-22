@@ -30,12 +30,10 @@
 
 #include "audio-io.h"
 #include "model-registry.h"
-#include "model-store.h"
 #include "pipeline-lm.h"
 #include "pipeline-synth.h"
 #include "pipeline-understand.h"
 #include "request.h"
-#include "synth-batch-runner.h"
 #include "task-types.h"
 #include "version.h"
 #include "yyjson.h"
@@ -171,10 +169,10 @@ static void worker_main() {
     }
 }
 
-// central GGML module store shared across pipelines. Policy picked at startup
-// from --keep-loaded: STRICT by default (one GPU module resident at a time),
-// NEVER when the flag is set (accumulate across requests).
-static ModelStore * g_store = nullptr;
+// pipeline contexts. NULL when not loaded.
+static AceLm *         g_ctx_lm         = nullptr;
+static AceSynth *      g_ctx_synth      = nullptr;
+static AceUnderstand * g_ctx_understand = nullptr;
 
 // model registry (populated at startup from GGUF metadata)
 static ModelRegistry g_registry;
@@ -182,8 +180,8 @@ static ModelRegistry g_registry;
 // loaded model names (empty = nothing loaded)
 static std::string g_loaded_lm;
 static std::string g_loaded_dit;
-static std::string g_loaded_adapter;
-static float       g_loaded_adapter_scale = 1.0f;
+static std::string g_loaded_lora;
+static float       g_loaded_lora_scale = 1.0f;
 static std::string g_loaded_und_dit;
 
 // pipeline params (rebuilt from registry paths on each load)
@@ -440,52 +438,242 @@ static std::string resolve_name(const std::vector<ModelEntry> & bucket,
     return "";
 }
 
+// server-side routing fields parsed from JSON (not part of AceRequest)
+struct ServerFields {
+    std::string synth_model;
+    std::string lm_model;
+    std::string lora;
+    float       lora_scale;
+    int         mp3_bitrate;   // 0 = use server default (g_mp3_kbps)
+};
+
+static void parse_server_fields(const char * json, ServerFields * sf) {
+    sf->synth_model = "";
+    sf->lm_model    = "";
+    sf->lora        = "";
+    sf->lora_scale  = 1.0f;
+    sf->mp3_bitrate = 0;
+
+    yyjson_doc * doc = yyjson_read(json, strlen(json), 0);
+    if (!doc) {
+        return;
+    }
+    yyjson_val * root = yyjson_doc_get_root(doc);
+    if (!root) {
+        yyjson_doc_free(doc);
+        return;
+    }
+
+    // for arrays, take server fields from the first element
+    yyjson_val * obj = root;
+    if (yyjson_is_arr(root)) {
+        obj = yyjson_arr_get_first(root);
+    }
+    if (!obj || !yyjson_is_obj(obj)) {
+        yyjson_doc_free(doc);
+        return;
+    }
+
+    yyjson_val * v;
+    if ((v = yyjson_obj_get(obj, "synth_model")) && yyjson_is_str(v)) {
+        sf->synth_model = yyjson_get_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_model")) && yyjson_is_str(v)) {
+        sf->lm_model = yyjson_get_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lora")) && yyjson_is_str(v)) {
+        sf->lora = yyjson_get_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lora_scale")) && yyjson_is_num(v)) {
+        sf->lora_scale = (float) yyjson_get_num(v);
+    }
+    int mp3_bitrate_parsed = 0;   // 0 = not present
+    bool mp3_bitrate_invalid = false;
+    if ((v = yyjson_obj_get(obj, "mp3_bitrate")) && yyjson_is_int(v)) {
+        static const int valid_bitrates[] = {32,40,48,56,64,80,96,112,128,160,192,224,256,320};
+        static const int n_valid = (int)(sizeof(valid_bitrates)/sizeof(valid_bitrates[0]));
+        int req_kbps = (int) yyjson_get_int(v);
+        bool ok = false;
+        for (int i = 0; i < n_valid; i++) {
+            if (valid_bitrates[i] == req_kbps) { ok = true; break; }
+        }
+        if (ok) {
+            mp3_bitrate_parsed = req_kbps;
+        } else {
+            mp3_bitrate_invalid = true;
+        }
+    }
+
+    yyjson_doc_free(doc);
+
+    if (mp3_bitrate_invalid) {
+        sf->mp3_bitrate = -1;   // sentinel: caller must return 400
+        return;
+    }
+    sf->mp3_bitrate = mp3_bitrate_parsed;
+}
+
+// load LM. frees understand (shared pointers become invalid) but does not rebuild it.
+// returns false on failure (caller returns 500).
+static bool ensure_lm(const std::string & name) {
+    if (g_ctx_lm && g_loaded_lm == name) {
+        return true;
+    }
+
+    const ModelEntry * entry = registry_find(g_registry.lm, name.c_str());
+    if (!entry) {
+        fprintf(stderr, "[Server] LM not found: %s\n", name.c_str());
+        return false;
+    }
+
+    // understand holds shared LM pointers, free before LM reload
+    ace_understand_free(g_ctx_understand);
+    g_ctx_understand = nullptr;
+    g_loaded_und_dit.clear();
+    ace_lm_free(g_ctx_lm);
+    g_ctx_lm = nullptr;
+
+    // load new
+    fprintf(stderr, "[Server] Loading LM: %s\n", name.c_str());
+    g_lm_params.model_path = entry->path.c_str();
+    g_ctx_lm               = ace_lm_load(&g_lm_params);
+    if (!g_ctx_lm) {
+        fprintf(stderr, "[Server] FATAL: LM load failed\n");
+        g_loaded_lm.clear();
+        return false;
+    }
+
+    g_loaded_lm = name;
+    return true;
+}
+
+// load understand pipeline (LM + tokenizer from DiT).
+// reloads when LM or DiT changes. tokenizer weights differ between DiT variants.
+static bool ensure_understand(const std::string & lm_name, const std::string & dit_name) {
+    if (!ensure_lm(lm_name)) {
+        return false;
+    }
+
+    // already loaded with the same DiT tokenizer
+    if (g_ctx_understand && g_loaded_und_dit == dit_name) {
+        return true;
+    }
+
+    // update dit_path for the tokenizer
+    const ModelEntry * dit = registry_find(g_registry.dit, dit_name.c_str());
+    if (dit) {
+        g_und_params.dit_path = dit->path.c_str();
+    }
+
+    // (re)build understand with shared LM
+    ace_understand_free(g_ctx_understand);
+    g_ctx_understand = nullptr;
+
+    g_und_params.shared_model = ace_lm_get_model(g_ctx_lm);
+    g_und_params.shared_bpe   = ace_lm_get_bpe(g_ctx_lm);
+    g_ctx_understand          = ace_understand_load(&g_und_params);
+    if (!g_ctx_understand) {
+        fprintf(stderr, "[Server] FATAL: understand load failed\n");
+        g_loaded_und_dit.clear();
+        return false;
+    }
+
+    g_loaded_und_dit = dit_name;
+    return true;
+}
+
+// load synth pipeline (DiT + LoRA + text-enc + VAE). frees previous context first.
+// returns false on failure (caller returns 500).
+static bool ensure_synth(const std::string & dit_name, const std::string & lora_name, float lora_scale) {
+    if (g_ctx_synth && g_loaded_dit == dit_name && g_loaded_lora == lora_name && g_loaded_lora_scale == lora_scale) {
+        return true;
+    }
+
+    // need text-encoder + vae singletons
+    if (g_registry.text_enc.empty() || g_registry.vae.empty()) {
+        fprintf(stderr, "[Server] Missing Text-Enc or VAE in registry\n");
+        return false;
+    }
+
+    const ModelEntry * dit = registry_find(g_registry.dit, dit_name.c_str());
+    if (!dit) {
+        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
+        return false;
+    }
+
+    // unload old
+    ace_synth_free(g_ctx_synth);
+    g_ctx_synth = nullptr;
+
+    // set paths
+    g_synth_params.text_encoder_path = g_registry.text_enc[0].path.c_str();
+    g_synth_params.dit_path          = dit->path.c_str();
+    g_synth_params.vae_path          = g_registry.vae[0].path.c_str();
+
+    // resolve lora
+    if (!lora_name.empty()) {
+        const LoraEntry * lora = registry_find_lora(g_registry, lora_name.c_str());
+        if (!lora) {
+            fprintf(stderr, "[Server] LoRA not found: %s\n", lora_name.c_str());
+            g_loaded_dit.clear();
+            g_loaded_lora.clear();
+            return false;
+        }
+        g_synth_params.lora_path  = lora->path.c_str();
+        g_synth_params.lora_scale = lora_scale;
+    } else {
+        g_synth_params.lora_path  = nullptr;
+        g_synth_params.lora_scale = 1.0f;
+    }
+
+    fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
+            lora_name.empty() ? "" : " LoRA=", lora_name.c_str());
+    g_ctx_synth = ace_synth_load(&g_synth_params);
+    if (!g_ctx_synth) {
+        fprintf(stderr, "[Server] FATAL: synth load failed\n");
+        g_loaded_dit.clear();
+        g_loaded_lora.clear();
+        return false;
+    }
+
+    g_loaded_dit        = dit_name;
+    g_loaded_lora       = lora_name;
+    g_loaded_lora_scale = lora_scale;
+    return true;
+}
+
 // LM worker: generates metadata + lyrics + codes, stores JSON result in job.
-static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch_size, int mode) {
+static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, ServerFields sf, int lm_batch_size, int mode) {
     if (job->cancel.load()) {
         job->status.store(3);
         return;
     }
 
-    // Resolve model name and build per-request params from the template.
-    std::string        lm_name = resolve_name(g_registry.lm, ace_req.lm_model, g_loaded_lm);
-    const ModelEntry * entry   = registry_find(g_registry.lm, lm_name.c_str());
-    if (!entry) {
-        fprintf(stderr, "[Server] LM not found: %s\n", lm_name.c_str());
-        job->status.store(2);
-        return;
-    }
-    AceLmParams p = g_lm_params;
-    p.model_path  = entry->path.c_str();
-
-    // Acquire a fresh LM ctx from the shared store. Under EVICT_STRICT the
-    // module is reloaded if another pipeline evicted it; under EVICT_NEVER
-    // the store returns the cached instance.
-    AceLm * ctx = ace_lm_load(g_store, &p);
-    if (!ctx) {
-        fprintf(stderr, "[Server] FATAL: LM load failed\n");
+    // load
+    std::string lm_name = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
+    if (!ensure_lm(lm_name)) {
         job->status.store(2);
         return;
     }
 
-    // Execute and always free the ctx, success or failure: the store decides
-    // whether the underlying GPU module stays resident.
+    // execute
     std::vector<AceRequest> out(lm_batch_size);
-    int rc = ace_lm_generate(ctx, &ace_req, lm_batch_size, out.data(), NULL, NULL, server_cancel_job,
+    int rc = ace_lm_generate(g_ctx_lm, &ace_req, lm_batch_size, out.data(), NULL, NULL, server_cancel_job,
                              (void *) &job->cancel, mode);
-    ace_lm_free(ctx);
+
+    // free
+    if (!g_keep_loaded) {
+        ace_understand_free(g_ctx_understand);
+        g_ctx_understand = nullptr;
+        ace_lm_free(g_ctx_lm);
+        g_ctx_lm = nullptr;
+        g_loaded_lm.clear();
+        g_loaded_und_dit.clear();
+    }
 
     if (rc != 0) {
         job->status.store(job->cancel.load() ? 3 : 2);
         return;
-    }
-
-    // Sticky name hint for resolve_name under --keep-loaded. Master clears it
-    // in the default mode since the ctx is gone; we match that behavior.
-    if (g_keep_loaded) {
-        g_loaded_lm = lm_name;
-    } else {
-        g_loaded_lm.clear();
     }
 
     // serialize output as a JSON array
@@ -504,21 +692,42 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch
     fprintf(stderr, "[Server] Job %s done (LM, %d results)\n", job->id.c_str(), lm_batch_size);
 }
 
-// POST /lm
-// accepts: AceRequest JSON (lm_mode in the body selects the generation mode).
+// POST /lm[?mode=inspire|format]
+// accepts: AceRequest JSON (+ optional "lm_model" for LM selection)
 // returns: JSON {"id":"N"} immediately. result is a JSON array of enriched
 // AceRequests (lm_batch_size controls count).
-// modes (AceRequest.lm_mode):
-//   generate  metadata + lyrics + audio_codes  (full composer pass)
-//   inspire   metadata + lyrics                (audio_codes stays empty)
-//   format    metadata + lyrics                (audio_codes stays empty)
+// modes:
+//   (none)    full: metadata + lyrics + audio codes
+//   inspire   short caption -> metadata + lyrics (no codes)
+//   format    caption + lyrics -> metadata + lyrics (no codes)
 static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     if (g_registry.lm.empty()) {
         json_error(res, 501, "No LM models in registry");
         return;
     }
 
-    // parse request
+    // parse mode from URL parameter
+    int mode = LM_MODE_GENERATE;
+    if (req.has_param("mode")) {
+        std::string m = req.get_param_value("mode");
+        if (m == "inspire") {
+            mode = LM_MODE_INSPIRE;
+        } else if (m == "format") {
+            mode = LM_MODE_FORMAT;
+        } else {
+            json_error(res, 400, "Invalid mode (use: inspire, format)");
+            return;
+        }
+    }
+
+    // parse server fields + request
+    ServerFields sf;
+    parse_server_fields(req.body.c_str(), &sf);
+    if (sf.mp3_bitrate == -1) {
+        json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+        return;
+    }
+
     AceRequest ace_req;
     if (!request_parse_json(&ace_req, req.body.c_str())) {
         json_error(res, 400, "Invalid JSON");
@@ -526,19 +735,6 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     }
     if (ace_req.caption.empty()) {
         json_error(res, 400, "Caption is required");
-        return;
-    }
-
-    // Resolve lm_mode string to integer mode used by ace_lm_generate.
-    int mode;
-    if (ace_req.lm_mode == LM_MODE_NAME_GENERATE) {
-        mode = LM_MODE_GENERATE;
-    } else if (ace_req.lm_mode == LM_MODE_NAME_INSPIRE) {
-        mode = LM_MODE_INSPIRE;
-    } else if (ace_req.lm_mode == LM_MODE_NAME_FORMAT) {
-        mode = LM_MODE_FORMAT;
-    } else {
-        json_error(res, 400, "Invalid lm_mode (use: generate, inspire, format)");
         return;
     }
 
@@ -554,7 +750,7 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (LM, mode=%d)\n", job->id.c_str(), mode);
 
-    work_push([job, ace_req, lm_batch_size, mode]() { lm_worker(job, ace_req, lm_batch_size, mode); });
+    work_push([job, ace_req, sf, lm_batch_size, mode]() { lm_worker(job, ace_req, sf, lm_batch_size, mode); });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");
@@ -563,6 +759,7 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
 // synth worker: processes synth request, stores audio result in job.
 static void synth_worker(std::shared_ptr<Job>    job,
                          std::vector<AceRequest> ace_reqs,
+                         ServerFields            sf,
                          float *                 src_interleaved,
                          int                     src_len,
                          float *                 ref_interleaved,
@@ -570,19 +767,19 @@ static void synth_worker(std::shared_ptr<Job>    job,
                          bool                    output_wav,
                          WavFormat               wav_fmt,
                          int                     peak_clip) {
-    // Generate every request in one DiT batch. synth_batch_size expands each
-    // request into per-seed variants. Total clamped to DiT max 9.
-    const int batch_n     = (int) ace_reqs.size();
-    int       total_alloc = 0;
+    // expand synth_batch_size and process per-request groups.
+    // each original request = one pipeline call (same codes = same T).
+    // synth_batch_size variations within a group share the same T -> true GPU batch.
+    // different requests can have different T (code length or duration) -> separate calls.
+    // pre-compute total tracks across all groups
+    int batch_n     = (int) ace_reqs.size();
+    int total_alloc = 0;
     for (int ri = 0; ri < batch_n; ri++) {
         int sbs = ace_reqs[ri].synth_batch_size;
         total_alloc += sbs < 1 ? 1 : (sbs > 9 ? 9 : sbs);
     }
-    if (total_alloc > 9) {
-        fprintf(stderr, "[Server] Batch %d exceeds DiT max 9, clamping\n", total_alloc);
-        total_alloc = 9;
-    }
     std::vector<AceAudio> audio(total_alloc);
+    int                   audio_idx = 0;
 
     if (job->cancel.load()) {
         free(src_interleaved);
@@ -591,60 +788,16 @@ static void synth_worker(std::shared_ptr<Job>    job,
         return;
     }
 
-    // Resolve DiT, adapter and the text-encoder / VAE singletons.
-    std::string        dit_name = resolve_name(g_registry.dit, ace_reqs[0].synth_model, g_loaded_dit);
-    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
-    if (!dit) {
-        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
-        free(src_interleaved);
-        free(ref_interleaved);
-        job->status.store(2);
-        return;
-    }
-    if (g_registry.text_enc.empty() || g_registry.vae.empty()) {
-        fprintf(stderr, "[Server] Missing Text-Enc or VAE in registry\n");
+    // load
+    std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
+    if (!ensure_synth(dit_name, sf.lora, sf.lora_scale)) {
         free(src_interleaved);
         free(ref_interleaved);
         job->status.store(2);
         return;
     }
 
-    AceSynthParams p    = g_synth_params;
-    p.text_encoder_path = g_registry.text_enc[0].path.c_str();
-    p.dit_path          = dit->path.c_str();
-    p.vae_path          = g_registry.vae[0].path.c_str();
-    p.adapter_path      = nullptr;
-    p.adapter_scale     = 1.0f;
-    if (!ace_reqs[0].adapter.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
-        if (!adapter) {
-            fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
-            free(src_interleaved);
-            free(ref_interleaved);
-            job->status.store(2);
-            return;
-        }
-        p.adapter_path  = adapter->path.c_str();
-        p.adapter_scale = ace_reqs[0].adapter_scale;
-    }
-    fprintf(stderr, "[Server] Loading synth: DiT=%s%s%s\n", dit_name.c_str(),
-            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str());
-
-    AceSynth * ctx = ace_synth_load(g_store, &p);
-    if (!ctx) {
-        fprintf(stderr, "[Server] FATAL: synth load failed\n");
-        free(src_interleaved);
-        free(ref_interleaved);
-        job->status.store(2);
-        return;
-    }
-
-    // Build the flat batch. Seeds are resolved per original request, then
-    // synth_batch_size is expanded into per-seed variants in groups[0].
-    std::vector<std::vector<AceRequest>> groups(1);
-    groups[0].reserve(total_alloc);
-    int off = 0;
-    for (int ri = 0; ri < batch_n && off < total_alloc; ri++) {
+    for (int ri = 0; ri < batch_n; ri++) {
         auto & r   = ace_reqs[ri];
         int    sbs = r.synth_batch_size;
         if (sbs < 1) {
@@ -653,54 +806,56 @@ static void synth_worker(std::shared_ptr<Job>    job,
         if (sbs > 9) {
             sbs = 9;
         }
-        if (off + sbs > total_alloc) {
-            sbs = total_alloc - off;
-        }
+
+        // resolve seed once per original request
         request_resolve_seed(&r);
-        const long long base_seed = r.seed;
+        long long base_seed = r.seed;
+
+        // build group: N copies of the same request with consecutive seeds
+        std::vector<AceRequest> group(sbs);
+        for (int i = 0; i < sbs; i++) {
+            group[i]      = r;
+            group[i].seed = base_seed + i;
+        }
+
+        std::vector<AceAudio> group_audio(sbs);
+        int rc = ace_synth_generate(g_ctx_synth, group.data(), src_interleaved, src_len, ref_interleaved, ref_len, sbs,
+                                    group_audio.data(), server_cancel_job, (void *) &job->cancel);
+
+        if (rc != 0) {
+            if (!g_keep_loaded) {
+                ace_synth_free(g_ctx_synth);
+                g_ctx_synth = nullptr;
+                g_loaded_dit.clear();
+                g_loaded_lora.clear();
+            }
+            free(src_interleaved);
+            free(ref_interleaved);
+            for (int j = 0; j < audio_idx; j++) {
+                ace_audio_free(&audio[j]);
+            }
+            for (int j = 0; j < sbs; j++) {
+                ace_audio_free(&group_audio[j]);
+            }
+            job->status.store(job->cancel.load() ? 3 : 2);
+            return;
+        }
 
         for (int i = 0; i < sbs; i++) {
-            AceRequest v = r;
-            v.seed       = base_seed + i;
-            groups[0].push_back(v);
+            audio[audio_idx++] = group_audio[i];
         }
-        off += sbs;
     }
 
-    if (total_alloc > 1) {
-        fprintf(stderr, "[Server] Batch: %d track(s) from %d request(s)\n", total_alloc, batch_n);
+    // free pipeline
+    if (!g_keep_loaded) {
+        ace_synth_free(g_ctx_synth);
+        g_ctx_synth = nullptr;
+        g_loaded_dit.clear();
+        g_loaded_lora.clear();
     }
-
-    // Two-phase run. The store acquires and releases GPU modules around each
-    // op (STRICT) or keeps them across ops (NEVER). The synth ctx is always
-    // freed at the end of this handler.
-    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, audio.data(),
-                                   server_cancel_job, (void *) &job->cancel);
-    ace_synth_free(ctx);
     free(src_interleaved);
     free(ref_interleaved);
-
-    if (rc != 0) {
-        for (auto & a : audio) {
-            ace_audio_free(&a);
-        }
-        job->status.store(job->cancel.load() ? 3 : 2);
-        return;
-    }
-
-    // Sticky name hints for resolve_name under --keep-loaded. Master clears
-    // them in the default mode since the ctx is gone; we match that behavior.
-    if (g_keep_loaded) {
-        g_loaded_dit           = dit_name;
-        g_loaded_adapter       = ace_reqs[0].adapter;
-        g_loaded_adapter_scale = ace_reqs[0].adapter_scale;
-    } else {
-        g_loaded_dit.clear();
-        g_loaded_adapter.clear();
-        g_loaded_adapter_scale = 1.0f;
-    }
-
-    const int total_tracks = total_alloc;
+    int total_tracks = audio_idx;
 
     // encode each track (peak normalize + encode)
     const char * mime = output_wav ? "audio/wav" : "audio/mpeg";
@@ -716,7 +871,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
         if (output_wav) {
             encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000, wav_fmt);
         } else {
-            encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, g_mp3_kbps, server_cancel_job,
+            const int kbps = (sf.mp3_bitrate > 0) ? sf.mp3_bitrate : g_mp3_kbps;
+            encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, kbps, server_cancel_job,
                                           (void *) &job->cancel);
         }
         ace_audio_free(&audio[b]);
@@ -767,8 +923,10 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         return;
     }
 
-    // parse request: plain JSON (single or array) or multipart (JSON + audio file).
-    // synth_model, lm_model, adapter, adapter_scale travel inside AceRequest now.
+    // parse server fields from JSON body (before multipart parsing)
+    ServerFields sf;
+
+    // parse request: plain JSON (single or array) or multipart (JSON + audio file)
     std::vector<AceRequest> ace_reqs;
     float *                 src_interleaved = nullptr;
     int                     src_len         = 0;
@@ -786,6 +944,11 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
             json_body = req.form.get_field("request");
         } else {
             json_error(res, 400, "Multipart: missing 'request' part");
+            return;
+        }
+        parse_server_fields(json_body.c_str(), &sf);
+        if (sf.mp3_bitrate == -1) {
+            json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
             return;
         }
         if (!request_parse_json(&ace_req, json_body.c_str())) {
@@ -830,6 +993,11 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         ace_reqs.push_back(ace_req);
     } else {
         // plain JSON body: single object {} or array [{}, ...]
+        parse_server_fields(req.body.c_str(), &sf);
+        if (sf.mp3_bitrate == -1) {
+            json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+            return;
+        }
         if (!request_parse_json_array(req.body.c_str(), &ace_reqs)) {
             json_error(res, 400, "Invalid JSON");
             return;
@@ -846,17 +1014,14 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
         return;
     }
 
-    // Output format from AceRequest.output_format. Converts the string to
-    // (output_wav, wav_fmt) using the same parser the CLI uses.
+    // output format: ?format=wav16|wav24|wav32 for WAV, default MP3
     bool      output_wav = false;
     WavFormat wav_fmt    = WAV_S16;
-    {
+    if (req.has_param("format")) {
         bool is_mp3 = true;
-        if (!audio_parse_format(ace_reqs[0].output_format.c_str(), is_mp3, wav_fmt)) {
-            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32)");
-            return;
+        if (audio_parse_format(req.get_param_value("format").c_str(), is_mp3, wav_fmt)) {
+            output_wav = !is_mp3;
         }
-        output_wav = !is_mp3;
     }
     int peak_clip = ace_reqs[0].peak_clip;
 
@@ -864,9 +1029,9 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (%d requests)\n", job->id.c_str(), (int) ace_reqs.size());
 
-    work_push([job, reqs = std::move(ace_reqs), src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
-               peak_clip]() mutable {
-        synth_worker(job, std::move(reqs), src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
+    work_push([job, reqs = std::move(ace_reqs), sf, src_interleaved, src_len, ref_interleaved, ref_len, output_wav,
+               wav_fmt, peak_clip]() mutable {
+        synth_worker(job, std::move(reqs), sf, src_interleaved, src_len, ref_interleaved, ref_len, output_wav, wav_fmt,
                      peak_clip);
     });
 
@@ -876,56 +1041,44 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
 }
 
 // understand worker: load LM + tokenizer, run understand, store JSON result in job.
-static void understand_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * src_interleaved, int src_len) {
+static void understand_worker(std::shared_ptr<Job> job,
+                              AceRequest           ace_req,
+                              ServerFields         sf,
+                              float *              src_interleaved,
+                              int                  src_len) {
     if (job->cancel.load()) {
         free(src_interleaved);
         job->status.store(3);
         return;
     }
 
-    // Resolve LM + DiT (the DiT path carries the tokenizer weights).
-    std::string        lm_name  = resolve_name(g_registry.lm, ace_req.lm_model, g_loaded_lm);
-    std::string        dit_name = resolve_name(g_registry.dit, ace_req.synth_model, g_loaded_dit);
-    const ModelEntry * lm_entry = registry_find(g_registry.lm, lm_name.c_str());
-    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
-    if (!lm_entry || !dit) {
-        fprintf(stderr, "[Server] LM or DiT not found: lm=%s dit=%s\n", lm_name.c_str(), dit_name.c_str());
-        free(src_interleaved);
-        job->status.store(2);
-        return;
-    }
-
-    AceUnderstandParams p = g_und_params;
-    p.model_path          = lm_entry->path.c_str();
-    p.dit_path            = dit->path.c_str();
-
-    AceUnderstand * ctx = ace_understand_load(g_store, &p);
-    if (!ctx) {
-        fprintf(stderr, "[Server] FATAL: understand load failed\n");
+    // load (LM + tokenizer from selected DiT)
+    std::string lm_name  = resolve_name(g_registry.lm, sf.lm_model, g_loaded_lm);
+    std::string dit_name = resolve_name(g_registry.dit, sf.synth_model, g_loaded_dit);
+    if (!ensure_understand(lm_name, dit_name)) {
         free(src_interleaved);
         job->status.store(2);
         return;
     }
 
     AceRequest out;
-    int        rc = ace_understand_generate(ctx, src_interleaved, src_len, &ace_req, &out, server_cancel_job,
-                                            (void *) &job->cancel);
-    ace_understand_free(ctx);
+    int rc = ace_understand_generate(g_ctx_understand, src_interleaved, src_len, &ace_req, &out, server_cancel_job,
+                                     (void *) &job->cancel);
+
+    // free
+    if (!g_keep_loaded) {
+        ace_understand_free(g_ctx_understand);
+        g_ctx_understand = nullptr;
+        ace_lm_free(g_ctx_lm);
+        g_ctx_lm = nullptr;
+        g_loaded_lm.clear();
+        g_loaded_und_dit.clear();
+    }
     free(src_interleaved);
 
     if (rc != 0) {
         job->status.store(job->cancel.load() ? 3 : 2);
         return;
-    }
-
-    // Sticky name hints for resolve_name under --keep-loaded. Master clears
-    // them in the default mode since the ctx is gone; we match that behavior.
-    if (g_keep_loaded) {
-        g_loaded_lm      = lm_name;
-        g_loaded_und_dit = dit_name;
-    } else {
-        g_loaded_lm.clear();
-        g_loaded_und_dit.clear();
     }
 
     job->result_body = "[" + request_to_json(&out) + "]";
@@ -935,9 +1088,11 @@ static void understand_worker(std::shared_ptr<Job> job, AceRequest ace_req, floa
 }
 
 // POST /understand
-// multipart/form-data: full pipeline (audio + optional JSON params)
-//   part "audio":   WAV or MP3 file (required)
-//   part "request": JSON text (optional, for model selection and sampling params)
+// Two modes:
+//   multipart/form-data          -> full pipeline (audio + optional JSON params)
+//     part "audio":   WAV or MP3 file (required)
+//     part "request": JSON text (optional, for sampling params)
+//   application/json body        -> codes-only (audio_codes in JSON, skip VAE+FSQ)
 // returns: JSON {"id":"N"} immediately.
 static void handle_understand(const httplib::Request & req, httplib::Response & res) {
     if (g_registry.lm.empty() || g_registry.dit.empty() || g_registry.vae.empty()) {
@@ -945,62 +1100,86 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         return;
     }
 
-    if (!req.is_multipart_form_data()) {
-        json_error(res, 400, "Understand requires multipart/form-data");
-        return;
-    }
-
-    // parse multipart: required "audio" part, optional "request" part for sampling params.
-    // synth_model, lm_model, adapter, adapter_scale travel inside AceRequest.
+    // parse request: multipart (audio + optional JSON) or plain JSON (codes-only)
     AceRequest ace_req;
     request_init(&ace_req);
     ace_req.lm_temperature = 0.3f;  // understand default: lower than generation
     ace_req.lm_top_p       = 1.0f;  // understand default: no nucleus sampling
 
-    if (req.form.has_file("request")) {
-        const std::string & json = req.form.get_file("request").content;
-        if (!request_parse_json(&ace_req, json.c_str())) {
-            json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+    // parse server fields + request
+    ServerFields sf;
+    float *      src_interleaved = nullptr;
+    int          src_len         = 0;
+
+    if (req.is_multipart_form_data()) {
+        // multipart: required "audio" part, optional "request" part for sampling params
+        if (req.form.has_file("request")) {
+            const std::string & json = req.form.get_file("request").content;
+            parse_server_fields(json.c_str(), &sf);
+            if (sf.mp3_bitrate == -1) {
+                json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+                return;
+            }
+            if (!request_parse_json(&ace_req, json.c_str())) {
+                json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+                return;
+            }
+        } else if (req.form.has_field("request")) {
+            const std::string & json = req.form.get_field("request");
+            parse_server_fields(json.c_str(), &sf);
+            if (sf.mp3_bitrate == -1) {
+                json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+                return;
+            }
+            if (!request_parse_json(&ace_req, json.c_str())) {
+                json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+                return;
+            }
+        }
+
+        if (!req.form.has_file("audio")) {
+            json_error(res, 400, "Multipart: missing 'audio' part");
             return;
         }
-    } else if (req.form.has_field("request")) {
-        const std::string & json = req.form.get_field("request");
-        if (!request_parse_json(&ace_req, json.c_str())) {
-            json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+        auto file = req.form.get_file("audio");
+        if (file.content.empty()) {
+            json_error(res, 400, "Multipart: empty 'audio' part");
+            return;
+        }
+
+        // decode directly from multipart buffer (WAV/MP3 auto-detected)
+        int     T_audio = 0;
+        float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
+        if (!planar || T_audio <= 0) {
+            json_error(res, 400, "Failed to decode audio");
+            return;
+        }
+
+        fprintf(stderr, "[Server] Understand source: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
+
+        // convert planar [L:T][R:T] to interleaved [L0,R0,L1,R1,...] for pipeline
+        src_interleaved = audio_planar_to_interleaved(planar, T_audio);
+        free(planar);
+        src_len = T_audio;
+    } else {
+        // plain JSON body: codes-only mode
+        parse_server_fields(req.body.c_str(), &sf);
+        if (sf.mp3_bitrate == -1) {
+            json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+            return;
+        }
+        if (!request_parse_json(&ace_req, req.body.c_str())) {
+            json_error(res, 400, "Invalid JSON");
             return;
         }
     }
-
-    if (!req.form.has_file("audio")) {
-        json_error(res, 400, "Multipart: missing 'audio' part");
-        return;
-    }
-    auto file = req.form.get_file("audio");
-    if (file.content.empty()) {
-        json_error(res, 400, "Multipart: empty 'audio' part");
-        return;
-    }
-
-    // decode directly from multipart buffer (WAV/MP3 auto-detected)
-    int     T_audio = 0;
-    float * planar  = audio_read_48k_buf((const uint8_t *) file.content.data(), file.content.size(), &T_audio);
-    if (!planar || T_audio <= 0) {
-        json_error(res, 400, "Failed to decode audio");
-        return;
-    }
-
-    fprintf(stderr, "[Server] Understand source: %.2fs @ 48kHz\n", (float) T_audio / 48000.0f);
-
-    // convert planar [L:T][R:T] to interleaved [L0,R0,L1,R1,...] for pipeline
-    float * src_interleaved = audio_planar_to_interleaved(planar, T_audio);
-    free(planar);
-    int src_len = T_audio;
 
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (understand)\n", job->id.c_str());
 
-    work_push(
-        [job, ace_req, src_interleaved, src_len]() { understand_worker(job, ace_req, src_interleaved, src_len); });
+    work_push([job, ace_req, sf, src_interleaved, src_len]() {
+        understand_worker(job, ace_req, sf, src_interleaved, src_len);
+    });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");
@@ -1033,12 +1212,12 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     add_names(models, "dit", g_registry.dit);
     add_names(models, "vae", g_registry.vae);
 
-    // adapters: available adapter names
-    yyjson_mut_val * adapters_arr = yyjson_mut_arr(doc);
-    for (const auto & e : g_registry.adapters) {
-        yyjson_mut_arr_add_str(doc, adapters_arr, e.name.c_str());
+    // loras: available lora names
+    yyjson_mut_val * loras_arr = yyjson_mut_arr(doc);
+    for (const auto & e : g_registry.loras) {
+        yyjson_mut_arr_add_str(doc, loras_arr, e.name.c_str());
     }
-    yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
+    yyjson_mut_obj_add_val(doc, root, "loras", loras_arr);
 
     // cli: server settings
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
@@ -1084,11 +1263,6 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
 }
 
 static void usage(const char * prog) {
-    AceLmParams    lm_d;
-    AceSynthParams synth_d;
-    ace_lm_default_params(&lm_d);
-    ace_synth_default_params(&synth_d);
-
     fprintf(stderr, "acestep.cpp %s\n\n", ACE_VERSION);
     fprintf(stderr,
             "Usage: %s --models <dir> [options]\n"
@@ -1096,39 +1270,39 @@ static void usage(const char * prog) {
             "Required:\n"
             "  --models <dir>          Directory of GGUF model files\n"
             "\n"
-            "Adapter:\n"
-            "  --adapters <dir>        Directory of adapters\n"
+            "LoRA:\n"
+            "  --loras <dir>           Directory of LoRA adapters\n"
             "\n"
             "Memory control:\n"
             "  --keep-loaded           Keep models in VRAM between requests\n"
-            "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
-            "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
+            "  --vae-chunk <N>         Latent frames per tile (default: 256)\n"
+            "  --vae-overlap <N>       Overlap frames per side (default: 64)\n"
             "\n"
             "Output:\n"
-            "  --mp3-bitrate <kbps>    MP3 bitrate (default: %d)\n"
+            "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n"
             "\n"
             "Server:\n"
             "  --host <addr>           Listen address (default: 127.0.0.1)\n"
             "  --port <N>              Listen port (default: 8080)\n"
-            "  --max-batch <N>         LM batch limit (default: %d)\n"
-            "  --max-seq <N>           KV cache size (default: %d)\n"
+            "  --max-batch <N>         LM batch limit (default: 1)\n"
+            "  --max-seq <N>           KV cache size (default: 8192)\n"
             "\n"
             "Debug:\n"
             "  --no-fsm                Disable FSM constrained decoding\n"
             "  --no-fa                 Disable flash attention\n"
             "  --no-batch-cfg          Split CFG into two separate forwards (LM + DiT)\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
-            prog, synth_d.vae_chunk, synth_d.vae_overlap, g_mp3_kbps, g_max_batch, lm_d.max_seq);
+            prog);
 }
 
 int main(int argc, char ** argv) {
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
 
-    const char * host         = "127.0.0.1";
-    int          port         = 8080;
-    const char * models_dir   = nullptr;
-    const char * adapters_dir = nullptr;
+    const char * host       = "127.0.0.1";
+    int          port       = 8080;
+    const char * models_dir = nullptr;
+    const char * loras_dir  = nullptr;
 
     if (argc < 2) {
         usage(argv[0]);
@@ -1138,8 +1312,8 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--models") && i + 1 < argc) {
             models_dir = argv[++i];
-        } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
-            adapters_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--loras") && i + 1 < argc) {
+            loras_dir = argv[++i];
         } else if (!strcmp(argv[i], "--max-seq") && i + 1 < argc) {
             g_lm_params.max_seq = atoi(argv[++i]);
 
@@ -1154,6 +1328,18 @@ int main(int argc, char ** argv) {
             // output
         } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
             g_mp3_kbps = atoi(argv[++i]);
+            {
+                static const int valid_bitrates[] = {32,40,48,56,64,80,96,112,128,160,192,224,256,320};
+                static const int n_valid = (int)(sizeof(valid_bitrates)/sizeof(valid_bitrates[0]));
+                bool ok = false;
+                for (int i2 = 0; i2 < n_valid; i2++) {
+                    if (valid_bitrates[i2] == g_mp3_kbps) { ok = true; break; }
+                }
+                if (!ok) {
+                    fprintf(stderr, "error: --mp3-bitrate %d is not valid. Valid values: 32,40,48,56,64,80,96,112,128,160,192,224,256,320\n", g_mp3_kbps);
+                    return 1;
+                }
+            }
 
             // server
         } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {
@@ -1203,10 +1389,10 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // scan adapters directory (optional)
-    if (adapters_dir) {
-        fprintf(stderr, "[Server] Scanning adapters in %s\n", adapters_dir);
-        registry_scan_adapters(&g_registry, adapters_dir);
+    // scan loras directory (optional)
+    if (loras_dir) {
+        fprintf(stderr, "[Server] Scanning LoRAs in %s\n", loras_dir);
+        registry_scan_loras(&g_registry, loras_dir);
     }
 
     // validate pipeline
@@ -1248,22 +1434,13 @@ int main(int argc, char ** argv) {
 
     // init understand params (vae for audio encoding, dit resolved per-request)
     ace_understand_default_params(&g_und_params);
-    g_und_params.use_fa      = g_lm_params.use_fa;
-    g_und_params.use_fsm     = g_lm_params.use_fsm;
-    g_und_params.max_seq     = g_lm_params.max_seq;         // must match ace_lm: part of the LM ModelKey
-    g_und_params.max_batch   = g_lm_params.max_batch;       // must match ace_lm: part of the LM ModelKey
-    g_und_params.vae_chunk   = g_synth_params.vae_chunk;    // share --vae-chunk with /synth
-    g_und_params.vae_overlap = g_synth_params.vae_overlap;  // share --vae-overlap with /synth
+    g_und_params.use_fa  = g_lm_params.use_fa;
+    g_und_params.use_fsm = g_lm_params.use_fsm;
     if (have_vae) {
         g_und_params.vae_path = g_registry.vae[0].path.c_str();
     }
 
     bool have_understand = have_lm && have_dit && have_vae;
-
-    // central store: one policy for the whole server lifetime. STRICT keeps
-    // at most one GPU module resident at a time; --keep-loaded flips it to
-    // NEVER and lets the working set accumulate across requests.
-    g_store = store_create(g_keep_loaded ? EVICT_NEVER : EVICT_STRICT);
 
     // setup HTTP server
     httplib::Server svr;
@@ -1371,8 +1548,8 @@ int main(int argc, char ** argv) {
     fprintf(stderr, "[Server] Listening on %s:%d\n", host, port);
     fprintf(stderr, "[Server] Pipelines:%s%s%s\n", have_lm ? " /lm" : "", have_synth ? " /synth" : "",
             have_understand ? " /understand" : "");
-    fprintf(stderr, "[Server] Models: %zu LM, %zu Text-Enc, %zu DiT, %zu VAE, %zu Adapter\n", g_registry.lm.size(),
-            g_registry.text_enc.size(), g_registry.dit.size(), g_registry.vae.size(), g_registry.adapters.size());
+    fprintf(stderr, "[Server] Models: %zu LM, %zu Text-Enc, %zu DiT, %zu VAE, %zu LoRA\n", g_registry.lm.size(),
+            g_registry.text_enc.size(), g_registry.dit.size(), g_registry.vae.size(), g_registry.loras.size());
     if (!svr.listen(host, port)) {
         fprintf(stderr, "[Server] FATAL: cannot bind %s:%d\n", host, port);
     }
@@ -1385,9 +1562,11 @@ int main(int argc, char ** argv) {
     cv_work.notify_one();
     worker.join();
 
-    // cleanup
+    // cleanup (all _free functions handle NULL)
     fprintf(stderr, "[Server] Shutting down...\n");
-    store_free(g_store);
+    ace_understand_free(g_ctx_understand);
+    ace_synth_free(g_ctx_synth);
+    ace_lm_free(g_ctx_lm);
     fprintf(stderr, "[Server] Done\n");
 
     return 0;
