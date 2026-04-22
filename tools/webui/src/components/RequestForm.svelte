@@ -22,7 +22,8 @@
 		TASK_LEGO,
 		TASK_EXTRACT,
 		TASK_COMPLETE,
-		TRACK_NAMES
+		TRACK_NAMES,
+		VALID_MP3_BITRATES
 	} from '../lib/config.js';
 	import {
 		num,
@@ -895,15 +896,12 @@
 				bind:value={app.mp3Bitrate}
 				title="MP3 encoding bitrate. Higher = better quality, larger file. 128 kbps is the server default. Changes apply to this request only."
 			>
-				{#if ![96, 128, 160, 192, 256, 320].includes(app.mp3Bitrate)}
+				{#if !VALID_MP3_BITRATES.includes(app.mp3Bitrate)}
 					<option value={app.mp3Bitrate}>{app.mp3Bitrate} kbps (server default)</option>
 				{/if}
-				<option value={96}>96 kbps</option>
-				<option value={128}>128 kbps</option>
-				<option value={160}>160 kbps</option>
-				<option value={192}>192 kbps</option>
-				<option value={256}>256 kbps</option>
-				<option value={320}>320 kbps</option>
+				{#each VALID_MP3_BITRATES as kbps}
+					<option value={kbps}>{kbps} kbps</option>
+				{/each}
 			</select>
 		{/if}
 		<select

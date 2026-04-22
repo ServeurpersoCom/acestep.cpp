@@ -15,6 +15,8 @@ export const TASK_LEGO = 'lego';
 export const TASK_EXTRACT = 'extract';
 export const TASK_COMPLETE = 'complete';
 
+export const VALID_MP3_BITRATES = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+
 export const TRACK_NAMES = [
 	'vocals',
 	'backing_vocals',

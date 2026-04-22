@@ -1,4 +1,5 @@
 import type { AceRequest, AceProps, Song } from './types.js';
+import { VALID_MP3_BITRATES } from './config.js';
 
 const STORAGE_KEY = 'ace';
 
@@ -17,12 +18,11 @@ function load(): Saved {
 		const raw = localStorage.getItem(STORAGE_KEY);
 		if (raw) {
 			const parsed = JSON.parse(raw);
-			const validBitrates = [96, 128, 160, 192, 256, 320];
 			return {
 				name: parsed.name || '',
 				volume: parsed.volume ?? 0.5,
 				format: ['mp3', 'wav16', 'wav24', 'wav32'].includes(parsed.format) ? parsed.format : 'mp3',
-				mp3Bitrate: validBitrates.includes(parsed.mp3Bitrate) ? parsed.mp3Bitrate : 0,
+				mp3Bitrate: VALID_MP3_BITRATES.includes(parsed.mp3Bitrate) ? parsed.mp3Bitrate : 0,
 				dark: parsed.dark ?? true,
 				logsOpen: parsed.logsOpen ?? true,
 				request: parsed.request || { caption: '' }
