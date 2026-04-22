@@ -412,9 +412,10 @@
 							toSend,
 							srcSong?.audio ?? null,
 							refSong?.audio ?? null,
-							app.format
+							app.format,
+							app.mp3Bitrate
 						)
-					: await synthSubmit(toSend, app.format);
+					: await synthSubmit(toSend, app.format, app.mp3Bitrate);
 			saveJob('synth', {
 				id: jobId,
 				name: baseName,
