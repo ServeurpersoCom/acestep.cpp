@@ -3,14 +3,14 @@ gsd_state_version: 1.0
 milestone: v1.0
 milestone_name: milestone
 status: executing
-last_updated: "2026-04-22T04:14:43.398Z"
+last_updated: "2026-04-22T04:16:00.000Z"
 last_activity: 2026-04-22
 progress:
   total_phases: 1
   completed_phases: 0
   total_plans: 4
-  completed_plans: 1
-  percent: 25
+  completed_plans: 2
+  percent: 50
 ---
 
 # Project State
@@ -18,11 +18,11 @@ progress:
 ## Current Position
 
 Phase: 01 (mp3-bitrate-control) — EXECUTING
-Plan: 2 of 4
+Plan: 3 of 4
 Status: Ready to execute
 Last activity: 2026-04-22
 
-Progress: [███░░░░░░░] 25% (1 of 4 plans complete)
+Progress: [█████░░░░░] 50% (2 of 4 plans complete)
 
 ## Project Reference
 
@@ -37,6 +37,7 @@ See: .planning/PROJECT.md (updated 2026-04-21)
 - Phases complete: 0
 - Requirements mapped: 7/7
 - Plan 01-01 duration: ~12 min, 2 tasks, 1 file modified
+- Plan 01-02 duration: ~2 min, 2 tasks, 2 files modified
 
 ## Accumulated Context
 
@@ -55,8 +56,10 @@ See: .planning/PROJECT.md (updated 2026-04-21)
 
 - Used -1 sentinel in ServerFields.mp3_bitrate: 0=omitted/use-default, >0=valid value, -1=invalid (caller returns HTTP 400). Keeps parse_server_fields signature unchanged.
 - Applied HTTP 400 guard at all 6 parse_server_fields call sites including handle_understand for consistent client error behavior.
+- app.mp3Bitrate is top-level app state (not inside app.request), matching app.format pattern; mp3_bitrate injected at serialization time only to keep AceRequest clean.
+- Persisted mp3Bitrate validated against curated preset list [96,128,160,192,256,320]; invalid values fall back to 0.
 
 ## Session Continuity
 
-Last completed: 01-01-PLAN.md (2026-04-22)
-Next action: Execute plan 01-02 (TypeScript types)
+Last completed: 01-02-PLAN.md (2026-04-22)
+Next action: Execute plan 01-03 (Svelte UI select component)
