@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
-	import { RotateCcw, Download, FolderOpen, X } from '@lucide/svelte';
+	import { RotateCcw, Download, FolderOpen } from '@lucide/svelte';
 	import { app, toast, setRequest } from '../lib/state.svelte.js';
 	import { rollDice } from '../lib/dice.js';
 	import {
@@ -16,20 +16,14 @@
 	} from '../lib/api.js';
 	import { putSong, getAllSongs, saveJob, loadJob, loadJobId, clearJob } from '../lib/db.js';
 	import {
-		TASK_TEXT2MUSIC,
 		TASK_COVER,
 		TASK_COVER_NOFSQ,
 		TASK_REPAINT,
 		TASK_LEGO,
 		TASK_EXTRACT,
 		TASK_COMPLETE,
-		INFER_ODE,
-		INFER_SDE,
-		DCW_MODE_LOW,
-		DCW_MODE_HIGH,
-		DCW_MODE_DOUBLE,
-		DCW_MODE_PIX,
-		TRACK_NAMES
+		TRACK_NAMES,
+		VALID_MP3_BITRATES
 	} from '../lib/config.js';
 	import {
 		num,
@@ -40,6 +34,8 @@
 	} from '../lib/fields.js';
 	import type { AceRequest, Song } from '../lib/types.js';
 
+	let serverMp3Bitrate = $derived(app.props ? Number(app.props.cli.mp3_bitrate) || 0 : 0);
+
 	let busyLm = $state(false);
 	let busySynth = $state(false);
 	let busy = $derived(busyLm || busySynth);
@@ -48,10 +44,8 @@
 	let d = $derived(app.props?.default);
 	let ditModels = $derived(app.props?.models.dit ?? []);
 	let lmModels = $derived(app.props?.models.lm ?? []);
-	let adapterList = $derived(app.props?.adapters ?? []);
-	let adapterStale = $derived(
-		!!app.request.adapter && !adapterList.includes(String(app.request.adapter))
-	);
+	let loraList = $derived(app.props?.loras ?? []);
+	let loraStale = $derived(!!app.request.lora && !loraList.includes(String(app.request.lora)));
 	let taskType = $derived(app.request.task_type || '');
 	let dp = $derived(
 		app.props?.presets
@@ -71,15 +65,15 @@
 		if (app.request.lm_batch_size == null) app.request.lm_batch_size = d.lm_batch_size;
 		if (app.request.synth_batch_size == null) app.request.synth_batch_size = d.synth_batch_size;
 		if (app.request.peak_clip == null) app.request.peak_clip = d.peak_clip;
-		// enum fields: a missing value would leave <select> showing the first
-		// option without syncing it back to state. Inject server defaults so
-		// the dropdown and the request stay in sync from the first render.
-		if (app.request.task_type == null || app.request.task_type === '')
-			app.request.task_type = d.task_type;
-		if (app.request.infer_method == null || app.request.infer_method === '')
-			app.request.infer_method = d.infer_method;
-		if (app.request.dcw_mode == null || app.request.dcw_mode === '')
-			app.request.dcw_mode = d.dcw_mode;
+	});
+
+	// Seed bitrate from server default on first load (or whenever props arrive).
+	// app.mp3Bitrate === 0 means "not yet set"; overwrite with server's configured default.
+	// Falls back to 128 if props are unavailable (e.g., server offline on first render).
+	$effect(() => {
+		if (app.props && app.mp3Bitrate === 0) {
+			app.mp3Bitrate = Number(app.props.cli.mp3_bitrate) || 128;
+		}
 	});
 
 	// DiT input indicators
@@ -296,7 +290,7 @@
 	// bind:value guarantees app.request always matches the DOM.
 	function buildRequest(): AceRequest {
 		const out = buildSparse(app.request);
-		if (out.adapter && !adapterList.includes(String(out.adapter))) delete out.adapter;
+		if (out.lora && !loraList.includes(String(out.lora))) delete out.lora;
 		return out;
 	}
 
@@ -387,8 +381,7 @@
 			// seed and synth_batch_size are per-expansion, handled below
 			delete synthParams.seed;
 			delete synthParams.synth_batch_size;
-			if (synthParams.adapter && !adapterList.includes(String(synthParams.adapter)))
-				delete synthParams.adapter;
+			if (synthParams.lora && !loraList.includes(String(synthParams.lora))) delete synthParams.lora;
 
 			// resolve seeds, build server payload and local expanded list for SongCard mapping.
 			// server receives synth_batch_size and expands internally (groups by T for GPU batch).
@@ -421,9 +414,10 @@
 							toSend,
 							srcSong?.audio ?? null,
 							refSong?.audio ?? null,
-							app.format
+							app.format,
+							app.mp3Bitrate
 						)
-					: await synthSubmit(toSend, app.format);
+					: await synthSubmit(toSend, app.format, app.mp3Bitrate);
 			saveJob('synth', {
 				id: jobId,
 				name: baseName,
@@ -534,14 +528,14 @@
 				<span class="model-label">LoRA</span>
 				<select
 					class="model-select"
-					bind:value={app.request.adapter}
-					title="Adapter merged into DiT at load time. Must match the exact DiT it was trained on. Scanned from --adapters directory. Supports LoRA as a ComfyUI single .safetensors or a PEFT directory with adapter_model.safetensors and adapter_config.json."
+					bind:value={app.request.lora}
+					title="LoRA adapter merged into DiT at load time. Must match the exact DiT it was trained on. Scanned from --loras directory. ComfyUI format: single .safetensors file. PEFT format: directory with adapter_model.safetensors and adapter_config.json."
 				>
 					<option value="">Disabled</option>
-					{#if adapterStale}
-						<option value={app.request.adapter} disabled>{app.request.adapter}</option>
+					{#if loraStale}
+						<option value={app.request.lora} disabled>{app.request.lora}</option>
 					{/if}
-					{#each adapterList as name}
+					{#each loraList as name}
 						<option value={name}>{name}</option>
 					{/each}
 				</select>
@@ -549,8 +543,8 @@
 					type="text"
 					class="batch-input"
 					placeholder="1.0"
-					bind:value={app.request.adapter_scale}
-					title="Adapter scale factor. Lower if you hear structured noise or artifacts. Raise for stronger effect."
+					bind:value={app.request.lora_scale}
+					title="LoRA scale factor. Lower if you hear structured noise or artifacts. Raise for stronger effect."
 				/>
 			</div>
 		</div>
@@ -568,7 +562,7 @@
 
 	<div class="section-title lyrics-header">
 		Lyrics
-		<label class="header-toggle" title="Set lyrics to [Instrumental] and language to unknown">
+		<label class="instrumental-toggle" title="Set lyrics to [Instrumental] and language to unknown">
 			<input type="checkbox" checked={instrumental} onchange={toggleInstrumental} /> Instrumental
 		</label>
 	</div>
@@ -580,15 +574,14 @@
 
 	<div class="section-title metadata-header">
 		Metadata
-		<button
-			type="button"
-			class="clear-btn"
-			title="Clear metadata"
+		<span
+			class="clear-link"
+			role="button"
+			tabindex="0"
+			title="Clear all metadata fields (LM will guess them)"
 			onclick={clearMetadata}
-			aria-label="Clear metadata"
+			onkeydown={(e) => e.key === 'Enter' && clearMetadata()}>Clear</span
 		>
-			<X size={20} />
-		</button>
 	</div>
 	<div class="meta-grid">
 		<label
@@ -758,13 +751,13 @@
 						app.request.task_type = e.currentTarget.value;
 					}}
 				>
-					<option value={TASK_TEXT2MUSIC}>Text2Music: from prompt and LM codes</option>
-					<option value={TASK_COVER}>Cover: reinterpret in a new style</option>
-					<option value={TASK_COVER_NOFSQ}>Cover (no FSQ): closer to the original</option>
-					<option value={TASK_REPAINT}>Repaint: regenerate a region</option>
-					<option value={TASK_LEGO}>Lego: add a stem over backing audio</option>
-					<option value={TASK_EXTRACT}>Extract: isolate one stem from a mix</option>
-					<option value={TASK_COMPLETE}>Complete: auto-arrange around a partial track</option>
+					<option value="">text2music</option>
+					<option value={TASK_COVER}>cover</option>
+					<option value={TASK_COVER_NOFSQ}>cover-nofsq</option>
+					<option value={TASK_REPAINT}>repaint</option>
+					<option value={TASK_LEGO}>lego</option>
+					<option value={TASK_EXTRACT}>extract</option>
+					<option value={TASK_COMPLETE}>complete</option>
 				</select>
 			</div>
 			<div class="model-row track-row">
@@ -786,15 +779,14 @@
 
 	<details open class="has-clear">
 		<summary>Flow matching parameters</summary>
-		<button
-			type="button"
-			class="clear-btn details-clear"
-			title="Clear flow matching parameters"
+		<span
+			class="clear-link details-clear"
+			role="button"
+			tabindex="0"
+			title="Reset all flow matching parameters to auto-detect defaults"
 			onclick={clearFlowMatching}
-			aria-label="Clear flow matching parameters"
+			onkeydown={(e) => e.key === 'Enter' && clearFlowMatching()}>Clear</span
 		>
-			<X size={20} />
-		</button>
 		<div class="details-body">
 			<div class="meta-grid">
 				<label
@@ -819,30 +811,10 @@
 					/></label
 				>
 				<label
-					>DCW mode <select
-						value={app.request.dcw_mode || ''}
-						onchange={(e) => {
-							app.request.dcw_mode = e.currentTarget.value;
-						}}
-					>
-						<option value={DCW_MODE_LOW}>Low</option>
-						<option value={DCW_MODE_HIGH}>High</option>
-						<option value={DCW_MODE_DOUBLE}>Double</option>
-						<option value={DCW_MODE_PIX}>Pix</option>
-					</select></label
-				>
-				<label
-					>DCW scaler <input
+					>Repaint strength <input
 						type="text"
-						placeholder={ph(d?.dcw_scaler)}
-						bind:value={app.request.dcw_scaler}
-					/></label
-				>
-				<label
-					>DCW high scaler <input
-						type="text"
-						placeholder={ph(d?.dcw_high_scaler)}
-						bind:value={app.request.dcw_high_scaler}
+						placeholder={ph(d?.repaint_strength)}
+						bind:value={app.request.repaint_strength}
 					/></label
 				>
 				<label
@@ -889,8 +861,8 @@
 							app.request.infer_method = e.currentTarget.value;
 						}}
 					>
-						<option value={INFER_ODE}>ODE Euler</option>
-						<option value={INFER_SDE}>SDE Stochastic</option>
+						<option value="">ODE Euler</option>
+						<option value="sde">SDE Stochastic</option>
 					</select></label
 				>
 				<label
@@ -920,6 +892,19 @@
 			bind:value={app.request.peak_clip}
 			title="Percentile peak normalization to 0 dB. 0 = no clipping (100th percentile). 10 = default (99.999%, clips ~58 samples / 1.2 ms). 999 = aggressive (99.9%, clips ~5760 samples / 120 ms)."
 		/>
+		{#if app.format === 'mp3'}
+			<select
+				bind:value={app.mp3Bitrate}
+				title="MP3 encoding bitrate. Higher = better quality, larger file. 128 kbps is the server default. Changes apply to this request only."
+			>
+				{#if serverMp3Bitrate > 0 && !VALID_MP3_BITRATES.includes(serverMp3Bitrate)}
+					<option value={serverMp3Bitrate}>{serverMp3Bitrate} kbps (server default)</option>
+				{/if}
+				{#each VALID_MP3_BITRATES as kbps}
+					<option value={kbps}>{kbps} kbps</option>
+				{/each}
+			</select>
+		{/if}
 		<select
 			bind:value={app.format}
 			title="Output audio format. wav32 outputs raw IEEE float without normalization."
@@ -993,7 +978,7 @@
 		align-items: center;
 		justify-content: space-between;
 	}
-	.header-toggle {
+	.instrumental-toggle {
 		display: flex;
 		flex-direction: row;
 		align-items: center;
@@ -1003,7 +988,7 @@
 		color: var(--fg-dim);
 		cursor: pointer;
 	}
-	.header-toggle input[type='checkbox'] {
+	.instrumental-toggle input[type='checkbox'] {
 		cursor: pointer;
 	}
 	.metadata-header {
@@ -1019,18 +1004,13 @@
 		top: 0.4rem;
 		right: 0;
 	}
-	.clear-btn {
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		padding: 0;
-		border: none;
-		background: transparent;
+	.clear-link {
+		font-size: 0.8rem;
+		font-weight: 400;
 		color: var(--fg-dim);
 		cursor: pointer;
-		line-height: 0;
 	}
-	.clear-btn:hover {
+	.clear-link:hover {
 		color: var(--fg);
 	}
 	textarea,

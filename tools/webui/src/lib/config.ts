@@ -15,15 +15,7 @@ export const TASK_LEGO = 'lego';
 export const TASK_EXTRACT = 'extract';
 export const TASK_COMPLETE = 'complete';
 
-// inference method (mirrors task-types.h INFER_*)
-export const INFER_ODE = 'ode';
-export const INFER_SDE = 'sde';
-
-// DCW modes (mirrors task-types.h DCW_MODE_*)
-export const DCW_MODE_LOW = 'low';
-export const DCW_MODE_HIGH = 'high';
-export const DCW_MODE_DOUBLE = 'double';
-export const DCW_MODE_PIX = 'pix';
+export const VALID_MP3_BITRATES = [32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
 
 export const TRACK_NAMES = [
 	'vocals',

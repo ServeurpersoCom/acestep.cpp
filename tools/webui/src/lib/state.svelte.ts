@@ -1,4 +1,5 @@
 import type { AceRequest, AceProps, Song } from './types.js';
+import { VALID_MP3_BITRATES } from './config.js';
 
 const STORAGE_KEY = 'ace';
 
@@ -6,6 +7,7 @@ interface Saved {
 	name: string;
 	volume: number;
 	format: string;
+	mp3Bitrate: number;
 	dark: boolean;
 	logsOpen: boolean;
 	request: AceRequest;
@@ -20,6 +22,7 @@ function load(): Saved {
 				name: parsed.name || '',
 				volume: parsed.volume ?? 0.5,
 				format: ['mp3', 'wav16', 'wav24', 'wav32'].includes(parsed.format) ? parsed.format : 'mp3',
+				mp3Bitrate: VALID_MP3_BITRATES.includes(parsed.mp3Bitrate) ? parsed.mp3Bitrate : 0,
 				dark: parsed.dark ?? true,
 				logsOpen: parsed.logsOpen ?? true,
 				request: parsed.request || { caption: '' }
@@ -32,6 +35,7 @@ function load(): Saved {
 		name: '',
 		volume: 0.5,
 		format: 'mp3',
+		mp3Bitrate: 0,
 		dark: false,
 		logsOpen: true,
 		request: { caption: '' }
@@ -44,6 +48,7 @@ export const app = $state({
 	name: saved.name,
 	volume: saved.volume,
 	format: saved.format,
+	mp3Bitrate: saved.mp3Bitrate,
 	dark: saved.dark,
 	logsOpen: saved.logsOpen,
 	request: saved.request as AceRequest,
@@ -75,8 +80,8 @@ export function toast(msg: string, ms = 4000, ok = false) {
 export function setRequest(incoming: AceRequest) {
 	if (!incoming.synth_model) incoming.synth_model = app.request.synth_model;
 	if (!incoming.lm_model) incoming.lm_model = app.request.lm_model;
-	if (!incoming.adapter) incoming.adapter = app.request.adapter;
-	if (incoming.adapter_scale == null) incoming.adapter_scale = app.request.adapter_scale;
+	if (!incoming.lora) incoming.lora = app.request.lora;
+	if (incoming.lora_scale == null) incoming.lora_scale = app.request.lora_scale;
 	app.request = incoming;
 	app.srcRangeStart = incoming.repainting_start ?? null;
 	app.srcRangeEnd = incoming.repainting_end ?? null;
@@ -98,6 +103,7 @@ $effect.root(() => {
 			name: app.name,
 			volume: app.volume,
 			format: app.format,
+			mp3Bitrate: app.mp3Bitrate,
 			dark: app.dark,
 			logsOpen: app.logsOpen,
 			request: app.request
