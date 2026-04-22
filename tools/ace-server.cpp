@@ -487,6 +487,8 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     if ((v = yyjson_obj_get(obj, "lora_scale")) && yyjson_is_num(v)) {
         sf->lora_scale = (float) yyjson_get_num(v);
     }
+    int mp3_bitrate_parsed = 0;   // 0 = not present
+    bool mp3_bitrate_invalid = false;
     if ((v = yyjson_obj_get(obj, "mp3_bitrate")) && yyjson_is_int(v)) {
         static const int valid_bitrates[] = {32,40,48,56,64,80,96,112,128,160,192,224,256,320};
         static const int n_valid = (int)(sizeof(valid_bitrates)/sizeof(valid_bitrates[0]));
@@ -495,15 +497,20 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
         for (int i = 0; i < n_valid; i++) {
             if (valid_bitrates[i] == req_kbps) { ok = true; break; }
         }
-        if (!ok) {
-            yyjson_doc_free(doc);
-            sf->mp3_bitrate = -1;   // sentinel: caller must return 400
-            return;
+        if (ok) {
+            mp3_bitrate_parsed = req_kbps;
+        } else {
+            mp3_bitrate_invalid = true;
         }
-        sf->mp3_bitrate = req_kbps;
     }
 
     yyjson_doc_free(doc);
+
+    if (mp3_bitrate_invalid) {
+        sf->mp3_bitrate = -1;   // sentinel: caller must return 400
+        return;
+    }
+    sf->mp3_bitrate = mp3_bitrate_parsed;
 }
 
 // load LM. frees understand (shared pointers become invalid) but does not rebuild it.
