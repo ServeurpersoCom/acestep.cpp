@@ -444,6 +444,7 @@ struct ServerFields {
     std::string lm_model;
     std::string lora;
     float       lora_scale;
+    int         mp3_bitrate;   // 0 = use server default (g_mp3_kbps)
 };
 
 static void parse_server_fields(const char * json, ServerFields * sf) {
@@ -451,6 +452,7 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     sf->lm_model    = "";
     sf->lora        = "";
     sf->lora_scale  = 1.0f;
+    sf->mp3_bitrate = 0;
 
     yyjson_doc * doc = yyjson_read(json, strlen(json), 0);
     if (!doc) {
@@ -484,6 +486,21 @@ static void parse_server_fields(const char * json, ServerFields * sf) {
     }
     if ((v = yyjson_obj_get(obj, "lora_scale")) && yyjson_is_num(v)) {
         sf->lora_scale = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "mp3_bitrate")) && yyjson_is_int(v)) {
+        static const int valid_bitrates[] = {32,40,48,56,64,80,96,112,128,160,192,224,256,320};
+        static const int n_valid = (int)(sizeof(valid_bitrates)/sizeof(valid_bitrates[0]));
+        int req_kbps = (int) yyjson_get_int(v);
+        bool ok = false;
+        for (int i = 0; i < n_valid; i++) {
+            if (valid_bitrates[i] == req_kbps) { ok = true; break; }
+        }
+        if (!ok) {
+            yyjson_doc_free(doc);
+            sf->mp3_bitrate = -1;   // sentinel: caller must return 400
+            return;
+        }
+        sf->mp3_bitrate = req_kbps;
     }
 
     yyjson_doc_free(doc);
@@ -699,6 +716,10 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     // parse server fields + request
     ServerFields sf;
     parse_server_fields(req.body.c_str(), &sf);
+    if (sf.mp3_bitrate == -1) {
+        json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+        return;
+    }
 
     AceRequest ace_req;
     if (!request_parse_json(&ace_req, req.body.c_str())) {
@@ -918,6 +939,10 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
             return;
         }
         parse_server_fields(json_body.c_str(), &sf);
+        if (sf.mp3_bitrate == -1) {
+            json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+            return;
+        }
         if (!request_parse_json(&ace_req, json_body.c_str())) {
             json_error(res, 400, "Multipart: invalid JSON in 'request' part");
             return;
@@ -961,6 +986,10 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     } else {
         // plain JSON body: single object {} or array [{}, ...]
         parse_server_fields(req.body.c_str(), &sf);
+        if (sf.mp3_bitrate == -1) {
+            json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+            return;
+        }
         if (!request_parse_json_array(req.body.c_str(), &ace_reqs)) {
             json_error(res, 400, "Invalid JSON");
             return;
@@ -1079,6 +1108,10 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         if (req.form.has_file("request")) {
             const std::string & json = req.form.get_file("request").content;
             parse_server_fields(json.c_str(), &sf);
+            if (sf.mp3_bitrate == -1) {
+                json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+                return;
+            }
             if (!request_parse_json(&ace_req, json.c_str())) {
                 json_error(res, 400, "Multipart: invalid JSON in 'request' part");
                 return;
@@ -1086,6 +1119,10 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
         } else if (req.form.has_field("request")) {
             const std::string & json = req.form.get_field("request");
             parse_server_fields(json.c_str(), &sf);
+            if (sf.mp3_bitrate == -1) {
+                json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+                return;
+            }
             if (!request_parse_json(&ace_req, json.c_str())) {
                 json_error(res, 400, "Multipart: invalid JSON in 'request' part");
                 return;
@@ -1119,6 +1156,10 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
     } else {
         // plain JSON body: codes-only mode
         parse_server_fields(req.body.c_str(), &sf);
+        if (sf.mp3_bitrate == -1) {
+            json_error(res, 400, "mp3_bitrate must be one of: 32,40,48,56,64,80,96,112,128,160,192,224,256,320");
+            return;
+        }
         if (!request_parse_json(&ace_req, req.body.c_str())) {
             json_error(res, 400, "Invalid JSON");
             return;
