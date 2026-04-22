@@ -13,9 +13,6 @@ interface Saved {
 	request: AceRequest;
 }
 
-// server-reported default bitrate, set once on first props load
-export let serverMp3Bitrate = $state(0);
-
 function load(): Saved {
 	try {
 		const raw = localStorage.getItem(STORAGE_KEY);

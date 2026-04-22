@@ -1,7 +1,7 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
 	import { RotateCcw, Download, FolderOpen } from '@lucide/svelte';
-	import { app, toast, setRequest, serverMp3Bitrate } from '../lib/state.svelte.js';
+	import { app, toast, setRequest } from '../lib/state.svelte.js';
 	import { rollDice } from '../lib/dice.js';
 	import {
 		lmSubmit,
@@ -33,6 +33,8 @@
 		pickSections
 	} from '../lib/fields.js';
 	import type { AceRequest, Song } from '../lib/types.js';
+
+	let serverMp3Bitrate = $derived(app.props ? Number(app.props.cli.mp3_bitrate) || 0 : 0);
 
 	let busyLm = $state(false);
 	let busySynth = $state(false);
@@ -70,9 +72,7 @@
 	// Falls back to 128 if props are unavailable (e.g., server offline on first render).
 	$effect(() => {
 		if (app.props && app.mp3Bitrate === 0) {
-			const serverDefault = Number(app.props.cli.mp3_bitrate) || 128;
-			serverMp3Bitrate = serverDefault;
-			app.mp3Bitrate = serverDefault;
+			app.mp3Bitrate = Number(app.props.cli.mp3_bitrate) || 128;
 		}
 	});
 
