@@ -52,7 +52,7 @@
 	let adapterStale = $derived(
 		!!app.request.adapter && !adapterList.includes(String(app.request.adapter))
 	);
-	let taskType = $derived(app.request.task_type || '');
+	let taskType = $derived(app.request.task_type || d?.task_type || '');
 	let dp = $derived(
 		app.props?.presets
 			? String(app.request.synth_model || '').includes('turbo')
@@ -64,23 +64,6 @@
 		taskType === TASK_LEGO || taskType === TASK_EXTRACT || taskType === TASK_COMPLETE
 	);
 	let singleTrack = $derived(taskType === TASK_LEGO || taskType === TASK_EXTRACT);
-
-	// fill number fields with server defaults (avoids empty inputs)
-	$effect(() => {
-		if (!d) return;
-		if (app.request.lm_batch_size == null) app.request.lm_batch_size = d.lm_batch_size;
-		if (app.request.synth_batch_size == null) app.request.synth_batch_size = d.synth_batch_size;
-		if (app.request.peak_clip == null) app.request.peak_clip = d.peak_clip;
-		// enum fields: a missing value would leave <select> showing the first
-		// option without syncing it back to state. Inject server defaults so
-		// the dropdown and the request stay in sync from the first render.
-		if (app.request.task_type == null || app.request.task_type === '')
-			app.request.task_type = d.task_type;
-		if (app.request.infer_method == null || app.request.infer_method === '')
-			app.request.infer_method = d.infer_method;
-		if (app.request.dcw_mode == null || app.request.dcw_mode === '')
-			app.request.dcw_mode = d.dcw_mode;
-	});
 
 	// DiT input indicators
 	let hasCodes = $derived(!!app.request.audio_codes?.trim() && app.srcSongId == null);
@@ -383,7 +366,7 @@
 			const synthBatch = Math.max(1, Number(app.request.synth_batch_size) || 1);
 			const userSeed = num(app.request.seed);
 			const hasSeed = userSeed != null && userSeed >= 0;
-			const synthParams = pickSections(app.request, ['flow', 'toolbar', 'routing']);
+			const synthParams = pickSections(app.request, ['flow', 'advanced', 'toolbar', 'routing']);
 			// seed and synth_batch_size are per-expansion, handled below
 			delete synthParams.seed;
 			delete synthParams.synth_batch_size;
@@ -477,6 +460,10 @@
 		clearSection(app.request, 'flow');
 		app.srcRangeStart = null;
 		app.srcRangeEnd = null;
+	}
+
+	function clearAdvanced() {
+		clearSection(app.request, 'advanced');
 	}
 
 	function ph(v: unknown): string {
@@ -705,6 +692,7 @@
 			class="batch-input"
 			min="1"
 			max={app.props?.cli?.max_batch || 9}
+			placeholder={ph(d?.lm_batch_size)}
 			bind:value={app.request.lm_batch_size}
 			title="Number of LM variations per Compose. Server must be started with --max-batch N (default 1). Higher values use more VRAM for the KV cache."
 		/>
@@ -819,33 +807,6 @@
 					/></label
 				>
 				<label
-					>DCW mode <select
-						value={app.request.dcw_mode || ''}
-						onchange={(e) => {
-							app.request.dcw_mode = e.currentTarget.value;
-						}}
-					>
-						<option value={DCW_MODE_LOW}>Low</option>
-						<option value={DCW_MODE_HIGH}>High</option>
-						<option value={DCW_MODE_DOUBLE}>Double</option>
-						<option value={DCW_MODE_PIX}>Pix</option>
-					</select></label
-				>
-				<label
-					>DCW scaler <input
-						type="text"
-						placeholder={ph(d?.dcw_scaler)}
-						bind:value={app.request.dcw_scaler}
-					/></label
-				>
-				<label
-					>DCW high scaler <input
-						type="text"
-						placeholder={ph(d?.dcw_high_scaler)}
-						bind:value={app.request.dcw_high_scaler}
-					/></label
-				>
-				<label
 					>Repaint start <input
 						type="text"
 						placeholder={ph(d?.repainting_start)}
@@ -883,8 +844,55 @@
 					/></label
 				>
 				<label
+					>Seed <input type="text" placeholder={ph(d?.seed)} bind:value={app.request.seed} /></label
+				>
+			</div>
+		</div>
+	</details>
+
+	<details class="has-clear">
+		<summary>Advanced and post-processing</summary>
+		<button
+			type="button"
+			class="clear-btn details-clear"
+			title="Clear advanced and post-processing"
+			onclick={clearAdvanced}
+			aria-label="Clear advanced and post-processing"
+		>
+			<X size={20} />
+		</button>
+		<div class="details-body">
+			<div class="meta-grid">
+				<label
+					>DCW mode <select
+						value={app.request.dcw_mode || d?.dcw_mode || ''}
+						onchange={(e) => {
+							app.request.dcw_mode = e.currentTarget.value;
+						}}
+					>
+						<option value={DCW_MODE_LOW}>Low</option>
+						<option value={DCW_MODE_HIGH}>High</option>
+						<option value={DCW_MODE_DOUBLE}>Double</option>
+						<option value={DCW_MODE_PIX}>Pix</option>
+					</select></label
+				>
+				<label
+					>DCW scaler <input
+						type="text"
+						placeholder={ph(d?.dcw_scaler)}
+						bind:value={app.request.dcw_scaler}
+					/></label
+				>
+				<label
+					>DCW high scaler <input
+						type="text"
+						placeholder={ph(d?.dcw_high_scaler)}
+						bind:value={app.request.dcw_high_scaler}
+					/></label
+				>
+				<label
 					>Method <select
-						value={app.request.infer_method || ''}
+						value={app.request.infer_method || d?.infer_method || ''}
 						onchange={(e) => {
 							app.request.infer_method = e.currentTarget.value;
 						}}
@@ -894,7 +902,18 @@
 					</select></label
 				>
 				<label
-					>Seed <input type="text" placeholder={ph(d?.seed)} bind:value={app.request.seed} /></label
+					>Peak clip <input
+						type="text"
+						placeholder={ph(d?.peak_clip)}
+						bind:value={app.request.peak_clip}
+					/></label
+				>
+				<label
+					>MP3 bitrate <input
+						type="text"
+						placeholder={ph(d?.mp3_bitrate)}
+						bind:value={app.request.mp3_bitrate}
+					/></label
 				>
 			</div>
 		</div>
@@ -907,22 +926,14 @@
 			class="batch-input"
 			min="1"
 			max="9"
+			placeholder={ph(d?.synth_batch_size)}
 			bind:value={app.request.synth_batch_size}
 			title="Number of DiT variations per request. Each uses a consecutive seed."
 		/>
 		<span class="spacer"></span>
-		<span class="row-label">Peak clip</span>
-		<input
-			type="number"
-			class="peak-clip-input"
-			min="0"
-			max="999"
-			bind:value={app.request.peak_clip}
-			title="Percentile peak normalization to 0 dB. 0 = no clipping (100th percentile). 10 = default (99.999%, clips ~58 samples / 1.2 ms). 999 = aggressive (99.9%, clips ~5760 samples / 120 ms)."
-		/>
 		<select
 			bind:value={app.format}
-			title="Output audio format. wav32 outputs raw IEEE float without normalization."
+			title="Output audio format. WAV32 outputs raw IEEE float without normalization."
 		>
 			<option value="mp3">MP3</option>
 			<option value="wav16">WAV16</option>
@@ -1104,10 +1115,6 @@
 	}
 	input.batch-input {
 		width: 3rem;
-		text-align: center;
-	}
-	input.peak-clip-input {
-		width: 4rem;
 		text-align: center;
 	}
 	.pending-nav {

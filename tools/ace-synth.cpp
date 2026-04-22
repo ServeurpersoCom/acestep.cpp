@@ -37,8 +37,6 @@ static void usage(const char * prog) {
             "adapter picks an adapter from --adapters, output_format picks the output\n"
             "extension. When synth_model is empty the first DiT in the registry is used;\n"
             "text-encoder and VAE are always the first in their registry bucket.\n\n"
-            "Audio encoding:\n"
-            "  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)\n\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n\n"
@@ -72,7 +70,6 @@ int main(int argc, char ** argv) {
     bool                      clamp_fp16     = false;
     int                       vae_chunk      = params.vae_chunk;
     int                       vae_overlap    = params.vae_overlap;
-    int                       mp3_kbps       = 128;
 
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--request")) {
@@ -100,8 +97,6 @@ int main(int argc, char ** argv) {
             vae_chunk = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--vae-overlap") && i + 1 < argc) {
             vae_overlap = atoi(argv[++i]);
-        } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
-            mp3_kbps = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--help") || !strcmp(argv[i], "-h")) {
             usage(argv[0]);
             return 0;
@@ -317,7 +312,8 @@ int main(int argc, char ** argv) {
         const char * ext = is_mp3 ? ".mp3" : ".wav";
         char         out_path[1024];
         snprintf(out_path, sizeof(out_path), "%s%d%s", all_basenames[b].c_str(), all_synth_indices[b], ext);
-        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, mp3_kbps, wav_fmt)) {
+        if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, groups[0][b].mp3_bitrate,
+                         wav_fmt)) {
             fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, out_path);
         }
         ace_audio_free(&all_audio[b]);

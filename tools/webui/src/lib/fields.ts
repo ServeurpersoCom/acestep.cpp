@@ -6,7 +6,14 @@
 
 import type { AceRequest } from './types.js';
 
-export type FieldSection = 'content' | 'metadata' | 'lm' | 'flow' | 'toolbar' | 'routing';
+export type FieldSection =
+	| 'content'
+	| 'metadata'
+	| 'lm'
+	| 'flow'
+	| 'advanced'
+	| 'toolbar'
+	| 'routing';
 
 interface FieldDef {
 	key: keyof AceRequest;
@@ -41,19 +48,22 @@ export const FIELDS: readonly FieldDef[] = [
 	{ key: 'inference_steps', section: 'flow', type: 'num' },
 	{ key: 'guidance_scale', section: 'flow', type: 'num' },
 	{ key: 'shift', section: 'flow', type: 'num' },
-	{ key: 'dcw_scaler', section: 'flow', type: 'num' },
-	{ key: 'dcw_high_scaler', section: 'flow', type: 'num' },
-	{ key: 'dcw_mode', section: 'flow', type: 'str' },
 	{ key: 'audio_cover_strength', section: 'flow', type: 'num' },
 	{ key: 'cover_noise_strength', section: 'flow', type: 'num' },
 	{ key: 'repainting_start', section: 'flow', type: 'num' },
 	{ key: 'repainting_end', section: 'flow', type: 'num' },
-	{ key: 'infer_method', section: 'flow', type: 'str' },
 	{ key: 'seed', section: 'flow', type: 'num' },
+
+	// advanced and post-processing: cleared by its own Clear, preserved across Compose
+	{ key: 'dcw_scaler', section: 'advanced', type: 'num' },
+	{ key: 'dcw_high_scaler', section: 'advanced', type: 'num' },
+	{ key: 'dcw_mode', section: 'advanced', type: 'str' },
+	{ key: 'infer_method', section: 'advanced', type: 'str' },
+	{ key: 'peak_clip', section: 'advanced', type: 'num' },
+	{ key: 'mp3_bitrate', section: 'advanced', type: 'num', min: 1 },
 
 	// toolbar: preserved, not in any clear section
 	{ key: 'synth_batch_size', section: 'toolbar', type: 'num', min: 1 },
-	{ key: 'peak_clip', section: 'toolbar', type: 'num' },
 
 	// routing: model and task selection, preserved across Compose
 	{ key: 'task_type', section: 'routing', type: 'str' },

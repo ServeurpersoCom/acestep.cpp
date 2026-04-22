@@ -32,6 +32,7 @@ export interface AceRequest {
 	track?: string;
 	infer_method?: string;
 	peak_clip?: number;
+	mp3_bitrate?: number;
 	// server routing (not part of C++ AceRequest, parsed separately)
 	synth_model?: string;
 	lm_model?: string;

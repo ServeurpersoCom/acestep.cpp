@@ -97,6 +97,10 @@ struct AceRequest {
     // 10 = default (99.9990th percentile, clips top 0.001%).
     // 999 = max (99.9001th percentile, clips top 0.1%).
     int peak_clip;  // 10
+
+    // audio output: MP3 encoder bitrate in kbps. Applies only when
+    // output_format is "mp3". WAV outputs ignore this field.
+    int mp3_bitrate;  // 128
 };
 
 // Initialize all fields to defaults (matches Python GenerationParams defaults)

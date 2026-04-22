@@ -193,7 +193,6 @@ static AceUnderstandParams g_und_params;
 
 // limits
 static int  g_max_batch   = 1;
-static int  g_mp3_kbps    = 128;
 static bool g_keep_loaded = false;
 
 // job system: all compute endpoints create a job and return its ID
@@ -716,8 +715,8 @@ static void synth_worker(std::shared_ptr<Job>    job,
         if (output_wav) {
             encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000, wav_fmt);
         } else {
-            encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, g_mp3_kbps, server_cancel_job,
-                                          (void *) &job->cancel);
+            encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, groups[0][b].mp3_bitrate,
+                                          server_cancel_job, (void *) &job->cancel);
         }
         ace_audio_free(&audio[b]);
     }
@@ -1044,7 +1043,6 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "cli", cli);
     yyjson_mut_obj_add_int(doc, cli, "max_batch", g_max_batch);
-    yyjson_mut_obj_add_int(doc, cli, "mp3_bitrate", g_mp3_kbps);
 
     // default: full AceRequest with all defaults from request_init().
     // the webui reads this to populate LM placeholders.
@@ -1104,9 +1102,6 @@ static void usage(const char * prog) {
             "  --vae-chunk <N>         Latent frames per tile (default: %d)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: %d)\n"
             "\n"
-            "Output:\n"
-            "  --mp3-bitrate <kbps>    MP3 bitrate (default: %d)\n"
-            "\n"
             "Server:\n"
             "  --host <addr>           Listen address (default: 127.0.0.1)\n"
             "  --port <N>              Listen port (default: 8080)\n"
@@ -1118,7 +1113,7 @@ static void usage(const char * prog) {
             "  --no-fa                 Disable flash attention\n"
             "  --no-batch-cfg          Split CFG into two separate forwards (LM + DiT)\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n",
-            prog, synth_d.vae_chunk, synth_d.vae_overlap, g_mp3_kbps, g_max_batch, lm_d.max_seq);
+            prog, synth_d.vae_chunk, synth_d.vae_overlap, g_max_batch, lm_d.max_seq);
 }
 
 int main(int argc, char ** argv) {
@@ -1150,10 +1145,6 @@ int main(int argc, char ** argv) {
             g_synth_params.vae_overlap = atoi(argv[++i]);
         } else if (!strcmp(argv[i], "--keep-loaded")) {
             g_keep_loaded = true;
-
-            // output
-        } else if (!strcmp(argv[i], "--mp3-bitrate") && i + 1 < argc) {
-            g_mp3_kbps = atoi(argv[++i]);
 
             // server
         } else if (!strcmp(argv[i], "--host") && i + 1 < argc) {

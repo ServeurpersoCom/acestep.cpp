@@ -505,6 +505,7 @@ their own, but without caption the LLM has nothing to work from.
     "lm_mode":              "generate",
     "output_format":        "mp3",
     "peak_clip":            10,
+    "mp3_bitrate":          128,
     "synth_model":          "",
     "lm_model":             "",
     "adapter":              "",
@@ -769,9 +770,6 @@ Optional:
   --src-audio <file>      Source audio (WAV or MP3)
   --ref-audio <file>      Timbre reference audio (WAV or MP3)
 
-Audio encoding:
-  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
-
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 1024)
   --vae-overlap <N>       Overlap frames per side (default: 64)
@@ -871,9 +869,6 @@ Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 1024)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
-Output:
-  --mp3-bitrate <kbps>    MP3 bitrate (default: 128)
-
 Server:
   --host <addr>           Listen address (default: 127.0.0.1)
   --port <N>              Listen port (default: 8080)
@@ -958,7 +953,7 @@ default AceRequest (source of truth for webui dropdowns and placeholders):
     "vae": ["vae-BF16.gguf"]
   },
   "adapters": [],
-  "cli": { "max_batch": 1, "mp3_bitrate": 128 },
+  "cli": { "max_batch": 1 },
   "default": { "caption": "", "duration": 0, ... }
 }
 ```
