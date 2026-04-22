@@ -30,7 +30,7 @@
 Plans:
 - [x] 01-01-PLAN.md — C++ ServerFields + validated parse + synth_worker per-request bitrate + startup guard
 - [x] 01-02-PLAN.md — TypeScript state (app.mp3Bitrate), localStorage persistence, api.ts submit wiring
-- [ ] 01-03-PLAN.md — Svelte bitrate selector UI + props-seeding $effect + synthesize() call sites
+- [x] 01-03-PLAN.md — Svelte bitrate selector UI + props-seeding $effect + synthesize() call sites
 - [ ] 01-04-PLAN.md — server.sh CFG-01 comment + buildwebui.sh + human end-to-end checkpoint
 
 **UI hint**: yes
@@ -41,4 +41,4 @@ Plans:
 
 | Phase | Plans Complete | Status | Completed |
 |-------|----------------|--------|-----------|
-| 1. MP3 Bitrate Control | 2/4 | In Progress|  |
+| 1. MP3 Bitrate Control | 3/4 | In Progress|  |

@@ -7,9 +7,9 @@
 
 ### Bitrate UI
 
-- [ ] **BITUI-01**: User can select MP3 bitrate (96 / 128 / 160 / 192 / 256 / 320 kbps) in the WebUI when MP3 is the selected output format
-- [ ] **BITUI-02**: Bitrate selector is hidden when output format is WAV (wav16 / wav24 / wav32)
-- [ ] **BITUI-03**: Bitrate selector initializes to the server's current default on first load (from `GET /props` → `cli.mp3_bitrate`)
+- [x] **BITUI-01**: User can select MP3 bitrate (96 / 128 / 160 / 192 / 256 / 320 kbps) in the WebUI when MP3 is the selected output format
+- [x] **BITUI-02**: Bitrate selector is hidden when output format is WAV (wav16 / wav24 / wav32)
+- [x] **BITUI-03**: Bitrate selector initializes to the server's current default on first load (from `GET /props` → `cli.mp3_bitrate`)
 
 ### Server
 
@@ -38,9 +38,9 @@
 
 | Requirement | Phase | Status |
 |-------------|-------|--------|
-| BITUI-01 | Phase 1 | Pending |
-| BITUI-02 | Phase 1 | Pending |
-| BITUI-03 | Phase 1 | Pending |
+| BITUI-01 | Phase 1 | Complete |
+| BITUI-02 | Phase 1 | Complete |
+| BITUI-03 | Phase 1 | Complete |
 | SRV-01 | Phase 1 | Complete |
 | SRV-02 | Phase 1 | Complete |
 | SRV-03 | Phase 1 | Complete |
