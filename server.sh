@@ -10,5 +10,6 @@ set -eu
     --host 0.0.0.0 \
     --port 8085 \
     --models ./models \
-    --adapters ./adapters \
+    --loras ./loras \
     --max-batch 1
+    #--mp3-bitrate 128    # MP3 encoding bitrate in kbps (valid: 32,40,48,56,64,80,96,112,128,160,192,224,256,320)
