@@ -13,9 +13,9 @@
 
 ### Server
 
-- [ ] **SRV-01**: Server accepts `mp3_bitrate` in `/synth` request JSON body and uses it for MP3 encoding that request
-- [ ] **SRV-02**: Server returns HTTP 400 when `mp3_bitrate` is present but not a valid value (96/128/160/192/224/256/320 kbps)
-- [ ] **SRV-03**: Server falls back to `g_mp3_kbps` when `mp3_bitrate` is absent or zero in the request
+- [x] **SRV-01**: Server accepts `mp3_bitrate` in `/synth` request JSON body and uses it for MP3 encoding that request
+- [x] **SRV-02**: Server returns HTTP 400 when `mp3_bitrate` is present but not a valid value (96/128/160/192/224/256/320 kbps)
+- [x] **SRV-03**: Server falls back to `g_mp3_kbps` when `mp3_bitrate` is absent or zero in the request
 
 ### Config
 
@@ -41,9 +41,9 @@
 | BITUI-01 | Phase 1 | Pending |
 | BITUI-02 | Phase 1 | Pending |
 | BITUI-03 | Phase 1 | Pending |
-| SRV-01 | Phase 1 | Pending |
-| SRV-02 | Phase 1 | Pending |
-| SRV-03 | Phase 1 | Pending |
+| SRV-01 | Phase 1 | Complete |
+| SRV-02 | Phase 1 | Complete |
+| SRV-03 | Phase 1 | Complete |
 | CFG-01 | Phase 1 | Pending |
 
 **Coverage:**
