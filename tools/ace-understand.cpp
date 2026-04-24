@@ -184,9 +184,12 @@ int main(int argc, char ** argv) {
     free(planar);
     int src_len = T_audio;
 
-    // run understand pipeline
+    // run understand pipeline. CLI feeds raw audio: NULL/0 for latents,
+    // NULL/NULL for capture, NULL/NULL for cancel. The server reuses the
+    // same entry point with the full latent IO surface.
     AceRequest out;
-    int        rc = ace_understand_generate(ctx, src_interleaved, src_len, &req, &out, NULL, NULL);
+    int rc = ace_understand_generate(ctx, src_interleaved, src_len, nullptr, 0, &req, &out, nullptr, nullptr, nullptr,
+                                     nullptr);
     free(src_interleaved);
     ace_understand_free(ctx);
     store_free(store);

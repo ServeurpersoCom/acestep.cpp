@@ -4,8 +4,16 @@ const DB_NAME = 'ace-songs';
 const DB_VERSION = 1;
 const STORE = 'songs';
 
+// Module-scoped singleton: one IDB connection for the whole page lifetime.
+// The old pattern reopened the DB on every tx(), which leaked handles and
+// eventually tripped the "unrecoverable UnknownError" under concurrent
+// writes. Connection is lazy, retriable on error (null reset), and shared
+// by every put/get/delete call below.
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function open(): Promise<IDBDatabase> {
-	return new Promise((resolve, reject) => {
+	if (dbPromise) return dbPromise;
+	dbPromise = new Promise((resolve, reject) => {
 		const req = indexedDB.open(DB_NAME, DB_VERSION);
 		req.onupgradeneeded = () => {
 			const db = req.result;
@@ -14,8 +22,12 @@ function open(): Promise<IDBDatabase> {
 			}
 		};
 		req.onsuccess = () => resolve(req.result);
-		req.onerror = () => reject(req.error);
+		req.onerror = () => {
+			dbPromise = null;
+			reject(req.error);
+		};
 	});
+	return dbPromise;
 }
 
 // wrap a single IDB transaction operation into a promise

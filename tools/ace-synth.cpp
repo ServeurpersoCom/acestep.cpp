@@ -297,7 +297,11 @@ int main(int argc, char ** argv) {
     }
 
     // Two-phase run: DiT resident for all groups, then VAE for all jobs.
-    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, ref_interleaved, ref_len, all_audio.data());
+    // The CLI does not expose latent IO yet: source and reference are always
+    // audio, latent capture is disabled. The server reuses this runner with
+    // the full feature.
+    const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, NULL, 0, ref_interleaved, ref_len, NULL, 0,
+                                   all_audio.data());
     if (rc != 0) {
         fprintf(stderr, "[Ace-Synth] ERROR: batch run failed\n");
         for (auto & a : all_audio) {

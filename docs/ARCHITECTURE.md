@@ -824,7 +824,7 @@ in one GPU pass.
 HTTP server exposing the same pipelines as `ace-lm`, `ace-synth`, and
 `ace-understand`. One binary, one port.
 
-POST /lm, POST /synth, and POST /understand are all **asynchronous**: they
+POST /lm, POST /synth, POST /understand and POST /vae are all **asynchronous**: they
 return a job ID immediately, push the request to a FIFO queue, and the single
 worker thread processes jobs in order. Clients poll GET /job?id=N for status
 and fetch results with GET /job?id=N&result=1.
@@ -908,20 +908,29 @@ POST /lm                        Submit LM generation, returns job ID
 
 POST /synth                     Submit synth generation, returns job ID
   body: application/json AceRequest or [AceRequest, ...]
-  body: multipart/form-data (request + audio + ref_audio)
+  body: multipart/form-data (request + audio|src_latents + ref_audio|ref_latents)
+        latents win over audio when both are sent on the same side
   response: {"id":"2"}
 
 POST /understand                Submit understand, returns job ID
-  body: multipart/form-data (audio required, optional request JSON)
+  body: multipart/form-data (audio or src_latents required, optional request JSON)
   response: {"id":"3"}
+
+POST /vae                       Submit VAE encode or decode, returns job ID
+  body: multipart/form-data (exactly one of 'audio' or 'src_latents')
+        'audio' -> encode path (latents out)
+        'src_latents' -> decode path (audio out)
+  response: {"id":"4"}
 
 GET  /job?id=N                  Poll job status
   response: {"status":"running|done|failed|cancelled"}
 
 GET  /job?id=N&result=1         Fetch job result
-  LM/understand: application/json [AceRequest, ...]
-  synth jobs:    audio/mpeg or audio/wav (single track)
-  synth jobs:    multipart/mixed (batch, each part is raw audio)
+  lm:         application/json [AceRequest, ...]
+  synth:      multipart/mixed (one audio part per track + cover latent part)
+  understand: multipart/mixed (one json part + cover latent part)
+  vae encode: application/octet-stream (raw .vae bytes, no audio echo: client already has it)
+  vae decode: audio/mpeg or audio/wav (raw, no latent echo: client already has it)
 
 POST /job?id=N&cancel=1         Cancel a specific job
   response: {"status":"cancelled"}
@@ -937,6 +946,11 @@ GET  /logs                      SSE stream of server stderr
 
 GET  /                          Embedded WebUI (gzipped HTML)
 ```
+
+Latent payload format (src_latents, ref_latents, synth/understand response latent parts, /vae encode response body):
+raw f32 little-endian, flat [T, 64], no header. T = size / 256. Same byte
+layout neural-codec writes as `.vae` files. Hard cap T <= 15000 frames
+(matches the silence_latent buffer baked into the DiT GGUF), 413 over.
 
 `lm_model`, `synth_model`, `adapter`, `adapter_scale` fields in the JSON body
 select which model and adapter to load. `lm_mode` picks the LM instruction
@@ -1005,17 +1019,17 @@ Output:
   --q4                    Quantize latent to int4 (~6.8 kbit/s)
   --format <fmt>          WAV format: wav16, wav24, wav32 (default: wav16)
 
-Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)
-               song.latent -> song.wav
+Output naming: song.wav -> song.vae (f32) or song.nac8 (Q8) or song.nac4 (Q4)
+               song.vae -> song.wav
 
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 1024)
   --vae-overlap <N>       Overlap frames per side (default: 64)
 
 Latent formats (decode auto-detects):
-  f32:  flat [T, 64] f32, no header. ~51 kbit/s.
-  NAC8: header + per-frame Q8. ~13 kbit/s.
-  NAC4: header + per-frame Q4. ~6.8 kbit/s.
+  .vae:  flat [T, 64] f32, no header. ~51 kbit/s.
+  .nac8: header + per-frame Q8. ~13 kbit/s.
+  .nac4: header + per-frame Q4. ~6.8 kbit/s.
 ```
 
 The encoder is the symmetric mirror of the decoder: same snake activations,
@@ -1025,14 +1039,16 @@ conv1d for upsampling. No new GGML ops. Downsample 2x4x4x6x10 = 1920x.
 48kHz stereo audio is compressed to 64-dimensional latent frames at 25 Hz.
 Three output formats, decode auto-detects from file content:
 
-| Format | Frame size | Bitrate | 3 min song | vs f32 (cossim) |
-|--------|-----------|---------|------------|-----------------|
-| f32    | 256B      | 51 kbit/s | 1.1 MB   | baseline        |
-| NAC8   | 66B       | 13 kbit/s | 290 KB   | 0.9999          |
-| NAC4   | 34B       | 6.8 kbit/s | 150 KB  | 0.989           |
+| Format | Frame size | Bitrate | 3 min song | vs .vae (cossim) |
+|--------|-----------|---------|------------|------------------|
+| .vae   | 256B      | 51 kbit/s | 1.1 MB   | baseline         |
+| .nac8  | 66B       | 13 kbit/s | 290 KB   | 0.9999           |
+| .nac4  | 34B       | 6.8 kbit/s | 150 KB  | 0.989            |
 
-NAC = Neural Audio Codec. The NAC8 and NAC4 file formats are headerless
-except for a 4-byte magic (`NAC8` or `NAC4`) and a uint32 frame count.
+NAC = Neural Audio Codec. The .nac8 and .nac4 file formats are headerless
+except for a 4-byte magic (`NAC8` or `NAC4`) and a uint32 frame count. The
+.vae file is the raw VAE encoder output (flat f32, no header), the same
+byte payload the HTTP API exchanges as latent multipart parts.
 Q8 quantization error is 39 dB below the VAE reconstruction error (free).
 Q4 quantization error is 16 dB below the VAE reconstruction error (inaudible
 on most material).

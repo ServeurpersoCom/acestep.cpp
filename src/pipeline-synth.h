@@ -55,6 +55,10 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params);
 //   The first request (reqs[0]) is used for shared params (mode, duration, DiT settings).
 //   seed must be resolved (non-negative) before calling this function.
 // src_audio / ref_audio: interleaved stereo 48kHz buffers, NULL when not applicable.
+// src_latents / ref_latents: pre-encoded latents [T_latent * 64] f32 alternative
+//   to the matching audio buffer. When non-NULL, the corresponding VAE encoder
+//   pass is skipped. Mutually exclusive per side: when both audio and latents
+//   are provided for the same side, latents win and audio is ignored.
 // batch_n: number of requests (1..9).
 // cancel/cancel_data: abort callback, polled between DiT steps. NULL = never cancel.
 // Returns NULL on error or cancellation.
@@ -62,11 +66,22 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     const AceRequest * reqs,
                                     const float *      src_audio,
                                     int                src_len,
+                                    const float *      src_latents,
+                                    int                src_T_latent,
                                     const float *      ref_audio,
                                     int                ref_len,
+                                    const float *      ref_latents,
+                                    int                ref_T_latent,
                                     int                batch_n,
                                     bool (*cancel)(void *) = nullptr,
                                     void * cancel_data     = nullptr);
+
+// Access the cover latents captured during Phase 1, regardless of how they
+// were obtained (VAE-encoded from src_audio or fed directly via src_latents).
+// Returns the [T_latent * 64] f32 buffer owned by the job, or NULL if the
+// task did not produce cover latents (e.g. text2music). T_latent is written
+// to *T_out when the pointer is non-NULL.
+const float * ace_synth_job_get_latents(const AceSynthJob * job, int * T_out);
 
 // Phase 2: VAE decode and waveform splice. Acquires the VAE decoder and FSQ
 // detokenizer from the store; in STRICT this evicts the DiT from phase 1

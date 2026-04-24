@@ -93,15 +93,26 @@ AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParam
     return ctx;
 }
 
-int ace_understand_generate(AceUnderstand *    ctx,
-                            const float *      src_audio,
-                            int                src_len,
-                            const AceRequest * req,
-                            AceRequest *       out,
+int ace_understand_generate(AceUnderstand *      ctx,
+                            const float *        src_audio,
+                            int                  src_len,
+                            const float *        src_latents,
+                            int                  src_T_latent,
+                            const AceRequest *   req,
+                            AceRequest *         out,
+                            std::vector<float> * latent_out,
+                            int *                T_latent_out,
                             bool (*cancel)(void *),
                             void * cancel_data) {
     if (!ctx || !req || !out) {
         return -1;
+    }
+
+    if (latent_out) {
+        latent_out->clear();
+    }
+    if (T_latent_out) {
+        *T_latent_out = 0;
     }
 
     Timer t_total;
@@ -117,36 +128,61 @@ int ace_understand_generate(AceUnderstand *    ctx,
 
     std::vector<int> codes;
 
-    // Step 1: audio -> latents -> codes (VAE encode + FSQ tokenize).
-    if (!src_audio || src_len <= 0) {
-        fprintf(stderr, "[Understand] ERROR: src_audio is required\n");
+    // Step 1: produce 25Hz latents [T_25Hz, 64]. Two paths converge here:
+    // pre-encoded latents come from a previous run (or any client cache)
+    // and skip the VAE encoder entirely; raw audio takes the encoder path,
+    // acquiring VAE-Enc just for this step. Latents win when both are set.
+    bool have_latents = (src_latents && src_T_latent > 0);
+    bool have_audio   = (src_audio && src_len > 0);
+    if (!have_latents && !have_audio) {
+        fprintf(stderr, "[Understand] ERROR: src_audio or src_latents is required\n");
         return -1;
     }
 
-    // VAE encode: audio -> latents [T_25Hz, 64]. VAE-Enc lives only for
-    // this step: acquire, encode, release so the store can free it before
-    // the tokenizer comes in (STRICT) or keep it resident (NEVER).
-    Timer              t_vae;
-    int                max_T_lat = (src_len / 1920) + 64;
-    std::vector<float> latents((size_t) max_T_lat * 64);
+    std::vector<float> latents;
+    int                T_25Hz = 0;
+    if (have_latents) {
+        latents.assign(src_latents, src_latents + (size_t) src_T_latent * 64);
+        T_25Hz = src_T_latent;
+        fprintf(stderr, "[Understand-VAE] Latents in: %d frames (%.2fs), VAE encode skipped\n", T_25Hz,
+                (float) T_25Hz * 1920.0f / 48000.0f);
+    } else {
+        // VAE encode: audio -> latents [T_25Hz, 64]. VAE-Enc lives only for
+        // this step: acquire, encode, release so the store can free it before
+        // the tokenizer comes in (STRICT) or keep it resident (NEVER).
+        Timer t_vae;
+        int   max_T_lat = (src_len / 1920) + 64;
+        latents.assign((size_t) max_T_lat * 64, 0.0f);
 
-    VAEEncoder * vae_enc = store_require_vae_enc(ctx->store, ctx->vae_enc_key);
-    if (!vae_enc) {
-        fprintf(stderr, "[Understand-VAE] FATAL: store_require_vae_enc failed\n");
-        return -1;
+        VAEEncoder * vae_enc = store_require_vae_enc(ctx->store, ctx->vae_enc_key);
+        if (!vae_enc) {
+            fprintf(stderr, "[Understand-VAE] FATAL: store_require_vae_enc failed\n");
+            return -1;
+        }
+        {
+            ModelHandle vae_guard(ctx->store, vae_enc);
+            T_25Hz = vae_enc_encode_tiled(vae_enc, src_audio, src_len, latents.data(), max_T_lat, ctx->params.vae_chunk,
+                                          ctx->params.vae_overlap);
+        }
+        if (T_25Hz < 0) {
+            fprintf(stderr, "[Understand-VAE] FATAL: encode failed\n");
+            return -1;
+        }
+        fprintf(stderr, "[Understand-VAE] Encoded: %d latent frames (%.2fs), %.0fms\n", T_25Hz,
+                (float) T_25Hz * 1920.0f / 48000.0f, t_vae.ms());
     }
-    int T_25Hz;
-    {
-        ModelHandle vae_guard(ctx->store, vae_enc);
-        T_25Hz = vae_enc_encode_tiled(vae_enc, src_audio, src_len, latents.data(), max_T_lat, ctx->params.vae_chunk,
-                                      ctx->params.vae_overlap);
+
+    // Expose freshly encoded latents to the caller. When the client supplied
+    // src_latents we skip the capture: the buffer is byte-identical to what
+    // it just uploaded, sending it back would waste RAM and bandwidth on
+    // every side. Capture only happens on the audio-in path where the
+    // latent is the new piece of information the encoder produced.
+    if (latent_out && !have_latents) {
+        latent_out->assign(latents.data(), latents.data() + (size_t) T_25Hz * 64);
     }
-    if (T_25Hz < 0) {
-        fprintf(stderr, "[Understand-VAE] FATAL: encode failed\n");
-        return -1;
+    if (T_latent_out && !have_latents) {
+        *T_latent_out = T_25Hz;
     }
-    fprintf(stderr, "[Understand-VAE] Encoded: %d latent frames (%.2fs), %.0fms\n", T_25Hz,
-            (float) T_25Hz * 1920.0f / 48000.0f, t_vae.ms());
 
     // FSQ tokenize: latents [T_25Hz, 64] -> codes [T_5Hz].
     // silence comes from the store's CPU cache of the DiT GGUF.

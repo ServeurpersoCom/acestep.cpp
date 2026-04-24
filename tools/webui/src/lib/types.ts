@@ -73,4 +73,9 @@ export interface Song {
 	duration: number;
 	request: AceRequest;
 	audio: Blob;
+	// raw f32 [T*64] cover latents captured by the server alongside the audio.
+	// Optional: text2music without source codes does not produce them. When
+	// present, the client uploads them instead of audio on subsequent jobs
+	// that reuse this song as src or ref, skipping a VAE encode each time.
+	latents?: Blob;
 }

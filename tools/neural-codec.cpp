@@ -1,26 +1,26 @@
 // neural-codec.cpp: neural audio codec (Oobleck VAE)
 //
 // 2 modes:
-//   encode: WAV -> latent file (f32, Q8, or Q4)
+//   encode: WAV -> latent file (.vae, .nac8, or .nac4)
 //   decode: latent file -> WAV (48kHz stereo)
 //
 // Three latent formats, decode auto-detects:
 //
-//   f32 (default): flat [T, 64] f32, no header.
+//   .vae (default): flat [T, 64] f32, no header.
 //     T = file_size / 256. 25Hz, ~6.4 KB/s, ~51 kbit/s.
 //
-//   Q8 (--q8): symmetric per-frame int8 quantization.
+//   .nac8 (--q8): symmetric per-frame int8 quantization.
 //     header: "NAC8" magic (4B) + uint32 T_latent (4B)
 //     frame:  f16 scale (2B) + int8[64] (64B) = 66B
 //     25Hz, ~1.6 KB/s, ~13 kbit/s.
 //
-//   Q4 (--q4): symmetric per-frame 4-bit quantization.
+//   .nac4 (--q4): symmetric per-frame 4-bit quantization.
 //     header: "NAC4" magic (4B) + uint32 T_latent (4B)
 //     frame:  f16 scale (2B) + nibbles[32] (32B) = 34B
 //     25Hz, ~850 B/s, ~6.8 kbit/s.
 //
 // Usage:
-//   neural-codec --vae model.gguf --encode -i song.wav -o song.latent
+//   neural-codec --vae model.gguf --encode -i song.wav -o song.vae
 //   neural-codec --vae model.gguf --encode --q8 -i song.wav -o song.nac8
 //   neural-codec --vae model.gguf --encode --q4 -i song.wav -o song.nac4
 //   neural-codec --vae model.gguf --decode -i song.nac4 -o song.wav
@@ -332,15 +332,15 @@ static void print_usage(const char * prog) {
             "  --q8                    Quantize latent to int8 (~13 kbit/s)\n"
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n"
             "  --format <fmt>          WAV format: wav16, wav24, wav32 (default: wav16)\n\n"
-            "Output naming: song.wav -> song.latent (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
-            "               song.latent -> song.wav\n\n"
+            "Output naming: song.wav -> song.vae (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
+            "               song.vae -> song.wav\n\n"
             "Memory control:\n"
             "  --vae-chunk <N>         Latent frames per tile (default: 1024)\n"
             "  --vae-overlap <N>       Overlap frames per side (default: 64)\n\n"
             "Latent formats (decode auto-detects):\n"
-            "  f32:  flat [T, 64] f32, no header. ~51 kbit/s.\n"
-            "  NAC8: header + per-frame Q8. ~13 kbit/s.\n"
-            "  NAC4: header + per-frame Q4. ~6.8 kbit/s.\n",
+            "  .vae:  flat [T, 64] f32, no header. ~51 kbit/s.\n"
+            "  .nac8: header + per-frame Q8. ~13 kbit/s.\n"
+            "  .nac4: header + per-frame Q4. ~6.8 kbit/s.\n",
             prog);
 }
 
@@ -408,11 +408,12 @@ int main(int argc, char ** argv) {
         return 1;
     }
 
-    // Auto output names
+    // Auto output names. f32 dumps land as .vae since they are the raw VAE
+    // encoder output with no codec applied; nac8/nac4 keep their codec name.
     std::string out_str;
     if (!output_path) {
         if (mode == 0) {
-            const char * ext = ".latent";
+            const char * ext = ".vae";
             if (quant == 8) {
                 ext = ".nac8";
             }

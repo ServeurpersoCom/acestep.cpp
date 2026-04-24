@@ -1,11 +1,18 @@
 <script lang="ts">
-	import { Play, Square, Pencil, Ear, Download, Trash2 } from '@lucide/svelte';
+	import { Play, Square, Pencil, Ear, Download, Cpu, Trash2, ChevronDown } from '@lucide/svelte';
 	import { app, setRequest, toast } from '../lib/state.svelte.js';
 	import { deleteSong } from '../lib/db.js';
-	import { understandSubmit, pollJob, jobResultJson } from '../lib/api.js';
-	import { saveJob, clearJob } from '../lib/db.js';
+	import {
+		understandSubmit,
+		vaeEncode,
+		pollJob,
+		jobResultUnderstand,
+		jobResultLatents
+	} from '../lib/api.js';
+	import { saveJob, clearJob, putSong } from '../lib/db.js';
 	import type { Song } from '../lib/types.js';
 	import Waveform from './Waveform.svelte';
+	import Menu, { type MenuItem } from './Menu.svelte';
 
 	let { song }: { song: Song } = $props();
 
@@ -76,23 +83,57 @@
 
 	// analyze audio: send to /understand, fill form with detected metadata.
 	// persists the job under 'lm' key so page reload resumes polling.
+	// Uploads the cached cover latents when present so the server skips the
+	// VAE encode. Understand is the canonical "complete this raw audio" op:
+	// the source card is enriched in place with both outputs the server
+	// produced for it, the latents that fed the FSQ tokenizer and the
+	// detected metadata (caption, lyrics, codes, bpm, ...). Cover and synth
+	// keep their "always create a new card" contract; only understand
+	// touches an existing card and only the very one it analyzed.
 	async function scan() {
 		scanning = true;
 		try {
 			const jobId = await understandSubmit(
-				song.audio,
+				song.latents ? null : song.audio,
+				song.latents ?? null,
 				app.request.lm_model as string,
 				app.request.synth_model as string
 			);
 			saveJob('lm', jobId);
 			await pollJob(jobId);
-			const results = await jobResultJson(jobId);
+			const { requests, latents } = await jobResultUnderstand(jobId);
 			clearJob('lm');
-			app.name = song.name;
-			if (results.length > 0) {
-				setRequest(results[0]);
+			if (song.id != null) {
+				const newLatents = latents ?? song.latents ?? undefined;
+				const newRequest =
+					requests.length > 0 && !song.request.caption ? requests[0] : { ...song.request };
+				const dirty = newLatents !== song.latents || newRequest !== song.request;
+				if (dirty) {
+					// Rebuild a plain object: $props in Svelte 5 are Proxies and
+					// IndexedDB structuredClone refuses Proxies. Listing fields by
+					// hand also avoids cloning the audio Blob, which is large.
+					const enriched: Song = {
+						id: song.id,
+						name: song.name,
+						format: song.format,
+						created: song.created,
+						caption: newRequest.caption ?? song.caption,
+						seed: newRequest.seed ?? song.seed,
+						duration: newRequest.duration ?? song.duration,
+						request: newRequest,
+						audio: song.audio,
+						...(newLatents ? { latents: newLatents } : {})
+					};
+					await putSong(enriched);
+					if (latents) song.latents = latents;
+					if (newRequest !== song.request) song.request = newRequest;
+				}
 			}
-			app.pendingRequests = results;
+			app.name = song.name;
+			if (requests.length > 0) {
+				setRequest(requests[0]);
+			}
+			app.pendingRequests = requests;
 			app.pendingIndex = 0;
 		} catch (e: unknown) {
 			toast(e instanceof Error ? e.message : String(e));
@@ -110,6 +151,56 @@
 		a.download = `${safe}${ext}`;
 		a.click();
 		URL.revokeObjectURL(url);
+	}
+
+	// Download the cached latents blob as a .vae file. Symmetric to
+	// downloadAudio: the .vae plays back via Open (POST /vae decode path)
+	// or feeds a future synth/understand call as src_latents, skipping the
+	// VAE encode on reuse.
+	function downloadLatents() {
+		if (!song.latents) return;
+		const url = URL.createObjectURL(song.latents);
+		const a = document.createElement('a');
+		a.href = url;
+		const safe = song.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'song';
+		a.download = `${safe}.vae`;
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
+	// VAE-only scan: POST /vae with the source audio (encode path), attach
+	// the fresh latents to the card non-destructively. Plain-object rebuild
+	// like scan() to dodge Svelte 5 Proxy + IndexedDB structuredClone, minus
+	// the LM roundtrip. Ideal for priming a cover/repaint target without
+	// paying the LM cost just to get the [VAE] badge lit.
+	async function encodeOnly() {
+		if (song.latents || song.id == null) return;
+		scanning = true;
+		try {
+			const jobId = await vaeEncode(song.audio);
+			saveJob('lm', jobId);
+			await pollJob(jobId);
+			const latents = await jobResultLatents(jobId);
+			clearJob('lm');
+			const enriched: Song = {
+				id: song.id,
+				name: song.name,
+				format: song.format,
+				created: song.created,
+				caption: song.caption,
+				seed: song.seed,
+				duration: song.duration,
+				request: { ...song.request },
+				audio: song.audio,
+				latents
+			};
+			await putSong(enriched);
+			song.latents = latents;
+		} catch (e: unknown) {
+			toast(e instanceof Error ? e.message : String(e));
+		} finally {
+			scanning = false;
+		}
 	}
 
 	async function remove() {
@@ -141,6 +232,24 @@
 		const sec = Math.floor(s % 60);
 		return String(m).padStart(2, '0') + ':' + String(sec).padStart(2, '0');
 	}
+
+	// Single action menu: one entry per user intent. Order mirrors a natural
+	// flow (tweak prompt -> grab audio -> work with latents -> inspect -> destroy).
+	// Delete relies on "open menu + pick Confirm" as a lightweight
+	// confirmation step, no modal needed.
+	const actionItems: MenuItem[] = $derived([
+		{ icon: Pencil, label: 'Edit prompt', onSelect: load },
+		{ icon: Download, label: 'Download audio', onSelect: downloadAudio },
+		{ icon: Cpu, label: 'Compute VAE latents', onSelect: encodeOnly, disabled: !!song.latents },
+		{
+			icon: Download,
+			label: 'Download VAE latents',
+			onSelect: downloadLatents,
+			disabled: !song.latents
+		},
+		{ icon: Ear, label: 'LM understand', onSelect: scan },
+		{ icon: Trash2, label: 'Delete track', onSelect: remove }
+	]);
 </script>
 
 <div class="card">
@@ -153,15 +262,9 @@
 			{/if}
 		</button>
 		<span class="card-name">{song.name}</span>
-		<div class="card-actions">
-			<button class="icon-btn" onclick={load} title="Edit prompt"><Pencil size={14} /> Edit</button>
-			<button class="icon-btn" onclick={downloadAudio} title="Download track"
-				><Download size={14} /> Down</button
-			>
-			<button class="icon-btn" onclick={remove} title="Delete track"
-				><Trash2 size={14} /> Del</button
-			>
-		</div>
+		<Menu items={actionItems}>
+			{#snippet trigger()}<ChevronDown size={14} /> Menu{/snippet}
+		</Menu>
 	</div>
 	<Waveform
 		audio={song.audio}
@@ -174,11 +277,11 @@
 	/>
 	<div class="card-footer">
 		<span class="format-badge">{song.format.toUpperCase()}</span>
+		{#if song.latents}
+			<span class="format-badge">VAE</span>
+		{/if}
 		<span class="timecode">{fmtPos(time)} / {fmtDur(dur)}</span>
 		<div class="card-actions">
-			<button class="icon-btn" onclick={scan} disabled={scanning} title="Analyze audio"
-				><Ear size={14} /> Scan</button
-			>
 			<label class="icon-btn"
 				><input
 					type="checkbox"
@@ -186,7 +289,7 @@
 					checked={isSrc}
 					onchange={toggleSrc}
 					title="Source audio"
-				/> Src</label
+				/> Src audio</label
 			>
 			<label class="icon-btn"
 				><input
@@ -195,7 +298,7 @@
 					checked={isRef}
 					onchange={toggleRef}
 					title="Timbre reference"
-				/> Ref</label
+				/> Timbre ref</label
 			>
 		</div>
 	</div>

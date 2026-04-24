@@ -12,6 +12,7 @@
 		pollJob,
 		jobResultJson,
 		jobResultBlobs,
+		vaeDecode,
 		cancelJob
 	} from '../lib/api.js';
 	import { putSong, getAllSongs, saveJob, loadJob, loadJobId, clearJob } from '../lib/db.js';
@@ -160,10 +161,10 @@
 			busySynth = true;
 			pollJob(synthJob.id)
 				.then(() => jobResultBlobs(synthJob.id))
-				.then(async (blobs) => {
+				.then(async ({ audios, latents }) => {
 					clearJob('synth');
 					const now = Date.now();
-					for (let i = blobs.length - 1; i >= 0; i--) {
+					for (let i = audios.length - 1; i >= 0; i--) {
 						const t = synthJob.tracks[i] || {
 							caption: '',
 							seed: 0,
@@ -180,7 +181,8 @@
 							seed: t.seed,
 							duration: t.duration,
 							request: t.request,
-							audio: blobs[i]
+							audio: audios[i],
+							...(latents ? { latents } : {})
 						};
 						await putSong(song);
 					}
@@ -250,6 +252,13 @@
 			return;
 		}
 
+		// VAE latents: decode through /vae to obtain the audio, create a
+		// card already populated with both blobs (latents badge lit on day one).
+		if (ext === 'vae') {
+			openLatents(file);
+			return;
+		}
+
 		toast('Unsupported file type: ' + ext);
 	}
 
@@ -274,6 +283,48 @@
 		app.songs.unshift(song);
 		app.name = name;
 		toast('Opened: ' + name, 4000, true);
+	}
+
+	// open VAE latents file: validate framing client-side, post to /vae
+	// to render the audio, then create a card with both blobs ready to use.
+	// Same final shape as openAudio plus the latents attached, so cover-nofsq
+	// against this card skips the VAE encode from the very first run.
+	async function openLatents(file: File) {
+		const buf = await file.arrayBuffer();
+		if (buf.byteLength === 0 || buf.byteLength % 256 !== 0) {
+			toast('Invalid .vae file: size must be a multiple of 256 bytes (64 channels x f32)');
+			return;
+		}
+		const T = buf.byteLength / 256;
+		if (T > 15000) {
+			toast('Invalid .vae file: too long (max 15000 frames = 10 min)');
+			return;
+		}
+		const latentsBlob = new Blob([buf], { type: 'application/octet-stream' });
+		const name = file.name.replace(/\.vae$/i, '') || 'Imported';
+		try {
+			const jobId = await vaeDecode(latentsBlob, app.format);
+			await pollJob(jobId);
+			const { audios } = await jobResultBlobs(jobId);
+			if (!audios.length) throw new Error('Decode returned no audio');
+			const song: Song = {
+				name,
+				format: app.format,
+				created: Date.now(),
+				caption: '',
+				seed: 0,
+				duration: 0,
+				request: { caption: '' },
+				audio: audios[0],
+				latents: latentsBlob
+			};
+			song.id = await putSong(song);
+			app.songs.unshift(song);
+			app.name = name;
+			toast('Opened: ' + name, 4000, true);
+		} catch (e: unknown) {
+			toast(e instanceof Error ? e.message : String(e));
+		}
 	}
 
 	// snapshot app.request into a clean AceRequest with proper types.
@@ -398,13 +449,18 @@
 			const variant = vm ? vm[1] : '';
 			const baseName = app.name || 'Untitled';
 
-			// submit job, poll until done, fetch result
+			// submit job, poll until done, fetch result. When the source song
+			// or timbre reference already carries cached cover latents, we
+			// upload those instead of the audio: the server skips the matching
+			// VAE encode entirely.
 			const jobId =
 				srcSong || refSong
 					? await synthSubmitWithAudio(
 							toSend,
-							srcSong?.audio ?? null,
-							refSong?.audio ?? null,
+							srcSong?.latents ? null : (srcSong?.audio ?? null),
+							srcSong?.latents ?? null,
+							refSong?.latents ? null : (refSong?.audio ?? null),
+							refSong?.latents ?? null,
 							app.format
 						)
 					: await synthSubmit(toSend, app.format);
@@ -422,12 +478,12 @@
 				}))
 			});
 			await pollJob(jobId);
-			const blobs = await jobResultBlobs(jobId);
+			const { audios, latents } = await jobResultBlobs(jobId);
 			clearJob('synth');
 
 			const now = Date.now();
 
-			for (let i = blobs.length - 1; i >= 0; i--) {
+			for (let i = audios.length - 1; i >= 0; i--) {
 				const r = expanded[i];
 				const task = r.task_type || 'text2music';
 				const suffix = [variant, task].filter((s) => s).join(' ');
@@ -439,7 +495,8 @@
 					seed: r.seed || 0,
 					duration: r.duration || 0,
 					request: r,
-					audio: blobs[i]
+					audio: audios[i],
+					...(latents ? { latents } : {})
 				} as Song;
 				song.id = await putSong(song);
 				app.songs.unshift(song);
@@ -475,13 +532,13 @@
 <form class="request-form" onsubmit={(e) => e.preventDefault()}>
 	<input
 		type="file"
-		accept=".json,.mp3,.wav"
+		accept=".json,.mp3,.wav,.vae"
 		bind:this={fileInput}
 		onchange={onFileSelected}
 		hidden
 	/>
 	<div class="toolbar">
-		<button type="button" onclick={importJson} title="Open JSON prompt, MP3 or WAV"
+		<button type="button" onclick={importJson} title="Open JSON prompt, MP3, WAV or VAE latents"
 			><FolderOpen size={14} /> Open</button
 		>
 		<button type="button" onclick={exportJson} title="Save JSON prompt"

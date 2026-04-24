@@ -7,6 +7,8 @@
 
 #include "request.h"
 
+#include <vector>
+
 struct AceUnderstand;
 struct ModelStore;
 
@@ -32,19 +34,35 @@ void ace_understand_default_params(AceUnderstandParams * p);
 AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParams * params);
 
 // Run the understand pipeline.
-// src_audio: interleaved stereo 48kHz [L0,R0,L1,R1,...]. Required.
+// src_audio: interleaved stereo 48kHz [L0,R0,L1,R1,...]. Required when
+//   src_latents is NULL.
 // src_len: samples per channel.
+// src_latents: pre-encoded latents [src_T_latent * 64] f32 alternative to
+//   src_audio. When non-NULL, the VAE encoder pass is skipped and these
+//   latents are fed directly into the FSQ tokenizer. Mutually exclusive
+//   with src_audio: when both are provided, src_latents wins.
 // req: sampling params (temperature, top_p, top_k, seed).
 // out: filled with caption, lyrics, metadata, audio_codes, DiT defaults.
+// latent_out / T_latent_out: optional capture of the latents that fed the
+//   FSQ tokenizer when produced by the VAE encoder. Skipped when the
+//   client supplied src_latents: the buffer would be byte-identical to
+//   what was just uploaded, no point shipping it back. Pass NULL to skip
+//   the capture. On the audio-in path, the buffer is filled (assigned)
+//   with [T_latent * 64] f32 and *T_latent_out is set; on any error path
+//   before tokenize, the buffer is left empty.
 // cancel/cancel_data: abort callback, polled between tokens. NULL = never cancel.
 // Returns 0 on success, -1 on error or cancellation.
-int ace_understand_generate(AceUnderstand *    ctx,
-                            const float *      src_audio,
-                            int                src_len,
-                            const AceRequest * req,
-                            AceRequest *       out,
-                            bool (*cancel)(void *) = nullptr,
-                            void * cancel_data     = nullptr);
+int ace_understand_generate(AceUnderstand *      ctx,
+                            const float *        src_audio,
+                            int                  src_len,
+                            const float *        src_latents,
+                            int                  src_T_latent,
+                            const AceRequest *   req,
+                            AceRequest *         out,
+                            std::vector<float> * latent_out   = nullptr,
+                            int *                T_latent_out = nullptr,
+                            bool (*cancel)(void *)            = nullptr,
+                            void * cancel_data                = nullptr);
 
 void ace_understand_free(AceUnderstand * ctx);
 

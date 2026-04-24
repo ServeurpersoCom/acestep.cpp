@@ -199,33 +199,42 @@ static void warn_if_turbo_stem(const AceSynth * ctx, const char * task_name) {
 
 // Pin VAE-Enc across two back-to-back encodes (source then timbre) so STRICT
 // does not unload and reload the 160 MB weights between them. On return the
-// pin is released, VAE-Enc can be evicted by the next require. Tasks without
-// source audio pin only when ref_audio is present, or skip the pin entirely
-// when both are absent and timbre falls back to silence.
+// pin is released, VAE-Enc can be evicted by the next require. The pin is
+// only justified when at least one side actually goes through the encoder:
+// when both src and ref arrive as pre-encoded latents, no pin is needed.
 static bool pinned_encode_src_and_timbre(AceSynth *    ctx,
                                          const float * src_audio,
                                          int           src_len,
+                                         const float * src_latents,
+                                         int           src_T_latent,
                                          const float * ref_audio,
                                          int           ref_len,
+                                         const float * ref_latents,
+                                         int           ref_T_latent,
                                          SynthState &  s) {
-    bool have_src = src_audio && src_len > 0;
-    bool have_ref = ref_audio && ref_len > 0;
+    bool have_src_audio   = src_audio && src_len > 0;
+    bool have_src_latents = src_latents && src_T_latent > 0;
+    bool have_src         = have_src_audio || have_src_latents;
+    bool have_ref_audio   = ref_audio && ref_len > 0;
+    bool have_ref_latents = ref_latents && ref_T_latent > 0;
+    bool have_ref         = have_ref_audio || have_ref_latents;
     if (!have_src && !have_ref) {
         // Neither encode touches the GPU: timbre takes the silence path.
-        ops_encode_timbre(ctx, NULL, 0, s);
+        ops_encode_timbre(ctx, NULL, 0, NULL, 0, s);
         return true;
     }
-    ModelHandle vae_pin(ctx->store, store_require_vae_enc(ctx->store, ctx->vae_enc_key));
-    if (!vae_pin.ptr) {
+    bool        need_vae_pin = (have_src_audio || have_ref_audio);
+    ModelHandle vae_pin(ctx->store, need_vae_pin ? store_require_vae_enc(ctx->store, ctx->vae_enc_key) : NULL);
+    if (need_vae_pin && !vae_pin.ptr) {
         fprintf(stderr, "[Pipeline-Synth] FATAL: store_require_vae_enc (pin) failed\n");
         return false;
     }
     if (have_src) {
-        if (ops_encode_src(ctx, src_audio, src_len, s) != 0) {
+        if (ops_encode_src(ctx, src_audio, src_len, src_latents, src_T_latent, s) != 0) {
             return false;
         }
     }
-    ops_encode_timbre(ctx, ref_audio, ref_len, s);
+    ops_encode_timbre(ctx, ref_audio, ref_len, ref_latents, ref_T_latent, s);
     return true;
 }
 
@@ -265,6 +274,8 @@ static AceSynthJob * run_text2music(AceSynth *         ctx,
                                     const AceRequest * reqs,
                                     const float *      ref_audio,
                                     int                ref_len,
+                                    const float *      ref_latents,
+                                    int                ref_T_latent,
                                     int                batch_n,
                                     bool (*cancel)(void *),
                                     void * cancel_data) {
@@ -276,7 +287,7 @@ static AceSynthJob * run_text2music(AceSynth *         ctx,
     s.use_source_context = !reqs[0].audio_codes.empty();
     s.instruction_str    = s.use_source_context ? DIT_INSTR_COVER : DIT_INSTR_TEXT2MUSIC;
 
-    if (!pinned_encode_src_and_timbre(ctx, NULL, 0, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, NULL, 0, NULL, 0, ref_audio, ref_len, ref_latents, ref_T_latent, s)) {
         delete job;
         return NULL;
     }
@@ -293,13 +304,18 @@ static AceSynthJob * run_cover(AceSynth *         ctx,
                                const AceRequest * reqs,
                                const float *      src_audio,
                                int                src_len,
+                               const float *      src_latents,
+                               int                src_T_latent,
                                const float *      ref_audio,
                                int                ref_len,
+                               const float *      ref_latents,
+                               int                ref_T_latent,
                                int                batch_n,
                                bool (*cancel)(void *),
                                void * cancel_data) {
-    if (!src_audio || src_len <= 0) {
-        fprintf(stderr, "[Synth-Run] ERROR: task 'cover' requires source audio\n");
+    bool have_src = (src_audio && src_len > 0) || (src_latents && src_T_latent > 0);
+    if (!have_src) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'cover' requires source audio or latents\n");
         return NULL;
     }
     AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
@@ -307,7 +323,8 @@ static AceSynthJob * run_cover(AceSynth *         ctx,
     s.use_source_context = true;
     s.instruction_str    = DIT_INSTR_COVER;
 
-    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len,
+                                      ref_latents, ref_T_latent, s)) {
         delete job;
         return NULL;
     }
@@ -331,13 +348,18 @@ static AceSynthJob * run_cover_nofsq(AceSynth *         ctx,
                                      const AceRequest * reqs,
                                      const float *      src_audio,
                                      int                src_len,
+                                     const float *      src_latents,
+                                     int                src_T_latent,
                                      const float *      ref_audio,
                                      int                ref_len,
+                                     const float *      ref_latents,
+                                     int                ref_T_latent,
                                      int                batch_n,
                                      bool (*cancel)(void *),
                                      void * cancel_data) {
-    if (!src_audio || src_len <= 0) {
-        fprintf(stderr, "[Synth-Run] ERROR: task 'cover-nofsq' requires source audio\n");
+    bool have_src = (src_audio && src_len > 0) || (src_latents && src_T_latent > 0);
+    if (!have_src) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'cover-nofsq' requires source audio or latents\n");
         return NULL;
     }
     AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
@@ -345,7 +367,8 @@ static AceSynthJob * run_cover_nofsq(AceSynth *         ctx,
     s.use_source_context = true;
     s.instruction_str    = DIT_INSTR_COVER;
 
-    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len,
+                                      ref_latents, ref_T_latent, s)) {
         delete job;
         return NULL;
     }
@@ -359,15 +382,27 @@ static AceSynthJob * run_cover_nofsq(AceSynth *         ctx,
 // repaint: region-bounded inpaint/outpaint. Source audio is padded with
 // silence when the region extends beyond its bounds. The DiT regenerates
 // inside the region, phase 2 wav-splices the result back into the source.
+// Latents-only input is not supported: outpainting needs raw audio to pad
+// and the phase-2 splice rebuilds the waveform around the regenerated zone.
 static AceSynthJob * run_repaint(AceSynth *         ctx,
                                  const AceRequest * reqs,
                                  const float *      src_audio,
                                  int                src_len,
+                                 const float *      src_latents,
+                                 int                src_T_latent,
                                  const float *      ref_audio,
                                  int                ref_len,
+                                 const float *      ref_latents,
+                                 int                ref_T_latent,
                                  int                batch_n,
                                  bool (*cancel)(void *),
                                  void * cancel_data) {
+    if (src_latents && src_T_latent > 0) {
+        fprintf(stderr,
+                "[Synth-Run] ERROR: task 'repaint' requires src_audio (outpainting and splice), src_latents not "
+                "supported\n");
+        return NULL;
+    }
     if (!src_audio || src_len <= 0) {
         fprintf(stderr, "[Synth-Run] ERROR: task 'repaint' requires source audio\n");
         return NULL;
@@ -382,7 +417,8 @@ static AceSynthJob * run_repaint(AceSynth *         ctx,
     int           enc_len   = 0;
     apply_outpainting_padding(reqs[0], src_audio, src_len, s, enc_audio, enc_len);
 
-    if (!pinned_encode_src_and_timbre(ctx, enc_audio, enc_len, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, enc_audio, enc_len, NULL, 0, ref_audio, ref_len, ref_latents, ref_T_latent,
+                                      s)) {
         delete job;
         return NULL;
     }
@@ -400,15 +436,27 @@ static AceSynthJob * run_repaint(AceSynth *         ctx,
 // lego: stem generation. With valid rs/re: region-constrained, DiT generates
 // only in the zone with full audio context. Without: whole-song generation.
 // audio_cover_strength forced to 1.0 so all DiT steps hear the backing track.
+// Latents-only input is not supported: in region mode outpainting needs raw
+// audio, and phase-2 splice rebuilds the waveform around the generated stem.
 static AceSynthJob * run_lego(AceSynth *         ctx,
                               const AceRequest * reqs,
                               const float *      src_audio,
                               int                src_len,
+                              const float *      src_latents,
+                              int                src_T_latent,
                               const float *      ref_audio,
                               int                ref_len,
+                              const float *      ref_latents,
+                              int                ref_T_latent,
                               int                batch_n,
                               bool (*cancel)(void *),
                               void * cancel_data) {
+    if (src_latents && src_T_latent > 0) {
+        fprintf(
+            stderr,
+            "[Synth-Run] ERROR: task 'lego' requires src_audio (outpainting and splice), src_latents not supported\n");
+        return NULL;
+    }
     if (!src_audio || src_len <= 0) {
         fprintf(stderr, "[Synth-Run] ERROR: task 'lego' requires source audio\n");
         return NULL;
@@ -428,7 +476,8 @@ static AceSynthJob * run_lego(AceSynth *         ctx,
         apply_outpainting_padding(reqs[0], src_audio, src_len, s, enc_audio, enc_len);
     }
 
-    if (!pinned_encode_src_and_timbre(ctx, enc_audio, enc_len, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, enc_audio, enc_len, NULL, 0, ref_audio, ref_len, ref_latents, ref_T_latent,
+                                      s)) {
         delete job;
         return NULL;
     }
@@ -448,13 +497,18 @@ static AceSynthJob * run_extract(AceSynth *         ctx,
                                  const AceRequest * reqs,
                                  const float *      src_audio,
                                  int                src_len,
+                                 const float *      src_latents,
+                                 int                src_T_latent,
                                  const float *      ref_audio,
                                  int                ref_len,
+                                 const float *      ref_latents,
+                                 int                ref_T_latent,
                                  int                batch_n,
                                  bool (*cancel)(void *),
                                  void * cancel_data) {
-    if (!src_audio || src_len <= 0) {
-        fprintf(stderr, "[Synth-Run] ERROR: task 'extract' requires source audio\n");
+    bool have_src = (src_audio && src_len > 0) || (src_latents && src_T_latent > 0);
+    if (!have_src) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'extract' requires source audio or latents\n");
         return NULL;
     }
     AceSynthJob * job       = alloc_job(ctx, reqs, batch_n);
@@ -465,7 +519,8 @@ static AceSynthJob * run_extract(AceSynth *         ctx,
     fprintf(stderr, "[Synth-Run] task=%s\n", reqs[0].task_type.c_str());
     warn_if_turbo_stem(ctx, "extract");
 
-    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len,
+                                      ref_latents, ref_T_latent, s)) {
         delete job;
         return NULL;
     }
@@ -481,13 +536,18 @@ static AceSynthJob * run_complete(AceSynth *         ctx,
                                   const AceRequest * reqs,
                                   const float *      src_audio,
                                   int                src_len,
+                                  const float *      src_latents,
+                                  int                src_T_latent,
                                   const float *      ref_audio,
                                   int                ref_len,
+                                  const float *      ref_latents,
+                                  int                ref_T_latent,
                                   int                batch_n,
                                   bool (*cancel)(void *),
                                   void * cancel_data) {
-    if (!src_audio || src_len <= 0) {
-        fprintf(stderr, "[Synth-Run] ERROR: task 'complete' requires source audio\n");
+    bool have_src = (src_audio && src_len > 0) || (src_latents && src_T_latent > 0);
+    if (!have_src) {
+        fprintf(stderr, "[Synth-Run] ERROR: task 'complete' requires source audio or latents\n");
         return NULL;
     }
     AceSynthJob * job       = alloc_job(ctx, reqs, batch_n);
@@ -498,7 +558,8 @@ static AceSynthJob * run_complete(AceSynth *         ctx,
     fprintf(stderr, "[Synth-Run] task=%s\n", reqs[0].task_type.c_str());
     warn_if_turbo_stem(ctx, "complete");
 
-    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, ref_audio, ref_len, s)) {
+    if (!pinned_encode_src_and_timbre(ctx, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len,
+                                      ref_latents, ref_T_latent, s)) {
         delete job;
         return NULL;
     }
@@ -516,8 +577,12 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     const AceRequest * reqs,
                                     const float *      src_audio,
                                     int                src_len,
+                                    const float *      src_latents,
+                                    int                src_T_latent,
                                     const float *      ref_audio,
                                     int                ref_len,
+                                    const float *      ref_latents,
+                                    int                ref_T_latent,
                                     int                batch_n,
                                     bool (*cancel)(void *),
                                     void * cancel_data) {
@@ -526,28 +591,50 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
     }
     const std::string & task = reqs[0].task_type;
     if (task == TASK_TEXT2MUSIC) {
-        return run_text2music(ctx, reqs, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_text2music(ctx, reqs, ref_audio, ref_len, ref_latents, ref_T_latent, batch_n, cancel, cancel_data);
     }
     if (task == TASK_COVER) {
-        return run_cover(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_cover(ctx, reqs, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len, ref_latents,
+                         ref_T_latent, batch_n, cancel, cancel_data);
     }
     if (task == TASK_COVER_NOFSQ) {
-        return run_cover_nofsq(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_cover_nofsq(ctx, reqs, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len,
+                               ref_latents, ref_T_latent, batch_n, cancel, cancel_data);
     }
     if (task == TASK_REPAINT) {
-        return run_repaint(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_repaint(ctx, reqs, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len, ref_latents,
+                           ref_T_latent, batch_n, cancel, cancel_data);
     }
     if (task == TASK_LEGO) {
-        return run_lego(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_lego(ctx, reqs, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len, ref_latents,
+                        ref_T_latent, batch_n, cancel, cancel_data);
     }
     if (task == TASK_EXTRACT) {
-        return run_extract(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_extract(ctx, reqs, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len, ref_latents,
+                           ref_T_latent, batch_n, cancel, cancel_data);
     }
     if (task == TASK_COMPLETE) {
-        return run_complete(ctx, reqs, src_audio, src_len, ref_audio, ref_len, batch_n, cancel, cancel_data);
+        return run_complete(ctx, reqs, src_audio, src_len, src_latents, src_T_latent, ref_audio, ref_len, ref_latents,
+                            ref_T_latent, batch_n, cancel, cancel_data);
     }
     fprintf(stderr, "[Synth-Run] ERROR: unknown task_type '%s'\n", task.c_str());
     return NULL;
+}
+
+// Expose cover latents to the caller. Owned by the job, valid until
+// ace_synth_job_free. Returns NULL when the task did not produce cover
+// latents (text2music without source, or any error path before encode).
+const float * ace_synth_job_get_latents(const AceSynthJob * job, int * T_out) {
+    if (!job || !job->state.have_cover || job->state.T_cover <= 0) {
+        if (T_out) {
+            *T_out = 0;
+        }
+        return NULL;
+    }
+    if (T_out) {
+        *T_out = job->state.T_cover;
+    }
+    return job->state.cover_latents.data();
 }
 
 // Phase 2: VAE decode all batch items and apply waveform splice for

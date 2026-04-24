@@ -113,16 +113,28 @@ Debug:
 <details>
 <summary>API endpoints</summary>
 
-The server exposes three POST endpoints and two GET endpoints:
+The server exposes four POST endpoints and two GET endpoints:
 
 **POST /lm** - Generate lyrics and audio codes from a caption. Returns JSON.
 
 **POST /synth** - Render audio codes into MP3 or WAV (selected by the
 `output_format` field in the request JSON). Accepts JSON or multipart
-(with source audio for cover/repaint modes).
+(with source audio or pre-encoded latents for cover/repaint modes; latents
+win over audio when both are sent on the same side).
 
 **POST /understand** - Reverse pipeline: audio in, metadata + lyrics + codes out.
-Multipart only (audio file required, optional request JSON for params).
+Multipart only (source audio or pre-encoded latents required, optional request JSON for params).
+
+**POST /vae** - Standalone VAE entrypoint: send `audio` to encode (latents
+out), send `src_latents` to decode (audio out). Multipart only, the two
+inputs are mutually exclusive. Lets the webui cache a cover latent on an
+existing card, or play back a .vae file, without paying the LM cost of a
+full /synth or /understand pass.
+
+Synth and understand responses are multipart/mixed: the primary payload
+(audio tracks or JSON) plus the cover latent the pipeline produced. The
+client can replay that latent back into a later /synth or /understand call
+to skip the VAE encode entirely on subsequent jobs.
 
 **GET /health** - Returns `{"status":"ok"}`.
 
