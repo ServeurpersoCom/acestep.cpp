@@ -22,11 +22,11 @@ static void usage(const char * prog) {
 
     fprintf(stderr, "acestep.cpp %s\n\n", ACE_VERSION);
     fprintf(stderr,
-            "Usage: %s --models <dir> --src-audio <file> [--request <json>] [options]\n"
+            "Usage: %s --models <dir> --src-audio <path> [--request <json>] [options]\n"
             "\n"
             "Required:\n"
             "  --models <dir>          Directory of GGUF model files\n"
-            "  --src-audio <file>      Source audio (WAV or MP3, any sample rate)\n"
+            "  --src-audio <path>      Source audio (WAV or MP3, any sample rate)\n"
             "\n"
             "Optional:\n"
             "  --request <json>        Request JSON carrying model selection and\n"

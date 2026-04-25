@@ -770,8 +770,8 @@ Required:
 
 Optional:
   --adapters <dir>        Directory of adapter files (enables JSON adapter field)
-  --src-audio <file>      Source audio (WAV or MP3)
-  --ref-audio <file>      Timbre reference audio (WAV or MP3)
+  --src-audio <path>      Source audio (WAV or MP3)
+  --ref-audio <path>      Timbre reference audio (WAV or MP3)
 
 Memory control:
   --vae-chunk <N>         Latent frames per tile (default: 1024)
@@ -785,12 +785,9 @@ Debug:
 ```
 
 Model selection comes from the first request JSON. `synth_model` picks
-the DiT from the registry, `adapter` picks an adapter from `--adapters`,
-`vae` picks the VAE from the registry, `output_format` picks the output
-encoder (mp3, wav16, wav24, wav32). When `synth_model` or `vae` is empty
-the first entry in the respective bucket is used; the text encoder is
-always the first in the registry. Models are loaded once and reused
-across all requests.
+the DiT, `adapter` picks an adapter from `--adapters`, `output_format`
+picks the output encoder (mp3, wav16, wav24, wav32). Models are loaded
+once and reused across all requests.
 
 When `adapter` is set, deltas are merged into the DiT projection weights
 at load time (before QKV fusion and GPU upload). For LoRA, the safetensors
@@ -1074,12 +1071,12 @@ uses minimp3 (CC0). Reads WAV or MP3, writes WAV or MP3 (auto-detected
 from output extension).
 
 ```
-Usage: ./mp3-codec -i <input> -o <o> [options]
+Usage: ./mp3-codec -i <input> -o <output> [options]
 
   -i <path>     Input file (WAV or MP3)
   -o <path>     Output file (WAV or MP3)
   -b <kbps>     Bitrate for MP3 encoding (default: 128)
-  --format <f>  WAV format: wav16, wav24, wav32 (default: wav16)
+  --format <fmt>  WAV format: wav16, wav24, wav32 (default: wav16)
 
 Mode is auto-detected from output extension.
 
@@ -1096,16 +1093,19 @@ Reverse pipeline: audio -> VAE encode -> FSQ tokenize -> LM understand ->
 metadata + lyrics. The output JSON is reusable as ace-lm or ace-synth input.
 
 ```
-Usage: ./ace-understand --models <dir> --src-audio <file> [--request <json>] [options]
+Usage: ./ace-understand --models <dir> --src-audio <path> [--request <json>] [options]
 
 Required:
   --models <dir>          Directory of GGUF model files
-  --src-audio <file>      Source audio (WAV or MP3, any sample rate)
+  --src-audio <path>      Source audio (WAV or MP3, any sample rate)
 
 Optional:
-  --request <json>        Request JSON carrying model selection and sampling
-                          params (lm_model, synth_model, lm_temperature,
-                          lm_top_p, lm_top_k)
+  --request <json>        Request JSON carrying model selection and
+                          sampling params (lm_model, synth_model,
+                          lm_temperature, lm_top_p, lm_top_k)
+
+When no --request is given, understand defaults apply
+(temperature 0.3, top_p disabled).
 
 Output:
   -o <json>               Output JSON (default: stdout summary)
@@ -1122,9 +1122,7 @@ Debug:
 ```
 
 Model selection comes from the request JSON (`lm_model`, `synth_model`,
-`vae`); when unset, the first LM, first DiT and first VAE in the
-registry are used. Without `--request`, understand defaults apply
-(temperature 0.3, top_p disabled).
+`vae`).
 
 ## Architecture
 

@@ -44,7 +44,7 @@ int main(int argc, char ** argv) {
                 "  -i <path>     Input file (WAV or MP3)\n"
                 "  -o <path>     Output file (WAV or MP3)\n"
                 "  -b <kbps>     Bitrate for MP3 encoding (default: 128)\n"
-                "  --format <f>  WAV format: wav16, wav24, wav32 (default: wav16)\n"
+                "  --format <fmt>  WAV format: wav16, wav24, wav32 (default: wav16)\n"
                 "\n"
                 "Mode is auto-detected from output extension.\n"
                 "\n"
