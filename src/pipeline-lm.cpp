@@ -729,6 +729,14 @@ int ace_lm_generate(AceLm *            ctx,
             // Lyrics after </think> are unconstrained.
             // Force user-provided values into the KV cache so the LM
             // generates lyrics and codes conditioned on the right metadata.
+
+            // Caption lock (use_cot_caption=false): skip the caption zone
+            // in CoT, the user-provided caption stays untouched and the LM
+            // sees it via the user prompt block.
+            // Inspire mode regenerates the caption from scratch, so the
+            // lock is ignored there.
+            local_fsm.skip_caption = !req->use_cot_caption && (mode != LM_MODE_INSPIRE);
+
             if (ace.bpm > 0) {
                 local_fsm.force_field(*bpe, MetadataFSM::BPM_VALUE, std::to_string(ace.bpm));
             }
@@ -762,7 +770,22 @@ int ace_lm_generate(AceLm *            ctx,
         // inspire mode: empty base so the LM output overwrites everything.
         // format/generate: gap fill, user metadata preserved.
         AcePrompt parse_base = (mode == LM_MODE_INSPIRE) ? AcePrompt{} : ace;
-        parse_phase1_into_aces(phase1_texts, parse_base, aces, seed, mode_name, gen_lyrics, req->use_cot_caption);
+
+        // Inspire ignores the caption lock end to end: sampling regenerates
+        // and parsing accepts. Other modes honor the user flag.
+        bool parse_use_cot_caption = (mode == LM_MODE_INSPIRE) ? true : req->use_cot_caption;
+        parse_phase1_into_aces(phase1_texts, parse_base, aces, seed, mode_name, gen_lyrics, parse_use_cot_caption);
+
+        // Caption preservation: the LM may enrich the user caption, but
+        // never silently delete it. If the merge ended up with an empty
+        // caption while the request had one, restore the request value.
+        if (!ace.caption.empty()) {
+            for (auto & a : aces) {
+                if (a.caption.empty()) {
+                    a.caption = ace.caption;
+                }
+            }
+        }
 
         int n_kv_reset = (fill_cfg > 1.0f) ? 2 * lm_batch_size : lm_batch_size;
         for (int i = 0; i < n_kv_reset; i++) {
@@ -836,6 +859,14 @@ int ace_lm_generate(AceLm *            ctx,
         out[b].seed          = dit_seed + b;
         out[b].lm_seed       = req->lm_seed + b;
         out[b].lm_batch_size = 1;  // each output is a standalone enriched request
+
+        // Backend-driven flag: report what was actually applied. Inspire
+        // always regenerates the caption regardless of the input lock,
+        // so the response reflects the effective state and the UI toggle
+        // updates itself to match reality.
+        if (mode == LM_MODE_INSPIRE) {
+            out[b].use_cot_caption = true;
+        }
     }
 
     fprintf(stderr, "[Ace-LM] Total %.0fms | seed=%lld\n", t_total.ms(), dit_seed);

@@ -617,7 +617,19 @@
 	<div class="section-title">Name</div>
 	<input type="text" bind:value={app.name} placeholder="Untitled" />
 
-	<div class="section-title">Caption</div>
+	<div class="section-title caption-header">
+		Caption
+		<label
+			class="header-toggle"
+			title="Lock caption: LM keeps your text intact (skips CoT caption refinement)"
+		>
+			<input
+				type="checkbox"
+				checked={!app.request.use_cot_caption}
+				onchange={(e) => (app.request.use_cot_caption = !e.currentTarget.checked)}
+			/> Lock
+		</label>
+	</div>
 	<textarea
 		rows="8"
 		placeholder="Upbeat pop rock with driving guitars... (the only required field, enriched by the LM unless all prompt fields are filled.)"
@@ -1108,7 +1120,9 @@
 		font-weight: 600;
 		padding: 0.4rem 0 0;
 	}
-	.lyrics-header {
+	.lyrics-header,
+	.caption-header,
+	.metadata-header {
 		display: flex;
 		align-items: center;
 		justify-content: space-between;
@@ -1125,11 +1139,6 @@
 	}
 	.header-toggle input[type='checkbox'] {
 		cursor: pointer;
-	}
-	.metadata-header {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
 	}
 	.has-clear {
 		position: relative;

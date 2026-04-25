@@ -63,6 +63,11 @@ struct MetadataFSM {
     bool             enabled                 = false;
     bool             caption_pending_newline = false;
 
+    // Caption lock: when true, the FSM skips the caption field entirely.
+    // The user-provided caption is already in the prompt context; the LM
+    // does not regenerate it and the lyrics/codes stay conditioned on it.
+    bool skip_caption = false;
+
     std::vector<int> bpm_name, caption_name, duration_name;
     std::vector<int> keyscale_name, language_name, timesig_name;
     PrefixTree       bpm_tree, duration_tree, keyscale_tree, language_tree, timesig_tree;
@@ -305,7 +310,7 @@ struct MetadataFSM {
         switch (state) {
             case BPM_NAME:
             case BPM_VALUE:
-                return CAPTION_NAME;
+                return skip_caption ? DURATION_NAME : CAPTION_NAME;
             case CAPTION_NAME:
             case CAPTION_VALUE:
                 return DURATION_NAME;
