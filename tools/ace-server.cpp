@@ -656,6 +656,8 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (LM, mode=%d)\n", job->id.c_str(), mode);
 
+    request_resolve_lm_seed(&ace_req);
+
     work_push([job, ace_req, lm_batch_size, mode]() { lm_worker(job, ace_req, lm_batch_size, mode); });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
@@ -1189,6 +1191,8 @@ static void handle_understand(const httplib::Request & req, httplib::Response & 
 
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (understand)\n", job->id.c_str());
+
+    request_resolve_lm_seed(&ace_req);
 
     work_push([job, ace_req, src_interleaved, src_len, latents = std::move(src_latents), src_T_latent]() mutable {
         understand_worker(job, ace_req, src_interleaved, src_len, std::move(latents), src_T_latent);

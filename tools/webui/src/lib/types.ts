@@ -17,6 +17,7 @@ export interface AceRequest {
 	lm_top_p?: number;
 	lm_top_k?: number;
 	lm_negative_prompt?: string;
+	lm_seed?: number;
 	use_cot_caption?: boolean;
 	inference_steps?: number;
 	guidance_scale?: number;

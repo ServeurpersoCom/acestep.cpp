@@ -524,6 +524,10 @@
 		clearSection(app.request, 'advanced');
 	}
 
+	function clearAdvancedLm() {
+		clearSection(app.request, 'lm');
+	}
+
 	function ph(v: unknown): string {
 		return v != null ? String(v) : '';
 	}
@@ -677,6 +681,13 @@
 				bind:value={app.request.timesignature}
 			/></label
 		>
+		<label
+			>LM seed <input
+				type="text"
+				placeholder={ph(d?.lm_seed)}
+				bind:value={app.request.lm_seed}
+			/></label
+		>
 	</div>
 
 	<div class="lm-row">
@@ -703,8 +714,17 @@
 		>
 	</div>
 
-	<details>
+	<details class="has-clear">
 		<summary>Advanced LM</summary>
+		<button
+			type="button"
+			class="clear-btn details-clear"
+			title="Clear advanced LM"
+			onclick={clearAdvancedLm}
+			aria-label="Clear advanced LM"
+		>
+			<X size={20} />
+		</button>
 		<div class="details-body">
 			<div class="meta-grid">
 				<label

@@ -117,9 +117,8 @@ int ace_understand_generate(AceUnderstand *      ctx,
 
     Timer t_total;
 
-    // LM RNG seed: always random (mt19937 uses 32 bits)
-    std::random_device rd;
-    uint32_t           seed = rd();
+    // mt19937 consumes the low 32 bits of lm_seed (resolved by caller).
+    uint32_t seed = (uint32_t) req->lm_seed;
 
     // Generation params from request
     float temperature = req->lm_temperature;
@@ -389,6 +388,7 @@ int ace_understand_generate(AceUnderstand *      ctx,
     out->timesignature  = parsed.timesignature;
     out->vocal_language = parsed.vocal_language;
     out->seed           = req->seed;
+    out->lm_seed        = req->lm_seed;
 
     // Build audio_codes string from recovered codes (comma-separated)
     std::string codes_str;

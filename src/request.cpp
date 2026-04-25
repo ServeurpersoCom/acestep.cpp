@@ -32,6 +32,7 @@ void request_init(AceRequest * r) {
     r->lm_top_p             = 0.9f;
     r->lm_top_k             = 0;
     r->lm_negative_prompt   = "";
+    r->lm_seed              = -1;
     r->use_cot_caption      = true;
     r->audio_codes          = "";
     r->inference_steps      = 0;     // 0 = auto (turbo: 8, base/sft: 50)
@@ -135,6 +136,9 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "seed")) && yyjson_is_num(v)) {
         r->seed = (int64_t) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_seed")) && yyjson_is_num(v)) {
+        r->lm_seed = (int64_t) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "lm_top_k")) && yyjson_is_num(v)) {
         r->lm_top_k = (int) yyjson_get_num(v);
@@ -369,6 +373,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->lm_negative_prompt != def.lm_negative_prompt) {
         yyjson_mut_obj_add_str(doc, root, "lm_negative_prompt", r->lm_negative_prompt.c_str());
     }
+    if (all || r->lm_seed != def.lm_seed) {
+        yyjson_mut_obj_add_sint(doc, root, "lm_seed", r->lm_seed);
+    }
     if (all || r->use_cot_caption != def.use_cot_caption) {
         yyjson_mut_obj_add_bool(doc, root, "use_cot_caption", r->use_cot_caption);
     }
@@ -548,5 +555,12 @@ void request_resolve_seed(AceRequest * r) {
     if (r->seed < 0) {
         std::random_device rd;
         r->seed = (int64_t) rd();
+    }
+}
+
+void request_resolve_lm_seed(AceRequest * r) {
+    if (r->lm_seed < 0) {
+        std::random_device rd;
+        r->lm_seed = (int64_t) rd();
     }
 }

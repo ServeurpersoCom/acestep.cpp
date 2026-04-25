@@ -187,6 +187,7 @@ int main(int argc, char ** argv) {
     // run understand pipeline. CLI feeds raw audio: NULL/0 for latents,
     // NULL/NULL for capture, NULL/NULL for cancel. The server reuses the
     // same entry point with the full latent IO surface.
+    request_resolve_lm_seed(&req);
     AceRequest out;
     int rc = ace_understand_generate(ctx, src_interleaved, src_len, nullptr, 0, &req, &out, nullptr, nullptr, nullptr,
                                      nullptr);

@@ -23,7 +23,10 @@ struct AceRequest {
     // generation
     int     lm_batch_size;     // 1 (number of LLM variations)
     int     synth_batch_size;  // 1 (synth batch: number of DiT variations per request)
-    int64_t seed;              // -1 = random (DiT Philox noise)
+    int64_t seed;              // -1 = random. DiT Philox noise consumes the low
+                               // 32 bits. Stored in int64_t to land positive
+                               // after rd(). Range [0, UINT32_MAX], matches the
+                               // Python ACE-Step reference (random.randint(0, 2**32 - 1)).
 
     // LM control
     float       lm_temperature;      // 0.85
@@ -31,6 +34,10 @@ struct AceRequest {
     float       lm_top_p;            // 0.9
     int         lm_top_k;            // 0 = disabled (matches Python None)
     std::string lm_negative_prompt;  // ""
+    int64_t     lm_seed;             // -1 = random. mt19937 consumes the low 32
+                                     // bits. Same int64_t storage trick as seed
+                                     // above: rd() lands positive, no -1
+                                     // collision, no mask needed.
     bool        use_cot_caption;     // true = LLM enriches caption via CoT
 
     // codes (Python-compatible string: "3101,11837,27514,...")
@@ -144,3 +151,6 @@ void request_dump(const AceRequest * r, FILE * f);
 
 // Resolve seed: if negative, replace with a hardware random value.
 void request_resolve_seed(AceRequest * r);
+
+// Resolve LM seed: if negative, replace with a hardware random value.
+void request_resolve_lm_seed(AceRequest * r);

@@ -43,6 +43,7 @@ export const FIELDS: readonly FieldDef[] = [
 	{ key: 'lm_top_p', section: 'lm', type: 'num' },
 	{ key: 'lm_top_k', section: 'lm', type: 'num' },
 	{ key: 'lm_negative_prompt', section: 'lm', type: 'str' },
+	{ key: 'lm_seed', section: 'metadata', type: 'num' },
 
 	// flow matching: cleared by Clear flow matching, preserved across Compose
 	{ key: 'inference_steps', section: 'flow', type: 'num' },

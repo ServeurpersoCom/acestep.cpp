@@ -648,13 +648,13 @@ int ace_lm_generate(AceLm *            ctx,
 
     Timer t_total;
 
-    // LM RNG seed: always random (mt19937 uses 32 bits)
-    std::random_device rd;
-    uint32_t           seed = rd();
+    // mt19937 consumes the low 32 bits of lm_seed (resolved by caller).
+    uint32_t seed = (uint32_t) req->lm_seed;
 
     // Resolve DiT seed (pass through to output for synth pipeline)
     long long dit_seed = req->seed;
     if (dit_seed < 0) {
+        std::random_device rd;
         dit_seed = (int64_t) rd();
     }
 
@@ -834,6 +834,7 @@ int ace_lm_generate(AceLm *            ctx,
             out[b].audio_codes = batch_codes[b];
         }
         out[b].seed          = dit_seed + b;
+        out[b].lm_seed       = req->lm_seed + b;
         out[b].lm_batch_size = 1;  // each output is a standalone enriched request
     }
 
