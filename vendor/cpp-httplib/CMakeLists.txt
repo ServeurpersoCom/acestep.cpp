@@ -9,3 +9,7 @@ if(MSVC)
 else()
     target_compile_options(httplib PRIVATE -w)
 endif()
+
+if(WIN32)
+    target_link_libraries(httplib PRIVATE ws2_32)
+endif()
