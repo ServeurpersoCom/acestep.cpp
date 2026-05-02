@@ -180,9 +180,11 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
     if (s.guidance_scale <= 0.0f) {
         s.guidance_scale = 1.0f;
     } else if (ctx->meta->is_turbo && s.guidance_scale > 1.0f) {
-        fprintf(stderr, "[Resolve-Params] WARNING: turbo model, forcing guidance_scale=1.0 (was %.1f)\n",
+        fprintf(stderr,
+                "[Resolve-Params] WARNING: guidance_scale=%.1f on turbo model. "
+                "Distilled turbo internalizes guidance; stacking CFG on top usually "
+                "oversaturates. Use it only if you know what you do (typically a merge).\n",
                 s.guidance_scale);
-        s.guidance_scale = 1.0f;
     }
 
     if (s.shift <= 0.0f) {
