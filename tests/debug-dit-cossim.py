@@ -144,6 +144,7 @@ def run_ggml(dump_dir, req, cfg, gguf_path, adapter_dir=None):
     cmd += [
         "--request", request_json,
         "--dump", dump_dir,
+        "--no-fa",
     ]
     print(f"[GGML] Running {os.path.basename(gguf_path)}...")
     r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=None, text=True)
