@@ -3,6 +3,7 @@
 declare -A DISABLE_VAR=(
     [CUDA0]=GGML_CUDA_DISABLE_FUSION
     [Vulkan0]=GGML_VK_DISABLE_FUSION
+    [CPU]=GGML_CPU_DISABLE_FUSION
 )
 
 for backend in "${!DISABLE_VAR[@]}"; do
