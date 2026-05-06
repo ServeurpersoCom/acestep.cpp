@@ -216,8 +216,12 @@ static struct ggml_tensor * dit_ggml_build_self_attn(
     // K/V come in F32 from mul_mat (no KV cache here). Cast to F16 before FA,
     // mirroring llama.cpp build_attn_mha for graphs without a KV cache.
     if (m->use_flash_attn) {
-        if (k->type == GGML_TYPE_F32) k = ggml_cast(ctx, k, GGML_TYPE_F16);
-        if (v->type == GGML_TYPE_F32) v = ggml_cast(ctx, v, GGML_TYPE_F16);
+        if (k->type == GGML_TYPE_F32) {
+            k = ggml_cast(ctx, k, GGML_TYPE_F16);
+        }
+        if (v->type == GGML_TYPE_F32) {
+            v = ggml_cast(ctx, v, GGML_TYPE_F16);
+        }
     }
 
     struct ggml_tensor * attn = m->use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
@@ -333,8 +337,12 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
     // K/V come in F32 from mul_mat (no KV cache here). Cast to F16 before FA,
     // mirroring llama.cpp build_attn_mha for graphs without a KV cache.
     if (m->use_flash_attn) {
-        if (k->type == GGML_TYPE_F32) k = ggml_cast(ctx, k, GGML_TYPE_F16);
-        if (v->type == GGML_TYPE_F32) v = ggml_cast(ctx, v, GGML_TYPE_F16);
+        if (k->type == GGML_TYPE_F32) {
+            k = ggml_cast(ctx, k, GGML_TYPE_F16);
+        }
+        if (v->type == GGML_TYPE_F32) {
+            v = ggml_cast(ctx, v, GGML_TYPE_F16);
+        }
     }
 
     struct ggml_tensor * attn = m->use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :

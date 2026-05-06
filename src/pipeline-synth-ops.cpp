@@ -12,8 +12,8 @@
 #include "task-types.h"
 #include "vae-enc.h"
 
-#include <charconv>
 #include <cerrno>
+#include <charconv>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -63,7 +63,7 @@ static std::vector<float> parse_csv_float(const std::string & s) {
         }
         char * end = nullptr;
         errno      = 0;
-        float  v   = std::strtof(first, &end);
+        float v    = std::strtof(first, &end);
         if (end == first || errno == ERANGE) {
             break;
         }

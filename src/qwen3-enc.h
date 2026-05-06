@@ -184,8 +184,12 @@ static struct ggml_tensor * qwen3_build_self_attn(struct ggml_context * ctx,
     // K/V come in F32 from mul_mat (encoder, no KV cache). Cast to F16 before FA,
     // mirroring llama.cpp build_attn_mha for graphs without a KV cache.
     if (use_flash_attn) {
-        if (k->type == GGML_TYPE_F32) k = ggml_cast(ctx, k, GGML_TYPE_F16);
-        if (v->type == GGML_TYPE_F32) v = ggml_cast(ctx, v, GGML_TYPE_F16);
+        if (k->type == GGML_TYPE_F32) {
+            k = ggml_cast(ctx, k, GGML_TYPE_F16);
+        }
+        if (v->type == GGML_TYPE_F32) {
+            v = ggml_cast(ctx, v, GGML_TYPE_F16);
+        }
     }
 
     struct ggml_tensor * attn = use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
