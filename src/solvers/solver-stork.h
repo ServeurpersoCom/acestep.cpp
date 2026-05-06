@@ -15,10 +15,10 @@
 #include "solver-interface.h"
 #include "solver-stork4-constants.h"
 
-#include <algorithm>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <utility>
 #include <vector>
 
 // Detect any non finite element in a buffer.
@@ -296,7 +296,7 @@ static void solver_stork4_step(float *       xt,
     int                deriv_order = _stork_compute_derivatives(vt, n, state, dv.data(), d2v.data());
 
     // Adaptive sub stepping: try state.stork_substeps, halve on NaN until 2.
-    int                s = std::max(state.stork_substeps, 2);
+    int                s = state.stork_substeps >= 2 ? state.stork_substeps : 2;
     std::vector<float> xt_next(n);
     bool               success = false;
 
