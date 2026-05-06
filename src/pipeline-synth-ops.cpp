@@ -13,6 +13,7 @@
 #include "vae-enc.h"
 
 #include <charconv>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -22,28 +23,52 @@
 
 static const int FRAMES_PER_SECOND = 25;
 
-// CSV list parser tolerant to any whitespace around commas. Locale-immune via
-// std::from_chars (C++17 charconv, overloaded on the numeric type). Used for
-// audio_codes (int) and custom_timesteps (float). Bails on first parse error
-// or overflow, returning the values consumed so far.
-template <typename T> static std::vector<T> parse_csv(const std::string & s) {
-    std::vector<T> out;
-    const char *   first = s.data();
-    const char *   last  = first + s.size();
+// CSV list parsers tolerant to any whitespace around commas. Bail on first
+// parse error or overflow, returning the values consumed so far.
+// Integer variant uses std::from_chars (locale-immune, C++17 charconv).
+// Float variant uses std::strtof for portability (Apple Clang lacks the
+// floating-point overload of std::from_chars on some SDK versions).
+static std::vector<int> parse_csv_int(const std::string & s) {
+    std::vector<int> out;
+    const char *     first = s.data();
+    const char *     last  = first + s.size();
     while (first < last) {
         while (first < last && (*first == ',' || *first == ' ')) {
-            first++;
+            ++first;
         }
         if (first == last) {
             break;
         }
-        T    v{};
+        int  v{};
         auto r = std::from_chars(first, last, v);
         if (r.ec != std::errc{}) {
             break;
         }
         out.push_back(v);
         first = r.ptr;
+    }
+    return out;
+}
+
+static std::vector<float> parse_csv_float(const std::string & s) {
+    std::vector<float> out;
+    const char *       first = s.data();
+    const char *       last  = first + s.size();
+    while (first < last) {
+        while (first < last && (*first == ',' || *first == ' ')) {
+            ++first;
+        }
+        if (first == last) {
+            break;
+        }
+        char * end = nullptr;
+        errno      = 0;
+        float  v   = std::strtof(first, &end);
+        if (end == first || errno == ERANGE) {
+            break;
+        }
+        out.push_back(v);
+        first = end;
     }
     return out;
 }
@@ -199,7 +224,7 @@ int ops_resolve_params(const AceSynth * ctx, const AceRequest * reqs, int batch_
     s.max_codes_len = 0;
     s.have_codes    = false;
     for (int b = 0; b < batch_n; b++) {
-        s.per_codes[b] = parse_csv<int>(reqs[b].audio_codes);
+        s.per_codes[b] = parse_csv_int(reqs[b].audio_codes);
         int sz         = (int) s.per_codes[b].size();
         if (sz > s.max_codes_len) {
             s.max_codes_len = sz;
@@ -222,7 +247,7 @@ void ops_build_schedule(SynthState & s) {
     // endpoint handled implicitly by the sampler, so we drop it and take
     // schedule = first N-1 entries, num_steps = N-1.
     if (!s.rr.custom_timesteps.empty()) {
-        std::vector<float> ts = parse_csv<float>(s.rr.custom_timesteps);
+        std::vector<float> ts = parse_csv_float(s.rr.custom_timesteps);
         if (ts.size() >= 2) {
             s.num_steps = (int) ts.size() - 1;
             s.schedule.assign(ts.begin(), ts.end() - 1);
