@@ -49,12 +49,6 @@ if(NOT DEFINED CMAKE_CUDA_ARCHITECTURES)
     endif()
 endif()
 
-# CUDA 13.x supports GCC up to 15.x (Installation Guide for Linux, table 3).
-# Bail out early with a hint instead of nvcc's CMakeCUDACompilerId.cu wall.
-if(GGML_CUDA AND CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 16 AND NOT DEFINED ENV{NVCC_CCBIN})
-    message(FATAL_ERROR "GCC ${CMAKE_CXX_COMPILER_VERSION} too recent for nvcc. Try: NVCC_CCBIN=g++-13 ./buildcuda.sh")
-endif()
-
 # ggml as subdirectory, inherits GGML_CUDA, GGML_METAL, etc. from cmake flags
 add_subdirectory(ggml)
 
