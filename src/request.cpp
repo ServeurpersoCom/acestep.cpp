@@ -50,7 +50,8 @@ void request_init(AceRequest * r) {
     r->custom_timesteps     = "";
     r->task_type            = TASK_TEXT2MUSIC;
     r->track                = "";
-    r->infer_method         = INFER_ODE;
+    r->solver               = SOLVER_EULER;
+    r->stork_substeps       = STORK_SUBSTEPS_DEFAULT;
     r->lm_mode              = LM_MODE_NAME_GENERATE;
     r->output_format        = OUTPUT_FORMAT_MP3;
     r->synth_model          = "";
@@ -99,8 +100,11 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     if ((v = yyjson_obj_get(obj, "track")) && yyjson_is_str(v)) {
         r->track = yy_str(v);
     }
-    if ((v = yyjson_obj_get(obj, "infer_method")) && yyjson_is_str(v) && yyjson_get_len(v) > 0) {
-        r->infer_method = yy_str(v);
+    if ((v = yyjson_obj_get(obj, "solver")) && yyjson_is_str(v) && yyjson_get_len(v) > 0) {
+        r->solver = yy_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "stork_substeps")) && yyjson_is_int(v)) {
+        r->stork_substeps = (int) yyjson_get_int(v);
     }
     if ((v = yyjson_obj_get(obj, "custom_timesteps")) && yyjson_is_str(v)) {
         r->custom_timesteps = yy_str(v);
@@ -399,9 +403,12 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->dcw_mode != def.dcw_mode) {
         yyjson_mut_obj_add_str(doc, root, "dcw_mode", r->dcw_mode.c_str());
     }
-    // infer_method is always emitted for the same reason as task_type: the
+    // solver is always emitted for the same reason as task_type: the
     // request is explicit about its solver choice in any round trip.
-    yyjson_mut_obj_add_str(doc, root, "infer_method", r->infer_method.c_str());
+    yyjson_mut_obj_add_str(doc, root, "solver", r->solver.c_str());
+    if (all || r->stork_substeps != def.stork_substeps) {
+        yyjson_mut_obj_add_int(doc, root, "stork_substeps", r->stork_substeps);
+    }
     // lm_mode and output_format follow the same rule: enumerations with a
     // guaranteed non-empty value, always explicit in serialized output.
     yyjson_mut_obj_add_str(doc, root, "lm_mode", r->lm_mode.c_str());
@@ -527,7 +534,7 @@ void request_dump(const AceRequest * r, FILE * f) {
     if (!r->track.empty()) {
         fprintf(f, "[Request] track: %s\n", r->track.c_str());
     }
-    fprintf(f, "[Request] infer_method: %s\n", r->infer_method.c_str());
+    fprintf(f, "[Request] solver: %s (stork_substeps=%d)\n", r->solver.c_str(), r->stork_substeps);
     fprintf(f, "[Request] lm_mode: %s\n", r->lm_mode.c_str());
     fprintf(f, "[Request] output_format: %s\n", r->output_format.c_str());
     if (r->peak_clip != 10) {

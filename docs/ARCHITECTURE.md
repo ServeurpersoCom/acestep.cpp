@@ -503,7 +503,7 @@ their own, but without caption the LLM has nothing to work from.
     "custom_timesteps":     "",
     "task_type":            "text2music",
     "track":                "",
-    "infer_method":         "ode",
+    "solver":               "euler",
     "lm_mode":              "generate",
     "output_format":        "mp3",
     "peak_clip":            10,
@@ -721,12 +721,13 @@ Flow-matching schedule shift. Controls the timestep distribution.
 `shift = s*t / (1 + (s-1)*t)`. `0.0` resolves from the loaded model:
 turbo = `3.0`, base/SFT = `1.0`.
 
-**`infer_method`** (string, default `"ode"`)
-Diffusion solver. `"ode"` uses ODE Euler (one model eval per step,
-same seed always gives same result). `"sde"` uses SDE Stochastic (predicts x0
-then re-noises with fresh Philox noise at each step, producing varied results
-across different trajectories). SDE is reproducible: the per-step noise is
-derived from the original seed so the same seed gives the same SDE trajectory.
+**`solver`** (string, default `"euler"`)
+Diffusion solver, resolved by `solver_lookup()` in `src/solvers/`.
+Accepted values:
+- `"euler"`: ODE Euler, first order, 1 NFE per step. Deterministic, same seed gives same result.
+- `"sde"`: SDE Ancestral, 1 NFE plus Philox renoise per step. Predicts x0 from the velocity, then re-noises to the next timestep with a fresh Philox sample seeded by `seed + step + 1`. Reproducible bit for bit per seed.
+- `"dpm3m"`: DPM++ 3M, third order Adams Bashforth multistep, 1 NFE per step. Stateful, bootstraps from Euler then AB2 then AB3.
+- `"stork4"`: STORK 4 (4th order ROCK4 Chebyshev sub stepping), 1 NFE per step. Stateful, sub step count tunable via `stork_substeps` (default 10).
 
 Turbo preset: `inference_steps=8, guidance_scale=1.0, shift=3.0`.
 Base/SFT preset: `inference_steps=50, guidance_scale=1.0, shift=1.0`.
@@ -1139,7 +1140,7 @@ ace-synth
   CondEncoder (lyric 8L + timbre 4L + text_proj)
   FSQ detokenizer (audio codes -> flow matching source latents)
   Adapter merge (optional: LoRA safetensors delta -> dequant/merge/requant at load)
-  DiT (2B: 24L H=2048, XL: 32L H=2560, flow matching ODE Euler or SDE Stochastic)
+  DiT (2B: 24L H=2048, XL: 32L H=2560, flow matching)
   VAE (AutoencoderOobleck, tiled decode)
   WAV stereo 48kHz
 

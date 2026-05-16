@@ -1,5 +1,6 @@
 <script lang="ts">
 	import { onMount } from 'svelte';
+	import { parse as yamlParse, stringify as yamlStringify } from 'yaml';
 	import { RotateCcw, Download, FolderOpen, X } from '@lucide/svelte';
 	import { app, toast, setRequest } from '../lib/state.svelte.js';
 	import { rollDice } from '../lib/dice.js';
@@ -24,8 +25,10 @@
 		TASK_LEGO,
 		TASK_EXTRACT,
 		TASK_COMPLETE,
-		INFER_ODE,
-		INFER_SDE,
+		SOLVER_EULER,
+		SOLVER_SDE,
+		SOLVER_DPM3M,
+		SOLVER_STORK4,
 		DCW_MODE_LOW,
 		DCW_MODE_HIGH,
 		DCW_MODE_DOUBLE,
@@ -40,11 +43,14 @@
 		pickSections
 	} from '../lib/fields.js';
 	import type { AceRequest, Song } from '../lib/types.js';
+	import Dialog from './Dialog.svelte';
+	import DialogButton from './DialogButton.svelte';
 
 	let busyLm = $state(false);
 	let busySynth = $state(false);
 	let busy = $derived(busyLm || busySynth);
 	let fileInput: HTMLInputElement;
+	let saveFormatOpen = $state(false);
 
 	let d = $derived(app.props?.default);
 	let ditModels = $derived(app.props?.models.dit ?? []);
@@ -204,14 +210,16 @@
 		selectedTracks = new Set();
 	}
 
-	function exportJson() {
-		const json = JSON.stringify(buildRequest(), null, 2);
-		const blob = new Blob([json], { type: 'application/json' });
+	function saveAs(format: 'json' | 'yaml') {
+		const req = buildRequest();
+		const text = format === 'json' ? JSON.stringify(req, null, 2) : yamlStringify(req);
+		const mime = format === 'json' ? 'application/json' : 'application/x-yaml';
+		const blob = new Blob([text], { type: mime });
 		const url = URL.createObjectURL(blob);
 		const a = document.createElement('a');
 		a.href = url;
 		const safe = app.name.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'request';
-		a.download = `${safe}.json`;
+		a.download = `${safe}.${format}`;
 		a.click();
 		URL.revokeObjectURL(url);
 	}
@@ -229,18 +237,33 @@
 
 		const ext = file.name.split('.').pop()?.toLowerCase() || '';
 
-		// JSON: load request into form (existing behavior)
-		if (ext === 'json') {
+		// JSON and YAML share the same load path: parse, push the request into
+		// the form, and use the file basename as app.name. Adding a new text
+		// format later is one entry in the table.
+		const parsers: Record<string, (s: string) => AceRequest> = {
+			json: JSON.parse,
+			yml: yamlParse,
+			yaml: yamlParse
+		};
+		const parse = parsers[ext];
+		if (parse) {
 			file
 				.text()
 				.then((text) => {
-					setRequest(JSON.parse(text) as AceRequest);
-					app.name = file.name.replace(/\.json$/i, '') || 'Imported';
+					const parsed = parse(text) as any;
+
+					// optional title field: lets a LLM authored YAML/JSON pre-fill
+					// the song name on import. Stripped before setRequest.
+					const importedName =
+						typeof parsed?.title === 'string' && parsed.title.trim() ? parsed.title.trim() : '';
+					delete parsed.title;
+					setRequest(parsed as AceRequest);
+					app.name = importedName || file.name.replace(/\.(json|ya?ml)$/i, '') || 'Imported';
 					app.pendingRequests = [];
 					app.pendingIndex = 0;
 				})
 				.catch(() => {
-					toast('Invalid JSON file');
+					toast(`Invalid ${ext.toUpperCase()} file`);
 				});
 			return;
 		}
@@ -533,17 +556,21 @@
 <form class="request-form" onsubmit={(e) => e.preventDefault()}>
 	<input
 		type="file"
-		accept=".json,.mp3,.wav,.vae"
+		accept=".json,.yml,.yaml,.mp3,.wav,.vae"
 		bind:this={fileInput}
 		onchange={onFileSelected}
 		hidden
 	/>
 	<div class="toolbar">
-		<button type="button" onclick={importJson} title="Open JSON prompt, MP3, WAV or VAE latents"
-			><FolderOpen size={14} /> Open</button
+		<button
+			type="button"
+			onclick={importJson}
+			title="Open JSON/YAML prompt, MP3, WAV or VAE latents"><FolderOpen size={14} /> Open</button
 		>
-		<button type="button" onclick={exportJson} title="Save JSON prompt"
-			><Download size={14} /> Save</button
+		<button
+			type="button"
+			onclick={() => (saveFormatOpen = true)}
+			title="Save prompt as JSON or YAML"><Download size={14} /> Save</button
 		>
 		<button type="button" onclick={reset} title="Reset prompt"><RotateCcw size={14} /> Reset</button
 		>
@@ -997,15 +1024,24 @@
 					/></label
 				>
 				<label
-					>Method <select
-						value={app.request.infer_method || d?.infer_method || ''}
+					>Solver <select
+						value={app.request.solver || d?.solver || ''}
 						onchange={(e) => {
-							app.request.infer_method = e.currentTarget.value;
+							app.request.solver = e.currentTarget.value;
 						}}
 					>
-						<option value={INFER_ODE}>ODE Euler</option>
-						<option value={INFER_SDE}>SDE Stochastic</option>
+						<option value={SOLVER_EULER}>ODE Euler</option>
+						<option value={SOLVER_SDE}>SDE Ancestral</option>
+						<option value={SOLVER_DPM3M}>DPM++ 3M</option>
+						<option value={SOLVER_STORK4}>STORK 4</option>
 					</select></label
+				>
+				<label
+					>STORK substeps <input
+						type="text"
+						placeholder={ph(d?.stork_substeps)}
+						bind:value={app.request.stork_substeps}
+					/></label
 				>
 				<label
 					>Latent shift <input
@@ -1089,6 +1125,24 @@
 		>
 	</div>
 </form>
+
+<Dialog bind:open={saveFormatOpen} title="Save format">
+	{#snippet actions(close)}
+		<DialogButton onclick={close}>Cancel</DialogButton>
+		<DialogButton
+			onclick={() => {
+				saveAs('json');
+				close();
+			}}>JSON</DialogButton
+		>
+		<DialogButton
+			onclick={() => {
+				saveAs('yaml');
+				close();
+			}}>YAML</DialogButton
+		>
+	{/snippet}
+</Dialog>
 
 <style>
 	.request-form {

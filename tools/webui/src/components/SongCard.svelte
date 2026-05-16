@@ -1,5 +1,17 @@
 <script lang="ts">
-	import { Play, Square, Pencil, Ear, Download, Cpu, Trash2, ChevronDown } from '@lucide/svelte';
+	import {
+		Play,
+		Square,
+		Pencil,
+		Ear,
+		Download,
+		Cpu,
+		Trash2,
+		ChevronDown,
+		Heart,
+		Type,
+		TriangleAlert
+	} from '@lucide/svelte';
 	import { app, setRequest, toast } from '../lib/state.svelte.js';
 	import { deleteSong } from '../lib/db.js';
 	import {
@@ -14,6 +26,7 @@
 	import { displaySongName } from '../lib/songName.js';
 	import Waveform from './Waveform.svelte';
 	import Menu, { type MenuItem } from './Menu.svelte';
+	import Dialog from './Dialog.svelte';
 
 	let { song }: { song: Song } = $props();
 
@@ -109,29 +122,18 @@
 			const { requests, latents } = await jobResultUnderstand(jobId);
 			clearJob('lm');
 			if (song.id != null) {
-				const newLatents = latents ?? song.latents ?? undefined;
-				const newRequest =
-					requests.length > 0 && !song.request.caption ? requests[0] : { ...song.request };
-				const dirty = newLatents !== song.latents || newRequest !== song.request;
+				const useNewRequest = requests.length > 0 && !song.request.caption;
+				const newRequest = useNewRequest ? requests[0] : song.request;
+				const dirty = (latents && latents !== song.latents) || newRequest !== song.request;
 				if (dirty) {
-					// Rebuild a plain object: $props in Svelte 5 are Proxies and
-					// IndexedDB structuredClone refuses Proxies. Listing fields by
-					// hand also avoids cloning the audio Blob, which is large.
-					const enriched: Song = {
-						id: song.id,
-						name: song.name,
-						format: song.format,
-						created: song.created,
-						caption: newRequest.caption ?? song.caption,
-						seed: newRequest.seed ?? song.seed,
-						duration: newRequest.duration ?? song.duration,
-						request: newRequest,
-						audio: song.audio,
-						...(newLatents ? { latents: newLatents } : {})
-					};
-					await putSong(enriched);
 					if (latents) song.latents = latents;
-					if (newRequest !== song.request) song.request = newRequest;
+					if (useNewRequest) {
+						song.request = newRequest;
+						song.caption = newRequest.caption ?? song.caption;
+						song.seed = newRequest.seed ?? song.seed;
+						song.duration = newRequest.duration ?? song.duration;
+					}
+					await putSong($state.snapshot(song));
 				}
 			}
 			app.name = song.name;
@@ -174,10 +176,9 @@
 	}
 
 	// VAE-only scan: POST /vae with the source audio (encode path), attach
-	// the fresh latents to the card non-destructively. Plain-object rebuild
-	// like scan() to dodge Svelte 5 Proxy + IndexedDB structuredClone, minus
-	// the LM roundtrip. Ideal for priming a cover/repaint target without
-	// paying the LM cost just to get the [VAE] badge lit.
+	// the fresh latents to the card non-destructively. Skips the LM
+	// roundtrip. Ideal for priming a cover/repaint target without paying
+	// the LM cost just to get the [VAE] badge lit.
 	async function encodeOnly() {
 		if (song.latents || song.id == null) return;
 		scanning = true;
@@ -187,20 +188,8 @@
 			await pollJob(jobId);
 			const latents = await jobResultLatents(jobId);
 			clearJob('lm');
-			const enriched: Song = {
-				id: song.id,
-				name: song.name,
-				format: song.format,
-				created: song.created,
-				caption: song.caption,
-				seed: song.seed,
-				duration: song.duration,
-				request: { ...song.request },
-				audio: song.audio,
-				latents
-			};
-			await putSong(enriched);
 			song.latents = latents;
+			await putSong($state.snapshot(song));
 		} catch (e: unknown) {
 			toast(e instanceof Error ? e.message : String(e));
 		} finally {
@@ -208,7 +197,34 @@
 		}
 	}
 
-	async function remove() {
+	let confirmDeleteOpen = $state(false);
+	let confirmDeleteNonFavOpen = $state(false);
+	let renameOpen = $state(false);
+	let renameValue = $state('');
+
+	async function toggleFavorite() {
+		if (song.id == null) return;
+		song.favorite = !song.favorite;
+		await putSong($state.snapshot(song));
+	}
+
+	function openRename() {
+		renameValue = song.name;
+		renameOpen = true;
+	}
+
+	// Persists the new base name. The "(variant task)" suffix shown in the
+	// header keeps deriving from request via displaySongName, so renaming
+	// only touches the stored stem.
+	async function doRename() {
+		if (song.id == null) return;
+		const v = renameValue.trim();
+		if (!v || v === song.name) return;
+		song.name = v;
+		await putSong($state.snapshot(song));
+	}
+
+	async function doRemove() {
 		if (song.id == null) return;
 		if (app.refSongId === song.id) app.refSongId = null;
 		if (app.srcSongId === song.id) app.srcSongId = null;
@@ -217,34 +233,18 @@
 		if (idx >= 0) app.songs.splice(idx, 1);
 	}
 
-	// Delete every track above this card (newer entries).
-	async function removeAbove() {
-		if (song.id == null) return;
-		const idx = app.songs.findIndex((s) => s.id === song.id);
-		if (idx <= 0) return;
-		const victims = app.songs.slice(0, idx);
+	// Deletes every non-favorite track in the list, regardless of which
+	// card the menu was opened from. The current card is included in the
+	// purge if it is not flagged favorite.
+	async function doRemoveNonFavorites() {
+		const victims = app.songs.filter((s) => !s.favorite);
 		for (const s of victims) {
 			if (s.id == null) continue;
 			if (app.refSongId === s.id) app.refSongId = null;
 			if (app.srcSongId === s.id) app.srcSongId = null;
 			await deleteSong(s.id);
 		}
-		app.songs.splice(0, idx);
-	}
-
-	// Delete every track below this card (older entries).
-	async function removeBelow() {
-		if (song.id == null) return;
-		const idx = app.songs.findIndex((s) => s.id === song.id);
-		if (idx < 0 || idx === app.songs.length - 1) return;
-		const victims = app.songs.slice(idx + 1);
-		for (const s of victims) {
-			if (s.id == null) continue;
-			if (app.refSongId === s.id) app.refSongId = null;
-			if (app.srcSongId === s.id) app.srcSongId = null;
-			await deleteSong(s.id);
-		}
-		app.songs.splice(idx + 1);
+		app.songs = app.songs.filter((s) => s.favorite);
 	}
 
 	// MM:SS:XX (hundredths) for current position
@@ -269,11 +269,11 @@
 	}
 
 	// Single action menu: one entry per user intent. Order mirrors a natural
-	// flow (tweak prompt -> grab audio -> work with latents -> inspect -> destroy).
-	// Delete relies on "open menu + pick Confirm" as a lightweight
-	// confirmation step, no modal needed.
+	// flow (tweak prompt -> rename -> grab audio -> work with latents -> inspect -> destroy).
+	// Destructive entries open a confirm dialog.
 	const actionItems: MenuItem[] = $derived([
 		{ icon: Pencil, label: 'Edit prompt', onSelect: load },
+		{ icon: Type, label: 'Rename song', onSelect: openRename },
 		{ icon: Download, label: 'Download audio', onSelect: downloadAudio },
 		{ icon: Cpu, label: 'Compute VAE latents', onSelect: encodeOnly, disabled: !!song.latents },
 		{
@@ -283,9 +283,12 @@
 			disabled: !song.latents
 		},
 		{ icon: Ear, label: 'LM understand', onSelect: scan },
-		{ icon: Trash2, label: 'Delete this track', onSelect: remove },
-		{ icon: Trash2, label: 'Delete tracks above', onSelect: removeAbove },
-		{ icon: Trash2, label: 'Delete tracks below', onSelect: removeBelow }
+		{ icon: Trash2, label: 'Delete this track', onSelect: () => (confirmDeleteOpen = true) },
+		{
+			icon: TriangleAlert,
+			label: 'Delete non-favorites',
+			onSelect: () => (confirmDeleteNonFavOpen = true)
+		}
 	]);
 </script>
 
@@ -302,6 +305,13 @@
 		<Menu items={actionItems}>
 			{#snippet trigger()}<ChevronDown size={14} /> Menu{/snippet}
 		</Menu>
+		<button
+			class="icon-btn"
+			onclick={toggleFavorite}
+			title={song.favorite ? 'Unfavorite' : 'Favorite'}
+		>
+			<Heart size={14} fill={song.favorite ? 'currentColor' : 'none'} />
+		</button>
 	</div>
 	<Waveform
 		{song}
@@ -340,6 +350,20 @@
 		</div>
 	</div>
 </div>
+
+<Dialog bind:open={confirmDeleteOpen} title="Delete this track?" onConfirm={doRemove} />
+
+<Dialog
+	bind:open={confirmDeleteNonFavOpen}
+	title="Delete non-favorites?"
+	onConfirm={doRemoveNonFavorites}
+/>
+
+<Dialog bind:open={renameOpen} title="Rename song" onConfirm={doRename}>
+	{#snippet body()}
+		<input type="text" class="rename-input" bind:value={renameValue} />
+	{/snippet}
+</Dialog>
 
 <style>
 	.card {
@@ -408,5 +432,17 @@
 	.ref-check {
 		cursor: pointer;
 		accent-color: var(--focus);
+	}
+	.rename-input {
+		width: 100%;
+		background: var(--bg-input);
+		border: none;
+		border-radius: 3px;
+		padding: 0.25rem 0.4rem;
+		color: var(--fg);
+		font-size: 0.8rem;
+	}
+	.rename-input:focus {
+		outline: 1px solid var(--focus);
 	}
 </style>

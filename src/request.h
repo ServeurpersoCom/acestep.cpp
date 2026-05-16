@@ -90,8 +90,10 @@ struct AceRequest {
     // track name for lego/extract/complete (e.g. "vocals", "drums", "guitar")
     std::string track;  // ""
 
-    // inference method: "ode" = ODE Euler, "sde" = SDE Stochastic. Default: ode.
-    std::string infer_method;  // "ode"
+    // Solver name resolved by solver_lookup() (see src/solvers).
+    // Accepted values: "euler", "sde", "dpm3m", "stork4".
+    std::string solver;          // "euler"
+    int         stork_substeps;  // 10, only used by the "stork4" solver
 
     // LM mode: "generate" (full: metadata + lyrics + codes),
     // "inspire" (short query -> metadata + lyrics, no codes),

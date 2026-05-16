@@ -15,9 +15,16 @@ inline constexpr const char * TASK_LEGO        = "lego";
 inline constexpr const char * TASK_EXTRACT     = "extract";
 inline constexpr const char * TASK_COMPLETE    = "complete";
 
-// inference method identifiers (DiT diffusion solver)
-inline constexpr const char * INFER_ODE = "ode";
-inline constexpr const char * INFER_SDE = "sde";
+// Solver identifiers (DiT diffusion sampler, see src/solvers).
+// The string is the canonical solver name resolved by solver_lookup().
+inline constexpr const char * SOLVER_EULER  = "euler";
+inline constexpr const char * SOLVER_SDE    = "sde";
+inline constexpr const char * SOLVER_DPM3M  = "dpm3m";
+inline constexpr const char * SOLVER_STORK4 = "stork4";
+
+// STORK4 sub stepping count (Chebyshev recurrence depth). Higher values
+// stabilize stiff trajectories at the cost of arithmetic, halved on NaN.
+inline constexpr int STORK_SUBSTEPS_DEFAULT = 10;
 
 // DCW mode identifiers (Differential Correction in Wavelet domain).
 // "low":    correct low-frequency sub-band only.

@@ -50,10 +50,11 @@ buildall.cmd      # all backends (CUDA + Vulkan + CPU, runtime loading)
 ### Linux / macOS
 
 ```bash
-./buildcuda.sh    # NVIDIA GPU
-./buildvulkan.sh  # AMD/Intel GPU (Vulkan)
-./buildcpu.sh     # CPU only (with BLAS)
-./buildall.sh     # all backends (CUDA + Vulkan + CPU, runtime loading)
+./buildcuda.sh                   # NVIDIA GPU
+./buildvulkan.sh                 # AMD/Intel GPU (Vulkan)
+./buildcpu.sh                    # CPU only (with BLAS)
+./buildall.sh                    # all backends (CUDA + Vulkan + CPU, runtime loading)
+NVCC_CCBIN=g++-13 ./buildcuda.sh # rolling release distros (Arch w/ GCC 16, etc.)
 ```
 
 macOS auto-enables Metal and Accelerate BLAS with any of the above.
@@ -183,11 +184,12 @@ internals.
 - [A Musician's Guide](https://github.com/ace-step/ACE-Step-1.5/discussions/235) - non-technical guide for music makers
 - [Tutorial](https://github.com/ace-step/ACE-Step-1.5/blob/main/docs/en/Tutorial.md) - design philosophy, model architecture, input control, inference hyperparameters
 
-### Third-party UIs for acestep.cpp
+### Third-party projects
 
 - [acestep-cpp-ui](https://github.com/audiohacking/acestep-cpp-ui)
 - [acestep.cpp-simple-GUI](https://github.com/Nurb4000/acestep.cpp-simple-GUI)
 - [aceradio](https://github.com/IMbackK/aceradio)
+- [HOT-Step-CPP](https://github.com/scragnog/HOT-Step-CPP) (experimental fork with additional solvers and sampling modes)
 
 ## Samples
 

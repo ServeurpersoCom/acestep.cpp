@@ -19,7 +19,6 @@ interface FieldDef {
 	key: keyof AceRequest;
 	section: FieldSection;
 	type: 'str' | 'num' | 'bool';
-	min?: number;
 }
 
 export const FIELDS: readonly FieldDef[] = [
@@ -37,7 +36,7 @@ export const FIELDS: readonly FieldDef[] = [
 	{ key: 'timesignature', section: 'metadata', type: 'str' },
 
 	// LM control: user settings, preserved across Compose/variation switch
-	{ key: 'lm_batch_size', section: 'lm', type: 'num', min: 1 },
+	{ key: 'lm_batch_size', section: 'lm', type: 'num' },
 	{ key: 'lm_temperature', section: 'lm', type: 'num' },
 	{ key: 'lm_cfg_scale', section: 'lm', type: 'num' },
 	{ key: 'lm_top_p', section: 'lm', type: 'num' },
@@ -60,14 +59,15 @@ export const FIELDS: readonly FieldDef[] = [
 	{ key: 'dcw_mode', section: 'advanced', type: 'str' },
 	{ key: 'dcw_scaler', section: 'advanced', type: 'num' },
 	{ key: 'dcw_high_scaler', section: 'advanced', type: 'num' },
-	{ key: 'infer_method', section: 'advanced', type: 'str' },
+	{ key: 'solver', section: 'advanced', type: 'str' },
+	{ key: 'stork_substeps', section: 'advanced', type: 'num' },
 	{ key: 'latent_shift', section: 'advanced', type: 'num' },
 	{ key: 'latent_rescale', section: 'advanced', type: 'num' },
 	{ key: 'peak_clip', section: 'advanced', type: 'num' },
-	{ key: 'mp3_bitrate', section: 'advanced', type: 'num', min: 1 },
+	{ key: 'mp3_bitrate', section: 'advanced', type: 'num' },
 
 	// toolbar: preserved, not in any clear section
-	{ key: 'synth_batch_size', section: 'toolbar', type: 'num', min: 1 },
+	{ key: 'synth_batch_size', section: 'toolbar', type: 'num' },
 
 	// routing: model and task selection, preserved across Compose
 	{ key: 'task_type', section: 'routing', type: 'str' },
@@ -99,7 +99,7 @@ function set(r: AceRequest | Partial<AceRequest>, key: keyof AceRequest, val: un
 function resolveField(f: FieldDef, raw: unknown): unknown {
 	if (f.type === 'num') {
 		const n = num(raw);
-		return n != null && (f.min == null || n >= f.min) ? n : undefined;
+		return n != null ? n : undefined;
 	}
 	if (f.type === 'str') return raw ? String(raw) : undefined;
 	return raw ?? undefined;

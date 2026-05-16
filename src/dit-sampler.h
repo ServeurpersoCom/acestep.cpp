@@ -8,7 +8,7 @@
 #include "dit-graph.h"
 #include "dit.h"
 #include "dwt-haar.h"
-#include "philox.h"
+#include "solvers/solver-registry.h"
 
 #include <cmath>
 #include <cstdio>
@@ -149,12 +149,13 @@ static int dit_ggml_generate(DiTGGML *           model,
                              const int *     real_enc_S         = nullptr,
                              const float *   enc_switch         = nullptr,
                              const int *     real_enc_S_switch  = nullptr,
-                             bool            use_sde            = false,
                              const int64_t * seeds              = nullptr,
                              bool            use_batch_cfg      = true,
                              float           dcw_scaler         = 0.0f,
                              float           dcw_high_scaler    = 0.0f,
-                             const char *    dcw_mode           = "low") {
+                             const char *    dcw_mode           = "low",
+                             const char *    solver_name        = "euler",
+                             int             stork_substeps     = 10) {
     DiTGGMLConfig & c       = model->cfg;
     int             Oc      = c.out_channels;      // 64
     int             ctx_ch  = c.in_channels - Oc;  // 128
@@ -387,6 +388,21 @@ static int dit_ggml_generate(DiTGGML *           model,
 
     struct ggml_tensor * t_t = ggml_graph_get_tensor(gf, "t");
 
+    // Solver dispatch. solver_name is the canonical key, resolved via the registry.
+    const SolverInfo * solver_info = solver_lookup(solver_name);
+    if (!solver_info) {
+        fprintf(stderr, "[DiT] WARNING: unknown solver '%s', falling back to euler\n", solver_name);
+        solver_info = solver_lookup("euler");
+    }
+    fprintf(stderr, "[DiT] Solver: %s (%d NFE/step, order %d)\n", solver_info->display_name, solver_info->nfe,
+            solver_info->order);
+
+    SolverState solver_state;
+    solver_state.seeds          = seeds;
+    solver_state.batch_n        = N;
+    solver_state.n_per          = n_per;
+    solver_state.stork_substeps = stork_substeps;
+
     // Flow matching loop
     bool switched_cover = false;
     for (int step = 0; step < num_steps; step++) {
@@ -582,32 +598,17 @@ static int dit_ggml_generate(DiTGGML *           model,
 
         // step update (all N samples)
         if (step == num_steps - 1) {
-            // final step: predict x0 (same for ODE and SDE)
+            // Final step: predict x0 directly from the velocity field.
             for (int i = 0; i < n_total; i++) {
                 output[i] = xt[i] - vt[i] * t_curr;
             }
         } else {
             float t_next = schedule[step + 1];
 
-            if (use_sde && seeds) {
-                // SDE: predict x0, re-noise with fresh Philox noise.
-                // seed offset per step gives reproducible stochastic trajectories.
-                for (int b = 0; b < N; b++) {
-                    std::vector<float> fresh(n_per);
-                    philox_randn(seeds[b] + step + 1, fresh.data(), n_per, true);
-                    for (int i = 0; i < n_per; i++) {
-                        int   idx = b * n_per + i;
-                        float x0  = xt[idx] - vt[idx] * t_curr;
-                        xt[idx]   = t_next * fresh[i] + (1.0f - t_next) * x0;
-                    }
-                }
-            } else {
-                // ODE Euler: x_{t+1} = x_t - v_t * dt
-                float dt = t_curr - t_next;
-                for (int i = 0; i < n_total; i++) {
-                    xt[i] -= vt[i] * dt;
-                }
-            }
+            // Modular solver dispatch. The solver mutates xt in place.
+            // 1 NFE solvers ignore the model_fn callback (passed empty).
+            solver_state.step_index = step;
+            solver_info->step_fn(xt.data(), vt.data(), t_curr, t_next, n_total, solver_state, {}, vt.data());
 
             // DCW: Differential Correction in Wavelet domain (CVPR 2026).
             // Sampler-side correction for SNR-t bias in flow matching.
@@ -622,7 +623,7 @@ static int dit_ggml_generate(DiTGGML *           model,
             // ODE-only: denoised = xt_after - vt * t_next (reconstructed from
             // post-step xt, since xt_before = xt + vt * dt for Euler ODE so
             // denoised = xt_before - vt * t_curr = xt - vt * t_next).
-            bool dcw_active = (dcw_scaler > 0.0f || dcw_high_scaler > 0.0f) && !(use_sde && seeds);
+            bool dcw_active = (dcw_scaler > 0.0f || dcw_high_scaler > 0.0f) && !solver_info->injects_noise;
             if (dcw_active) {
                 int                Tl = (T + 1) / 2;
                 std::vector<float> denoised(n_per);

@@ -117,7 +117,6 @@ static AceSynthJob * alloc_job(AceSynth * ctx, const AceRequest * reqs, int batc
     s.rr              = reqs[0];
     s.rs              = s.rr.repainting_start;
     s.re              = s.rr.repainting_end;
-    s.use_sde         = (s.rr.infer_method == INFER_SDE);
     s.is_repaint      = false;
     s.is_lego_region  = false;
     s.have_cover      = false;

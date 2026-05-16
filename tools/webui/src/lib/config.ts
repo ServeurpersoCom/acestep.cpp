@@ -16,9 +16,12 @@ export const TASK_LEGO = 'lego';
 export const TASK_EXTRACT = 'extract';
 export const TASK_COMPLETE = 'complete';
 
-// inference method (mirrors task-types.h INFER_*)
-export const INFER_ODE = 'ode';
-export const INFER_SDE = 'sde';
+// Solver names (mirrors task-types.h SOLVER_* and the C++ solver registry).
+// The string is the canonical solver key resolved by solver_lookup().
+export const SOLVER_EULER = 'euler';
+export const SOLVER_SDE = 'sde';
+export const SOLVER_DPM3M = 'dpm3m';
+export const SOLVER_STORK4 = 'stork4';
 
 // DCW modes (mirrors task-types.h DCW_MODE_*)
 export const DCW_MODE_LOW = 'low';

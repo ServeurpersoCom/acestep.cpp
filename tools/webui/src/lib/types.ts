@@ -34,7 +34,8 @@ export interface AceRequest {
 	custom_timesteps?: string;
 	task_type?: string;
 	track?: string;
-	infer_method?: string;
+	solver?: string;
+	stork_substeps?: number;
 	peak_clip?: number;
 	mp3_bitrate?: number;
 	// server routing (not part of C++ AceRequest, parsed separately)
@@ -74,6 +75,9 @@ export interface Song {
 	duration: number;
 	request: AceRequest;
 	audio: Blob;
+	// user-marked favorite, persisted across reloads. Acts as a sticky
+	// flag for the bulk "Delete non-favorites" action.
+	favorite?: boolean;
 	// raw f32 [T*64] post-DiT latents that the VAE decoder produces this
 	// audio from. Always present for songs from /synth or /vae decode (the
 	// server emits them unconditionally). Absent only for songs imported
