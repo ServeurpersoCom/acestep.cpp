@@ -12,11 +12,11 @@
 #include "task-types.h"
 #include "vae-enc.h"
 
-#include <cerrno>
 #include <charconv>
 #include <cstdio>
-#include <cstdlib>
 #include <cstring>
+#include <locale>
+#include <sstream>
 #include <string>
 #include <system_error>
 #include <vector>
@@ -26,8 +26,8 @@ static const int FRAMES_PER_SECOND = 25;
 // CSV list parsers tolerant to any whitespace around commas. Bail on first
 // parse error or overflow, returning the values consumed so far.
 // Integer variant uses std::from_chars (locale-immune, C++17 charconv).
-// Float variant uses std::strtof for portability (Apple Clang lacks the
-// floating-point overload of std::from_chars on some SDK versions).
+// Float variant uses std::istringstream imbued with the C locale so that
+// decimal parsing is locale-independent on all platforms.
 static std::vector<int> parse_csv_int(const std::string & s) {
     std::vector<int> out;
     const char *     first = s.data();
@@ -54,6 +54,9 @@ static std::vector<float> parse_csv_float(const std::string & s) {
     std::vector<float> out;
     const char *       first = s.data();
     const char *       last  = first + s.size();
+    std::istringstream ss;
+    ss.imbue(std::locale::classic());
+    std::string token;
     while (first < last) {
         while (first < last && (*first == ',' || *first == ' ')) {
             ++first;
@@ -61,14 +64,20 @@ static std::vector<float> parse_csv_float(const std::string & s) {
         if (first == last) {
             break;
         }
-        char * end = nullptr;
-        errno      = 0;
-        float v    = std::strtof(first, &end);
-        if (end == first || errno == ERANGE) {
+        // Find the end of this token (next comma or end of string).
+        const char * token_end = first;
+        while (token_end < last && *token_end != ',') {
+            ++token_end;
+        }
+        token.assign(first, token_end);
+        ss.clear();
+        ss.str(token);
+        float v{};
+        if (!(ss >> v) || !ss.eof()) {
             break;
         }
         out.push_back(v);
-        first = end;
+        first = token_end;
     }
     return out;
 }
