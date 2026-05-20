@@ -82,6 +82,11 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
 // reproduces the track's output audio. *T_out is set to T_latent.
 const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, int * T_out);
 
+// Access an optional JSON lyric timing diagnostic for one generated track.
+// Present only when request.return_lyric_timing is true. The current capture
+// is sample-0 scoped, so batched jobs expose timing for track_idx 0 only.
+const char * ace_synth_job_get_lyric_timing_json(const AceSynthJob * job, int track_idx);
+
 // Phase 2: latent splice (for repaint/lego) + VAE decode. Acquires the VAE
 // decoder from the store; in STRICT this evicts the DiT from phase 1
 // transparently. The splice happens in latent space using s.cover_latents
