@@ -40,7 +40,10 @@ static void usage(const char * prog) {
             "  --no-fa                 Disable flash attention\n"
             "  --no-batch-cfg          Split DiT CFG into two separate forwards\n"
             "  --clamp-fp16            Clamp hidden states to FP16 range\n"
-            "  --dump <dir>            Dump intermediate tensors\n",
+            "  --dump <dir>            Dump intermediate tensors\n"
+            "\n"
+            "Request JSON:\n"
+            "  return_lyric_timing     Write <output>.lyric-timing.json sidecar when true\n",
             prog, d.vae_chunk, d.vae_overlap);
 }
 
@@ -296,8 +299,9 @@ int main(int argc, char ** argv) {
     // The CLI does not expose latent IO yet: source and reference are always
     // audio, latent capture is disabled. The server reuses this runner with
     // the full feature.
+    std::vector<std::string> lyric_timings;
     const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, NULL, 0, ref_interleaved, ref_len, NULL, 0,
-                                   all_audio.data());
+                                   all_audio.data(), nullptr, &lyric_timings);
     if (rc != 0) {
         fprintf(stderr, "[Ace-Synth] ERROR: batch run failed\n");
         for (auto & a : all_audio) {
@@ -321,6 +325,20 @@ int main(int argc, char ** argv) {
         if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, groups[0][b].mp3_bitrate,
                          wav_fmt)) {
             fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, out_path);
+        }
+        if (b < (int) lyric_timings.size() && !lyric_timings[b].empty()) {
+            char timing_path[1024];
+            snprintf(timing_path, sizeof(timing_path), "%s%d.lyric-timing.json", all_basenames[b].c_str(),
+                     all_synth_indices[b]);
+            FILE * tf = fopen(timing_path, "wb");
+            if (!tf) {
+                fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, timing_path);
+            } else {
+                fwrite(lyric_timings[b].data(), 1, lyric_timings[b].size(), tf);
+                fputc('\n', tf);
+                fclose(tf);
+                fprintf(stderr, "[Ace-Synth Batch%d] Wrote %s\n", b, timing_path);
+            }
         }
         ace_audio_free(&all_audio[b]);
     }

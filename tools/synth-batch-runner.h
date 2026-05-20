@@ -11,6 +11,7 @@
 #include "pipeline-synth.h"
 
 #include <cstdio>
+#include <string>
 #include <vector>
 
 // Run a batch of request groups through the two synthesis phases.
@@ -30,6 +31,8 @@
 // latents_out: optional capture of one post-DiT latent per generated track,
 //   indexed identically to audio_out. Each entry is [T_track * 64] f32 time-major,
 //   T_track = entry.size() / 64. Pass NULL to skip the capture.
+// lyric_timings_out: optional JSON timing payloads, indexed identically to
+//   audio_out. Entries are empty unless request.return_lyric_timing is true.
 // Returns 0 on success, -1 on any error or cancellation.
 static int synth_batch_run(AceSynth *                             ctx,
                            std::vector<std::vector<AceRequest>> & groups,
@@ -43,6 +46,7 @@ static int synth_batch_run(AceSynth *                             ctx,
                            int                                    ref_T_latent,
                            AceAudio *                             audio_out,
                            std::vector<std::vector<float>> *      latents_out = nullptr,
+                           std::vector<std::string> *             lyric_timings_out = nullptr,
                            bool (*cancel)(void *)                             = nullptr,
                            void * cancel_data                                 = nullptr) {
     const int                  n_groups = (int) groups.size();
@@ -51,6 +55,9 @@ static int synth_batch_run(AceSynth *                             ctx,
 
     if (latents_out) {
         latents_out->clear();
+    }
+    if (lyric_timings_out) {
+        lyric_timings_out->clear();
     }
 
     // Phase 1: denoising loop for each group. The DiT is acquired and released
@@ -81,6 +88,18 @@ static int synth_batch_run(AceSynth *                             ctx,
                 int           T   = 0;
                 const float * src = ace_synth_job_get_latent(jobs[g], i, &T);
                 (*latents_out)[audio_off[g] + i].assign(src, src + (size_t) T * 64);
+            }
+        }
+    }
+    if (lyric_timings_out) {
+        lyric_timings_out->resize((size_t) off);
+        for (int g = 0; g < n_groups; g++) {
+            const int gn = (int) groups[g].size();
+            for (int i = 0; i < gn; i++) {
+                const char * json = ace_synth_job_get_lyric_timing_json(jobs[g], i);
+                if (json) {
+                    (*lyric_timings_out)[audio_off[g] + i] = json;
+                }
             }
         }
     }

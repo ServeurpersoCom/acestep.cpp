@@ -15,6 +15,41 @@
 #include <cstring>
 #include <vector>
 
+struct LyricAttentionDebug {
+    const DebugDumper * dbg;
+    const int *         lyric_token_ids;
+    int                 lyric_token_count;
+    int                 lyric_start_idx;
+    int                 lyric_end_idx;
+    std::vector<float> * selected_heads;
+    int *                selected_head_count;
+    int *                selected_frame_count;
+};
+
+// ACE-Step Python's DiT alignment uses these heads from layers 2..6.
+static int lyric_timing_selected_heads_for_layer(int layer, int * out, int max_out) {
+    int n = 0;
+    auto push = [&](int h) {
+        if (n < max_out) {
+            out[n++] = h;
+        }
+    };
+    if (layer == 2) {
+        push(6);
+    } else if (layer == 3) {
+        push(10);
+        push(11);
+    } else if (layer == 4) {
+        push(3);
+    } else if (layer == 5) {
+        push(8);
+        push(9);
+    } else if (layer == 6) {
+        push(8);
+    }
+    return n;
+}
+
 // APG (Adaptive Projected Guidance) for DiT CFG
 // Matches Python ACE-Step-1.5 acestep/models/base/apg_guidance.py
 struct APGMomentumBuffer {
@@ -151,11 +186,12 @@ static int dit_ggml_generate(DiTGGML *           model,
                              const int *     real_enc_S_switch  = nullptr,
                              const int64_t * seeds              = nullptr,
                              bool            use_batch_cfg      = true,
-                             float           dcw_scaler         = 0.0f,
-                             float           dcw_high_scaler    = 0.0f,
-                             const char *    dcw_mode           = "low",
-                             const char *    solver_name        = "euler",
-                             int             stork_substeps     = 10) {
+                             float           dcw_scaler       = 0.0f,
+                             float           dcw_high_scaler  = 0.0f,
+                             const char *    dcw_mode         = "low",
+                             const char *    solver_name      = "euler",
+                             int             stork_substeps   = 10,
+                             const LyricAttentionDebug * lyric_dbg = nullptr) {
     DiTGGMLConfig & c       = model->cfg;
     int             Oc      = c.out_channels;      // 64
     int             ctx_ch  = c.in_channels - Oc;  // 128
@@ -679,6 +715,105 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
 
         fprintf(stderr, "[DiT] Step %d/%d t=%.3f\n", step + 1, num_steps, t_curr);
+    }
+
+    if (lyric_dbg && model->capture_lyric_attn &&
+        lyric_dbg->lyric_token_ids && lyric_dbg->lyric_token_count > 0) {
+        if (lyric_dbg->dbg && lyric_dbg->dbg->enabled) {
+            int meta[6] = {
+                lyric_dbg->lyric_start_idx,
+                lyric_dbg->lyric_end_idx,
+                lyric_dbg->lyric_token_count,
+                enc_S,
+                S,
+                c.n_heads,
+            };
+            debug_dump_i32_1d(lyric_dbg->dbg, "lyric_attention_meta", meta, 6);
+        }
+        if (lyric_dbg->selected_heads) {
+            lyric_dbg->selected_heads->clear();
+            if (lyric_dbg->selected_head_count) {
+                *lyric_dbg->selected_head_count = 0;
+            }
+            if (lyric_dbg->selected_frame_count) {
+                *lyric_dbg->selected_frame_count = S;
+            }
+        }
+
+        float t_last = 1.0f / (float) num_steps;
+        if (t_t) {
+            ggml_backend_tensor_set(t_t, &t_last, 0, sizeof(float));
+        }
+        if (t_tr) {
+            ggml_backend_tensor_set(t_tr, &t_last, 0, sizeof(float));
+        }
+
+        // Replay the Python alignment forward:
+        // xt = t_last * original_noise + (1 - t_last) * generated_x0.
+        for (int b = 0; b < N; b++) {
+            for (int t = 0; t < T; t++) {
+                memcpy(&input_buf[b * T * in_ch + t * in_ch], &context_latents[b * T * ctx_ch + t * ctx_ch],
+                       ctx_ch * sizeof(float));
+                for (int ch = 0; ch < Oc; ch++) {
+                    int   latent_idx = b * n_per + t * Oc + ch;
+                    float xt_align   = t_last * noise[latent_idx] + (1.0f - t_last) * output[latent_idx];
+                    input_buf[b * T * in_ch + t * in_ch + ctx_ch + ch] = xt_align;
+                }
+            }
+            if (batch_cfg) {
+                memcpy(&input_buf[(N + b) * T * in_ch], &input_buf[b * T * in_ch], T * in_ch * sizeof(float));
+            }
+        }
+
+        ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+        ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
+        ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
+        ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_sa_mask_pad, sa_pad_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+        ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+
+        ggml_backend_sched_graph_compute(model->sched, gf);
+
+        for (int layer = 2; layer <= 6; layer++) {
+            char tensor_name[64];
+            snprintf(tensor_name, sizeof(tensor_name), "lyric_ca_l%d", layer);
+            struct ggml_tensor * t_scores = ggml_graph_get_tensor(gf, tensor_name);
+            if (!t_scores) {
+                continue;
+            }
+
+            int n0 = (int) t_scores->ne[0];  // encoder tokens
+            int n1 = (int) t_scores->ne[1];  // latent frames
+            int n2 = (int) t_scores->ne[2];  // heads
+            int sample_elems = n0 * n1 * n2;
+            std::vector<float> scores(sample_elems);
+            ggml_backend_tensor_get(t_scores, scores.data(), 0, sample_elems * sizeof(float));
+
+            if (lyric_dbg->dbg && lyric_dbg->dbg->enabled) {
+                char dump_name[64];
+                snprintf(dump_name, sizeof(dump_name), "lyric_ca_layer%d", layer);
+                debug_dump_3d(lyric_dbg->dbg, dump_name, scores.data(), n0, n1, n2);
+            }
+
+            if (lyric_dbg->selected_heads && lyric_dbg->lyric_end_idx > lyric_dbg->lyric_start_idx) {
+                int selected[4];
+                int n_selected = lyric_timing_selected_heads_for_layer(layer, selected, 4);
+                for (int si = 0; si < n_selected; si++) {
+                    int h = selected[si];
+                    if (h < 0 || h >= n2) {
+                        continue;
+                    }
+                    for (int tok = lyric_dbg->lyric_start_idx; tok < lyric_dbg->lyric_end_idx && tok < n0; tok++) {
+                        for (int fr = 0; fr < n1; fr++) {
+                            lyric_dbg->selected_heads->push_back(scores[((size_t) tok * n1 + fr) * n2 + h]);
+                        }
+                    }
+                    if (lyric_dbg->selected_head_count) {
+                        (*lyric_dbg->selected_head_count)++;
+                    }
+                }
+            }
+        }
     }
 
     // Batch diagnostic: report per-sample stats to catch corruption
