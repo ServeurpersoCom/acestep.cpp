@@ -134,8 +134,8 @@ full /synth or /understand pass.
 
 Synth responses are multipart/mixed: one audio part and one latent part per
 generated track, paired in wire order. If `return_lyric_timing` is true in the
-request JSON, `/synth` also appends an optional `lyric_timing` JSON part for
-the generated track. Understand responses are multipart/mixed too: one JSON
+request JSON, `/synth` also appends an optional `lyric_timing` JSON part after
+that track's latent part. Understand responses are multipart/mixed too: one JSON
 part plus the latent of the input source audio. The client can replay any
 captured latent back as `src_latents` / `ref_latents` on a later /synth or
 /understand call to skip the VAE encode entirely, or feed it to /vae decode to

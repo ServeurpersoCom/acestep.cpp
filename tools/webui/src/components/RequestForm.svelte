@@ -167,10 +167,11 @@
 			busySynth = true;
 			pollJob(synthJob.id)
 				.then(() => jobResultBlobs(synthJob.id))
-				.then(async ({ audios, latents }) => {
+				.then(async ({ audios, latents, lyricTimings }) => {
 					clearJob('synth');
 					const now = Date.now();
 					for (let i = audios.length - 1; i >= 0; i--) {
+						const lyricTiming = lyricTimings[i];
 						const t = synthJob.tracks[i] || {
 							caption: '',
 							seed: 0,
@@ -187,7 +188,8 @@
 							duration: t.duration,
 							request: t.request,
 							audio: audios[i],
-							latents: latents[i]
+							latents: latents[i],
+							lyric_timing: lyricTiming ? await lyricTiming.text() : undefined
 						};
 						await putSong(song);
 					}
@@ -500,13 +502,14 @@
 				}))
 			});
 			await pollJob(jobId);
-			const { audios, latents } = await jobResultBlobs(jobId);
+			const { audios, latents, lyricTimings } = await jobResultBlobs(jobId);
 			clearJob('synth');
 
 			const now = Date.now();
 
 			for (let i = audios.length - 1; i >= 0; i--) {
 				const r = expanded[i];
+				const lyricTiming = lyricTimings[i];
 				const song = {
 					name: baseName,
 					format: app.format,
@@ -516,7 +519,8 @@
 					duration: r.duration || 0,
 					request: r,
 					audio: audios[i],
-					latents: latents[i]
+					latents: latents[i],
+					lyric_timing: lyricTiming ? await lyricTiming.text() : undefined
 				} as Song;
 				song.id = await putSong(song);
 				app.songs.unshift(song);
@@ -995,6 +999,10 @@
 					bind:value={app.request.custom_timesteps}
 				/></label
 			>
+			<label class="inline-check">
+				<input type="checkbox" bind:checked={app.request.return_lyric_timing} />
+				Lyric timing
+			</label>
 			<div class="meta-grid">
 				<label
 					>DCW mode <select
@@ -1193,6 +1201,16 @@
 	}
 	.header-toggle input[type='checkbox'] {
 		cursor: pointer;
+	}
+	.inline-check {
+		flex-direction: row;
+		align-items: center;
+		gap: 0.4rem;
+		cursor: pointer;
+	}
+	.inline-check input[type='checkbox'] {
+		cursor: pointer;
+		accent-color: var(--focus);
 	}
 	.has-clear {
 		position: relative;

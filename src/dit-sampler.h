@@ -17,13 +17,13 @@
 
 struct LyricAttentionDebug {
     const DebugDumper * dbg;
-    const int *         lyric_token_ids;
-    int                 lyric_token_count;
-    int                 lyric_start_idx;
-    int                 lyric_end_idx;
-    std::vector<float> * selected_heads;
-    int *                selected_head_count;
-    int *                selected_frame_count;
+    const std::vector<std::vector<int>> * lyric_token_ids;
+    const std::vector<int> *              lyric_start_idx;
+    const std::vector<int> *              lyric_end_idx;
+    int                                   batch_n;
+    std::vector<std::vector<float>> *     selected_heads;
+    std::vector<int> *                    selected_head_count;
+    std::vector<int> *                    selected_frame_count;
 };
 
 // ACE-Step Python's DiT alignment uses these heads from layers 2..6.
@@ -717,13 +717,31 @@ static int dit_ggml_generate(DiTGGML *           model,
         fprintf(stderr, "[DiT] Step %d/%d t=%.3f\n", step + 1, num_steps, t_curr);
     }
 
-    if (lyric_dbg && model->capture_lyric_attn &&
-        lyric_dbg->lyric_token_ids && lyric_dbg->lyric_token_count > 0) {
+    if (lyric_dbg && model->capture_lyric_attn && lyric_dbg->lyric_token_ids &&
+        !lyric_dbg->lyric_token_ids->empty()) {
+        int timing_batch_n = lyric_dbg->batch_n > 0 ? lyric_dbg->batch_n : N;
+        if (timing_batch_n > N) {
+            timing_batch_n = N;
+        }
+        if (timing_batch_n > (int) lyric_dbg->lyric_token_ids->size()) {
+            timing_batch_n = (int) lyric_dbg->lyric_token_ids->size();
+        }
+
+        int sample0_start = 0;
+        int sample0_end   = 0;
+        int sample0_count = 0;
+        if (timing_batch_n > 0 && lyric_dbg->lyric_start_idx && lyric_dbg->lyric_end_idx &&
+            !lyric_dbg->lyric_start_idx->empty() && !lyric_dbg->lyric_end_idx->empty()) {
+            sample0_start = (*lyric_dbg->lyric_start_idx)[0];
+            sample0_end   = (*lyric_dbg->lyric_end_idx)[0];
+            sample0_count = (int) (*lyric_dbg->lyric_token_ids)[0].size();
+        }
+
         if (lyric_dbg->dbg && lyric_dbg->dbg->enabled) {
             int meta[6] = {
-                lyric_dbg->lyric_start_idx,
-                lyric_dbg->lyric_end_idx,
-                lyric_dbg->lyric_token_count,
+                sample0_start,
+                sample0_end,
+                sample0_count,
                 enc_S,
                 S,
                 c.n_heads,
@@ -732,15 +750,16 @@ static int dit_ggml_generate(DiTGGML *           model,
         }
         if (lyric_dbg->selected_heads) {
             lyric_dbg->selected_heads->clear();
+            lyric_dbg->selected_heads->resize(timing_batch_n);
             if (lyric_dbg->selected_head_count) {
-                *lyric_dbg->selected_head_count = 0;
+                lyric_dbg->selected_head_count->assign(timing_batch_n, 0);
             }
             if (lyric_dbg->selected_frame_count) {
-                *lyric_dbg->selected_frame_count = S;
+                lyric_dbg->selected_frame_count->assign(timing_batch_n, S);
             }
         }
 
-        float t_last = 1.0f / (float) num_steps;
+        float t_last = num_steps > 0 ? schedule[num_steps - 1] : 0.0f;
         if (t_t) {
             ggml_backend_tensor_set(t_t, &t_last, 0, sizeof(float));
         }
@@ -785,17 +804,45 @@ static int dit_ggml_generate(DiTGGML *           model,
             int n0 = (int) t_scores->ne[0];  // encoder tokens
             int n1 = (int) t_scores->ne[1];  // latent frames
             int n2 = (int) t_scores->ne[2];  // heads
-            int sample_elems = n0 * n1 * n2;
-            std::vector<float> scores(sample_elems);
-            ggml_backend_tensor_get(t_scores, scores.data(), 0, sample_elems * sizeof(float));
-
-            if (lyric_dbg->dbg && lyric_dbg->dbg->enabled) {
-                char dump_name[64];
-                snprintf(dump_name, sizeof(dump_name), "lyric_ca_layer%d", layer);
-                debug_dump_3d(lyric_dbg->dbg, dump_name, scores.data(), n0, n1, n2);
+            int n3 = (int) t_scores->ne[3];  // graph batch slots
+            if (n3 <= 0) {
+                n3 = 1;
             }
+            int capture_batches = timing_batch_n;
+            if (capture_batches > N) {
+                capture_batches = N;
+            }
+            if (capture_batches > n3) {
+                capture_batches = n3;
+            }
+            size_t sample_elems = (size_t) n0 * n1 * n2;
+            std::vector<float> scores(sample_elems);
 
-            if (lyric_dbg->selected_heads && lyric_dbg->lyric_end_idx > lyric_dbg->lyric_start_idx) {
+            for (int b = 0; b < capture_batches; b++) {
+                size_t sample_offset = (size_t) b * sample_elems * sizeof(float);
+                ggml_backend_tensor_get(t_scores, scores.data(), sample_offset, sample_elems * sizeof(float));
+
+                if (b == 0 && lyric_dbg->dbg && lyric_dbg->dbg->enabled) {
+                    char dump_name[64];
+                    snprintf(dump_name, sizeof(dump_name), "lyric_ca_layer%d", layer);
+                    debug_dump_3d(lyric_dbg->dbg, dump_name, scores.data(), n0, n1, n2);
+                }
+
+                if (!lyric_dbg->selected_heads || !lyric_dbg->lyric_start_idx || !lyric_dbg->lyric_end_idx ||
+                    b >= (int) lyric_dbg->selected_heads->size() || b >= (int) lyric_dbg->lyric_start_idx->size() ||
+                    b >= (int) lyric_dbg->lyric_end_idx->size()) {
+                    continue;
+                }
+
+                int lyric_start = (*lyric_dbg->lyric_start_idx)[b];
+                int lyric_end   = (*lyric_dbg->lyric_end_idx)[b];
+                if (lyric_end <= lyric_start) {
+                    continue;
+                }
+                if (lyric_dbg->selected_frame_count && b < (int) lyric_dbg->selected_frame_count->size()) {
+                    (*lyric_dbg->selected_frame_count)[b] = n1;
+                }
+
                 int selected[4];
                 int n_selected = lyric_timing_selected_heads_for_layer(layer, selected, 4);
                 for (int si = 0; si < n_selected; si++) {
@@ -803,13 +850,13 @@ static int dit_ggml_generate(DiTGGML *           model,
                     if (h < 0 || h >= n2) {
                         continue;
                     }
-                    for (int tok = lyric_dbg->lyric_start_idx; tok < lyric_dbg->lyric_end_idx && tok < n0; tok++) {
+                    for (int tok = lyric_start; tok < lyric_end && tok < n0; tok++) {
                         for (int fr = 0; fr < n1; fr++) {
-                            lyric_dbg->selected_heads->push_back(scores[((size_t) tok * n1 + fr) * n2 + h]);
+                            (*lyric_dbg->selected_heads)[b].push_back(scores[((size_t) tok * n1 + fr) * n2 + h]);
                         }
                     }
-                    if (lyric_dbg->selected_head_count) {
-                        (*lyric_dbg->selected_head_count)++;
+                    if (lyric_dbg->selected_head_count && b < (int) lyric_dbg->selected_head_count->size()) {
+                        (*lyric_dbg->selected_head_count)[b]++;
                     }
                 }
             }

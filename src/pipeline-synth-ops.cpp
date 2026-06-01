@@ -425,6 +425,23 @@ static void build_prompt_strings(const AceRequest &  rb,
     lyric_out = std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
 }
 
+static int bpe_token_split_for_decoded_offset(const BPETokenizer & bpe,
+                                              const std::vector<int> & ids,
+                                              size_t                   byte_offset) {
+    size_t decoded = 0;
+    for (int i = 0; i < (int) ids.size(); i++) {
+        std::vector<int> one(1, ids[i]);
+        std::string      piece = bpe_decode(bpe, one);
+        size_t           next  = decoded + piece.size();
+        if (next < byte_offset) {
+            decoded = next;
+            continue;
+        }
+        return next == byte_offset ? i + 1 : i;
+    }
+    return (int) ids.size();
+}
+
 int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
     // Per-batch text encoding in two GPU phases to keep EVICT_STRICT at one
     // module resident at a time:
@@ -465,6 +482,11 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
         H_text = te->cfg.hidden_size;
 
+        s.return_lyric_timing.assign(batch_n, false);
+        s.lyric_token_ids.resize(batch_n);
+        s.lyric_start_idx.assign(batch_n, 0);
+        s.lyric_end_idx.assign(batch_n, 0);
+
         for (int b = 0; b < batch_n; b++) {
             std::string text_str;
             std::string lyric_str;
@@ -475,26 +497,25 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             int  S_text    = (int) text_ids.size();
             int  S_lyric   = (int) lyric_ids.size();
 
-            if (b == 0) {
-                const char * language_b = reqs[b].vocal_language.empty() ? "unknown" : reqs[b].vocal_language.c_str();
-                std::string  header_str = std::string("# Languages\n") + language_b + "\n\n# Lyric\n";
-                auto         header_ids = bpe_encode(bpe, header_str.c_str(), false);
+            const char * language_b = reqs[b].vocal_language.empty() ? "unknown" : reqs[b].vocal_language.c_str();
+            std::string  header_str = std::string("# Languages\n") + language_b + "\n\n# Lyric\n";
 
-                s.lyric_token_ids = lyric_ids;
-                s.lyric_start_idx = (int) header_ids.size();
-                s.lyric_end_idx   = (int) lyric_ids.size();
-                for (int ti = s.lyric_start_idx; ti < (int) lyric_ids.size(); ti++) {
-                    if (lyric_ids[ti] == bpe->eos_id) {
-                        s.lyric_end_idx = ti;
-                        break;
-                    }
+            s.return_lyric_timing[b] = reqs[b].return_lyric_timing;
+            s.lyric_token_ids[b]     = lyric_ids;
+            s.lyric_start_idx[b]     = bpe_token_split_for_decoded_offset(*bpe, lyric_ids, header_str.size());
+            s.lyric_end_idx[b]       = (int) lyric_ids.size();
+            for (int ti = s.lyric_start_idx[b]; ti < (int) lyric_ids.size(); ti++) {
+                if (lyric_ids[ti] == bpe->eos_id) {
+                    s.lyric_end_idx[b] = ti;
+                    break;
                 }
+            }
 
-                if (s.dbg.enabled) {
-                    int range[4] = { s.lyric_start_idx, s.lyric_end_idx, S_lyric, bpe->eos_id };
-                    debug_dump_i32_1d(&s.dbg, "lyric_token_ids", s.lyric_token_ids.data(), (int) s.lyric_token_ids.size());
-                    debug_dump_i32_1d(&s.dbg, "lyric_token_range", range, 4);
-                }
+            if (b == 0 && s.dbg.enabled) {
+                int range[4] = { s.lyric_start_idx[b], s.lyric_end_idx[b], S_lyric, bpe->eos_id };
+                debug_dump_i32_1d(&s.dbg, "lyric_token_ids", s.lyric_token_ids[b].data(),
+                                  (int) s.lyric_token_ids[b].size());
+                debug_dump_i32_1d(&s.dbg, "lyric_token_range", range, 4);
             }
 
             main_fwd[b].S_text  = S_text;
@@ -867,8 +888,19 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     }
     bool prev_capture_lyric_attn = dit->capture_lyric_attn;
     bool prev_use_flash_attn     = dit->use_flash_attn;
-    bool capture_lyric_attn = (s.dbg.enabled || s.rr.return_lyric_timing) && !s.lyric_token_ids.empty() &&
-                              s.lyric_end_idx > s.lyric_start_idx;
+    bool any_lyric_timing_request = false;
+    bool any_lyric_range          = false;
+    for (int b = 0; b < batch_n; b++) {
+        if (b < (int) s.return_lyric_timing.size() && s.return_lyric_timing[b]) {
+            any_lyric_timing_request = true;
+        }
+        if (b < (int) s.lyric_token_ids.size() && b < (int) s.lyric_start_idx.size() &&
+            b < (int) s.lyric_end_idx.size() && !s.lyric_token_ids[b].empty() &&
+            s.lyric_end_idx[b] > s.lyric_start_idx[b]) {
+            any_lyric_range = true;
+        }
+    }
+    bool capture_lyric_attn = (s.dbg.enabled || any_lyric_timing_request) && any_lyric_range;
     if (capture_lyric_attn) {
         // Attention weights are not materialized by ggml_flash_attn_ext. Use the
         // manual attention path only for explicit debug/timing dumps.
@@ -879,13 +911,13 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     s.timer.reset();
     LyricAttentionDebug lyric_dbg = {};
     lyric_dbg.dbg                = &s.dbg;
-    lyric_dbg.lyric_token_ids    = s.lyric_token_ids.empty() ? nullptr : s.lyric_token_ids.data();
-    lyric_dbg.lyric_token_count  = (int) s.lyric_token_ids.size();
-    lyric_dbg.lyric_start_idx    = s.lyric_start_idx;
-    lyric_dbg.lyric_end_idx      = s.lyric_end_idx;
-    lyric_dbg.selected_heads = s.rr.return_lyric_timing ? &s.lyric_timing_heads : nullptr;
-    lyric_dbg.selected_head_count = s.rr.return_lyric_timing ? &s.lyric_timing_head_count : nullptr;
-    lyric_dbg.selected_frame_count = s.rr.return_lyric_timing ? &s.lyric_timing_frame_count : nullptr;
+    lyric_dbg.lyric_token_ids    = &s.lyric_token_ids;
+    lyric_dbg.lyric_start_idx    = &s.lyric_start_idx;
+    lyric_dbg.lyric_end_idx      = &s.lyric_end_idx;
+    lyric_dbg.batch_n            = batch_n;
+    lyric_dbg.selected_heads = any_lyric_timing_request ? &s.lyric_timing_heads : nullptr;
+    lyric_dbg.selected_head_count = any_lyric_timing_request ? &s.lyric_timing_head_count : nullptr;
+    lyric_dbg.selected_frame_count = any_lyric_timing_request ? &s.lyric_timing_frame_count : nullptr;
     int dit_rc = dit_ggml_generate(
         dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
         s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
@@ -899,22 +931,31 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     if (dit_rc != 0) {
         return -1;
     }
-    if (s.rr.return_lyric_timing) {
-        if (s.lyric_timing_heads.empty() || s.lyric_timing_head_count <= 0 || s.lyric_timing_frame_count <= 0 ||
-            s.lyric_end_idx <= s.lyric_start_idx) {
-            s.lyric_timing_json = lyric_timing_error_json("no lyric attention captured");
-        } else {
-            BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
+    if (any_lyric_timing_request) {
+        s.lyric_timing_json.assign(batch_n, std::string());
+        BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
+        for (int b = 0; b < batch_n; b++) {
+            if (b >= (int) s.return_lyric_timing.size() || !s.return_lyric_timing[b]) {
+                continue;
+            }
+            if (b >= (int) s.lyric_timing_heads.size() || b >= (int) s.lyric_timing_head_count.size() ||
+                b >= (int) s.lyric_timing_frame_count.size() || b >= (int) s.lyric_start_idx.size() ||
+                b >= (int) s.lyric_end_idx.size() || b >= (int) s.lyric_token_ids.size() ||
+                s.lyric_timing_heads[b].empty() || s.lyric_timing_head_count[b] <= 0 ||
+                s.lyric_timing_frame_count[b] <= 0 || s.lyric_end_idx[b] <= s.lyric_start_idx[b]) {
+                s.lyric_timing_json[b] = lyric_timing_error_json("no lyric attention captured");
+                continue;
+            }
             if (!bpe) {
-                s.lyric_timing_json = lyric_timing_error_json("tokenizer unavailable");
-            } else {
-                std::vector<int> ids(s.lyric_token_ids.begin() + s.lyric_start_idx,
-                                     s.lyric_token_ids.begin() + s.lyric_end_idx);
-                std::string      error;
-                if (!lyric_timing_build_json(*bpe, ids, s.lyric_timing_heads, s.lyric_timing_head_count,
-                                             s.lyric_timing_frame_count, s.duration, s.lyric_timing_json, error)) {
-                    s.lyric_timing_json = lyric_timing_error_json(error);
-                }
+                s.lyric_timing_json[b] = lyric_timing_error_json("tokenizer unavailable");
+                continue;
+            }
+            std::vector<int> ids(s.lyric_token_ids[b].begin() + s.lyric_start_idx[b],
+                                 s.lyric_token_ids[b].begin() + s.lyric_end_idx[b]);
+            std::string      error;
+            if (!lyric_timing_build_json(*bpe, ids, s.lyric_timing_heads[b], s.lyric_timing_head_count[b],
+                                         s.lyric_timing_frame_count[b], s.duration, s.lyric_timing_json[b], error)) {
+                s.lyric_timing_json[b] = lyric_timing_error_json(error);
             }
         }
     }

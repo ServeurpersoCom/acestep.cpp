@@ -13,6 +13,7 @@
 #include "task-types.h"
 #include "version.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -315,6 +316,7 @@ int main(int argc, char ** argv) {
     }
 
     // Write output files
+    int write_failed = 0;
     for (int b = 0; b < (int) all_audio.size(); b++) {
         if (!all_audio[b].samples) {
             continue;
@@ -325,6 +327,7 @@ int main(int argc, char ** argv) {
         if (!audio_write(out_path, all_audio[b].samples, all_audio[b].n_samples, 48000, groups[0][b].mp3_bitrate,
                          wav_fmt)) {
             fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, out_path);
+            write_failed = 1;
         }
         if (b < (int) lyric_timings.size() && !lyric_timings[b].empty()) {
             char timing_path[1024];
@@ -332,12 +335,33 @@ int main(int argc, char ** argv) {
                      all_synth_indices[b]);
             FILE * tf = fopen(timing_path, "wb");
             if (!tf) {
-                fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to write %s\n", b, timing_path);
+                fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to open %s: %s\n", b, timing_path, strerror(errno));
+                write_failed = 1;
             } else {
-                fwrite(lyric_timings[b].data(), 1, lyric_timings[b].size(), tf);
-                fputc('\n', tf);
-                fclose(tf);
-                fprintf(stderr, "[Ace-Synth Batch%d] Wrote %s\n", b, timing_path);
+                bool   ok       = true;
+                size_t expected = lyric_timings[b].size();
+                size_t wrote    = fwrite(lyric_timings[b].data(), 1, expected, tf);
+                if (wrote != expected) {
+                    fprintf(stderr, "[Ace-Synth Batch%d] FATAL: short write to %s (%zu/%zu): %s\n", b, timing_path,
+                            wrote, expected, strerror(errno));
+                    ok           = false;
+                    write_failed = 1;
+                }
+                if (fputc('\n', tf) == EOF) {
+                    fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to finish %s: %s\n", b, timing_path,
+                            strerror(errno));
+                    ok           = false;
+                    write_failed = 1;
+                }
+                if (fclose(tf) != 0) {
+                    fprintf(stderr, "[Ace-Synth Batch%d] FATAL: failed to close %s: %s\n", b, timing_path,
+                            strerror(errno));
+                    ok           = false;
+                    write_failed = 1;
+                }
+                if (ok) {
+                    fprintf(stderr, "[Ace-Synth Batch%d] Wrote %s\n", b, timing_path);
+                }
             }
         }
         ace_audio_free(&all_audio[b]);
@@ -348,5 +372,5 @@ int main(int argc, char ** argv) {
     ace_synth_free(ctx);
     store_free(store);
     fprintf(stderr, "[Ace-Synth] All done\n");
-    return 0;
+    return write_failed ? 1 : 0;
 }

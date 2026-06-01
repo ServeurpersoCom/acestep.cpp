@@ -119,25 +119,26 @@ export async function jobResultJson(id: string): Promise<AceRequest[]> {
 }
 
 // Synth result. The server replies multipart/mixed with one audio part and
-// one latent part per generated track, paired by index. The /vae decode path
-// replies single-Content-Type (no latents in the body, the client already
-// holds the one it uploaded).
+// one latent part per generated track, plus optional lyric timing JSON. The
+// /vae decode path replies single-Content-Type (no latents in the body, the
+// client already holds the one it uploaded).
 export interface SynthResult {
 	audios: Blob[];
 	latents: Blob[];
+	lyricTimings: Array<Blob | null>;
 }
 
 // GET /job?id=X&result=1: fetch synth result. Multipart parts are discriminated
-// by their own Content-Type header: audio/* parts populate audios, the
-// application/octet-stream parts populate latents in wire order. A single-
-// Content-Type response (/vae decode path) is returned as one audio with no
-// latents.
+// by their own Content-Type header: audio/* parts populate audios,
+// application/octet-stream parts populate latents, and application/json parts
+// populate lyricTimings by the current audio track. A single-Content-Type
+// response (/vae decode path) is returned as one audio with no latents.
 export async function jobResultBlobs(id: string): Promise<SynthResult> {
 	const res = await fetch(`job?id=${encodeURIComponent(id)}&result=1`);
 	if (!res.ok) throw new Error(`${res.status} Result not ready`);
 	const ct = res.headers.get('Content-Type') || '';
 	if (!ct.startsWith('multipart/')) {
-		return { audios: [await res.blob()], latents: [] };
+		return { audios: [await res.blob()], latents: [], lyricTimings: [] };
 	}
 	const match = ct.match(/boundary=([^\s;]+)/);
 	if (!match) throw new Error('Missing boundary in multipart response');
@@ -251,14 +252,20 @@ function parseMultipartTyped(buf: Uint8Array, boundary: string): SynthResult {
 	const parts = parseMultipartParts(buf, boundary);
 	const audios: Blob[] = [];
 	const latents: Blob[] = [];
+	const lyricTimings: Array<Blob | null> = [];
+	let currentTrack = -1;
 	for (const part of parts) {
 		if (part.contentType.startsWith('audio/')) {
+			currentTrack = audios.length;
 			audios.push(part.body);
+			lyricTimings[currentTrack] = null;
 		} else if (part.contentType.startsWith('application/octet-stream')) {
 			latents.push(part.body);
+		} else if (part.contentType.startsWith('application/json') && currentTrack >= 0) {
+			lyricTimings[currentTrack] = part.body;
 		}
 	}
-	return { audios, latents };
+	return { audios, latents, lyricTimings };
 }
 
 // POST /vae (multipart): single VAE entrypoint. Direction depends on which
