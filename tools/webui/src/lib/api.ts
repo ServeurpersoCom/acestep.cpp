@@ -187,12 +187,13 @@ export async function cancelJob(id: string): Promise<void> {
 // dispatch on that header to assemble typed results.
 interface MultipartPart {
 	contentType: string;
+	name?: string;
 	body: Blob;
 }
 
 // Parse a multipart/mixed binary response into typed parts. Reads only the
-// Content-Type header on each part; other headers (Content-Disposition...)
-// are ignored. Returns parts in wire order.
+// Content-Type and field name headers needed by higher-level parsers. Returns
+// parts in wire order.
 function parseMultipartParts(buf: Uint8Array, boundary: string): MultipartPart[] {
 	const enc = new TextEncoder();
 	const delim = enc.encode('--' + boundary);
@@ -230,16 +231,21 @@ function parseMultipartParts(buf: Uint8Array, boundary: string): MultipartPart[]
 		// scan headers for Content-Type. Headers are CRLF-separated ASCII.
 		const headerText = dec.decode(buf.slice(partStart, splitAt));
 		let contentType = 'application/octet-stream';
+		let name: string | undefined;
 		for (const line of headerText.split(/\r\n/)) {
 			const m = line.match(/^Content-Type:\s*(.+)$/i);
 			if (m) {
 				contentType = m[1].trim();
-				break;
+				continue;
+			}
+			const d = line.match(/^Content-Disposition:\s*.*\bname="([^"]+)"/i);
+			if (d) {
+				name = d[1];
 			}
 		}
 
 		const body = buf.slice(splitAt + 4, partEnd);
-		results.push({ contentType, body: new Blob([body], { type: contentType }) });
+		results.push({ contentType, name, body: new Blob([body], { type: contentType }) });
 	}
 
 	return results;
@@ -261,7 +267,11 @@ function parseMultipartTyped(buf: Uint8Array, boundary: string): SynthResult {
 			lyricTimings[currentTrack] = null;
 		} else if (part.contentType.startsWith('application/octet-stream')) {
 			latents.push(part.body);
-		} else if (part.contentType.startsWith('application/json') && currentTrack >= 0) {
+		} else if (
+			part.contentType.startsWith('application/json') &&
+			part.name === 'lyric_timing' &&
+			currentTrack >= 0
+		) {
 			lyricTimings[currentTrack] = part.body;
 		}
 	}
