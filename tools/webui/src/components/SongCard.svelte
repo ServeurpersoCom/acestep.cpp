@@ -36,8 +36,32 @@
 	let rangeStart = $state(0);
 	let rangeEnd = $state(0);
 
+	type LyricTimingLine = { start: number; end: number; text: string };
+
+	function parseLyricTiming(raw?: string): LyricTimingLine[] {
+		if (!raw) return [];
+		try {
+			const data = JSON.parse(raw) as { lines?: Array<Record<string, unknown>> };
+			if (!Array.isArray(data.lines)) return [];
+			return data.lines
+				.map((line) => ({
+					start: Number(line.start),
+					end: Number(line.end),
+					text: String(line.text || '').trim()
+				}))
+				.filter((line) => Number.isFinite(line.start) && Number.isFinite(line.end) && line.text);
+		} catch {
+			return [];
+		}
+	}
+
 	let isRef = $derived(app.refSongId === song.id);
 	let isSrc = $derived(app.srcSongId === song.id);
+	let timingLines = $derived(parseLyricTiming(song.lyric_timing));
+	let currentLyric = $derived(
+		timingLines.find((line) => time >= line.start && time < Math.max(line.end, line.start + 0.5))
+			?.text ?? ''
+	);
 
 	// "(variant task)" suffix rebuilt from the request, used for the card
 	// title and download filenames. Song.name itself stays the base name.
@@ -160,6 +184,18 @@
 		URL.revokeObjectURL(url);
 	}
 
+	function downloadLyricTiming() {
+		if (!song.lyric_timing) return;
+		const blob = new Blob([song.lyric_timing], { type: 'application/json' });
+		const url = URL.createObjectURL(blob);
+		const a = document.createElement('a');
+		a.href = url;
+		const safe = displayName.replace(/[\\/:*?"<>|\x00-\x1f]/g, '') || 'song';
+		a.download = `${safe}.lyric-timing.json`;
+		a.click();
+		URL.revokeObjectURL(url);
+	}
+
 	// Download the cached latents blob as a .vae file. Symmetric to
 	// downloadAudio: the .vae plays back via Open (POST /vae decode path)
 	// or feeds a future synth/understand call as src_latents, skipping the
@@ -275,6 +311,12 @@
 		{ icon: Pencil, label: 'Edit prompt', onSelect: load },
 		{ icon: Type, label: 'Rename song', onSelect: openRename },
 		{ icon: Download, label: 'Download audio', onSelect: downloadAudio },
+		{
+			icon: Download,
+			label: 'Download lyric timing',
+			onSelect: downloadLyricTiming,
+			disabled: !song.lyric_timing
+		},
 		{ icon: Cpu, label: 'Compute VAE latents', onSelect: encodeOnly, disabled: !!song.latents },
 		{
 			icon: Download,
@@ -322,10 +364,16 @@
 		bind:rangeStart
 		bind:rangeEnd
 	/>
+	{#if timingLines.length}
+		<div class="lyric-subtitle">{currentLyric}</div>
+	{/if}
 	<div class="card-footer">
 		<span class="format-badge">{song.format.toUpperCase()}</span>
 		{#if song.latents}
 			<span class="format-badge">VAE</span>
+		{/if}
+		{#if song.lyric_timing}
+			<span class="format-badge">LYR</span>
 		{/if}
 		<span class="timecode">{fmtPos(time)} / {fmtDur(dur)}</span>
 		<div class="card-actions">
@@ -391,6 +439,16 @@
 		overflow: hidden;
 		text-overflow: ellipsis;
 		flex: 1;
+	}
+	.lyric-subtitle {
+		min-height: 1rem;
+		padding: 0.1rem 0.35rem;
+		font-size: 0.8rem;
+		color: var(--fg);
+		text-align: center;
+		white-space: nowrap;
+		overflow: hidden;
+		text-overflow: ellipsis;
 	}
 	.format-badge {
 		font-size: 0.6rem;

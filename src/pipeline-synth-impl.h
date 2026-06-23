@@ -119,6 +119,16 @@ struct SynthState {
     std::vector<int>   per_enc_S_nc_final;
     std::vector<float> null_cond_vec;
 
+    // Per-batch lyric token metadata for cross-attention alignment dumps.
+    std::vector<bool>             return_lyric_timing;
+    std::vector<std::vector<int>> lyric_token_ids;
+    std::vector<int>              lyric_start_idx;
+    std::vector<int>              lyric_end_idx;
+    std::vector<std::vector<float>> lyric_timing_heads;  // [selected_heads, lyric_tokens, frames]
+    std::vector<int>                lyric_timing_head_count;
+    std::vector<int>                lyric_timing_frame_count;
+    std::vector<std::string>        lyric_timing_json;
+
     // DiT context
     std::vector<float> context;
     std::vector<float> context_silence;

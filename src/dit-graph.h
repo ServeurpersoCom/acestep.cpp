@@ -133,6 +133,10 @@ static struct ggml_tensor * dit_attn_f32(struct ggml_context * ctx,
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
 }
 
+static bool dit_capture_default_lyric_layer(int layer_idx) {
+    return layer_idx >= 2 && layer_idx <= 6;
+}
+
 // Build self-attention sub-graph for a single layer.
 // norm_sa: [H, S, N] pre-normalized + AdaLN-modulated hidden state
 // Returns: output [H, S, N] (self-attention output, NOT added to residual yet)
@@ -281,7 +285,8 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
                                                       struct ggml_tensor *  mask,       // [enc_S, S, 1, N] F16 or NULL
                                                       int                   S,
                                                       int                   enc_S,
-                                                      int                   N) {
+                                                      int                   N,
+                                                      int                   layer_idx) {
     DiTGGMLConfig & c   = m->cfg;
     int             D   = c.head_dim;
     int             Nh  = c.n_heads;
@@ -332,23 +337,37 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
 
     // no RoPE for cross-attention
     // mask blocks padding positions in encoder hidden states
-    float scale = 1.0f / sqrtf((float) D);
+    float                scale = 1.0f / sqrtf((float) D);
+    struct ggml_tensor * attn  = NULL;
+    bool capture_scores = m->capture_lyric_attn && dit_capture_default_lyric_layer(layer_idx);
+    if (capture_scores) {
+        struct ggml_tensor * scores = ggml_mul_mat(ctx, k, q);
+        scores                      = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
 
-    // K/V come in F32 from mul_mat (no KV cache here). Cast to F16 before FA,
-    // mirroring llama.cpp build_attn_mha for graphs without a KV cache.
-    if (m->use_flash_attn) {
-        if (k->type == GGML_TYPE_F32) {
-            k = ggml_cast(ctx, k, GGML_TYPE_F16);
-        }
-        if (v->type == GGML_TYPE_F32) {
-            v = ggml_cast(ctx, v, GGML_TYPE_F16);
-        }
-    }
+        char score_name[64];
+        snprintf(score_name, sizeof(score_name), "lyric_ca_l%d", layer_idx);
+        ggml_set_name(scores, score_name);
+        ggml_set_output(scores);
 
-    struct ggml_tensor * attn = m->use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
-                                                    dit_attn_f32(ctx, q, k, v, mask, scale);
-    if (m->use_flash_attn) {
-        ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        struct ggml_tensor * vt  = ggml_cont(ctx, ggml_transpose(ctx, v));
+        struct ggml_tensor * out = ggml_mul_mat(ctx, vt, scores);
+        attn                     = ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
+    } else {
+        // K/V come in F32 from mul_mat (no KV cache here). Cast to F16 before FA,
+        // mirroring llama.cpp build_attn_mha for graphs without a KV cache.
+        if (m->use_flash_attn) {
+            if (k->type == GGML_TYPE_F32) {
+                k = ggml_cast(ctx, k, GGML_TYPE_F16);
+            }
+            if (v->type == GGML_TYPE_F32) {
+                v = ggml_cast(ctx, v, GGML_TYPE_F16);
+            }
+        }
+        attn = m->use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
+                                   dit_attn_f32(ctx, q, k, v, mask, scale);
+        if (m->use_flash_attn) {
+            ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
+        }
     }
 
     // Attention output: [D, Nh, S, N], reshape to [H, S, N]
@@ -428,7 +447,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     if (enc) {
         struct ggml_tensor * norm_ca = dit_ggml_rms_norm_weighted(ctx, hidden, ly->cross_attn_norm, c.rms_norm_eps);
         struct ggml_tensor * ca_out =
-            dit_ggml_build_cross_attn(ctx, m, ly, norm_ca, enc, positions, ca_mask, S, enc_S, N);
+            dit_ggml_build_cross_attn(ctx, m, ly, norm_ca, enc, positions, ca_mask, S, enc_S, N, layer_idx);
         hidden = ggml_add(ctx, hidden, ca_out);
     }
 

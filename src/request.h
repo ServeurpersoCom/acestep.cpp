@@ -123,6 +123,10 @@ struct AceRequest {
     // audio output: MP3 encoder bitrate in kbps. Applies only when
     // output_format is "mp3". WAV outputs ignore this field.
     int mp3_bitrate;  // 128
+
+    // Optional DiT cross-attention lyric timing diagnostic. Disabled by
+    // default because it reruns one extra DiT forward with manual attention.
+    bool return_lyric_timing;  // false
 };
 
 // Initialize all fields to defaults (matches Python GenerationParams defaults)
