@@ -59,11 +59,44 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
     return cpu;
 }
 
+// GGML log filter: collapse exact consecutive duplicate lines. The CUDA graph
+// capture emits one "reused" line per replay step, which floods stderr and
+// stalls a slow log reader (a full pipe blocks the writer). Keeps the first
+// occurrence and, when the run of duplicates ends, reports the total count.
+// Direct fprintf(stderr) logs from this app bypass ggml and stay untouched.
+static void acestep_ggml_log(enum ggml_log_level level, const char * text, void * user_data) {
+    (void) level;
+    (void) user_data;
+    static char last[256] = { 0 };
+    static int  count     = 0;
+
+    if (count > 0 && strcmp(text, last) == 0) {
+        count++;
+        return;
+    }
+
+    if (count > 1) {
+        fprintf(stderr, "[Dedup] Previous line repeated %d times total\n", count);
+    }
+
+    fputs(text, stderr);
+    strncpy(last, text, sizeof(last) - 1);
+    last[sizeof(last) - 1] = 0;
+    count                  = 1;
+    fflush(stderr);
+}
+
 // Initialize backends: load all available (CUDA, Metal, Vulkan...),
 // pick the best one, keep CPU as fallback.
 // label: log prefix, e.g. "DiT", "VAE", "LM"
 // Subsequent calls reuse the same backend (single VMM pool).
 static BackendPair backend_init(const char * label) {
+    static bool log_installed = false;
+    if (!log_installed) {
+        ggml_log_set(acestep_ggml_log, nullptr);
+        log_installed = true;
+    }
+
     if (g_backend_refs > 0) {
         g_backend_refs++;
         fprintf(stderr, "[Load] %s backend: %s (shared)\n", label, ggml_backend_name(g_backend_cache.backend));
