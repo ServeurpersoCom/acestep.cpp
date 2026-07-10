@@ -713,8 +713,14 @@ int ace_synth_score(AceSynth *                          ctx,
                     int                                 batch_n,
                     const float *                       pred_latents,
                     int                                 pred_T_latent,
-                    std::vector<LyricScoreComparison> & out_scores) {
+                    std::vector<LyricScoreComparison> & out_scores,
+                    bool (*cancel)(void *),
+                    void * cancel_data) {
     if (!ctx || !reqs || !pred_latents || batch_n < 1 || batch_n > 9 || pred_T_latent <= 0) {
+        return -1;
+    }
+    if (cancel && cancel(cancel_data)) {
+        fprintf(stderr, "[Score] Cancelled before setup\n");
         return -1;
     }
 
@@ -767,7 +773,7 @@ int ace_synth_score(AceSynth *                          ctx,
     ops_build_context_silence(ctx, batch_n, s);
     ops_init_noise(ctx, reqs, batch_n, s);
 
-    int rc = ops_score_forward(ctx, batch_n, pred_latents, out_scores, s);
+    int rc = ops_score_forward(ctx, batch_n, pred_latents, out_scores, s, cancel, cancel_data);
 
     delete job;
     return rc;

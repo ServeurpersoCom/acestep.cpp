@@ -984,9 +984,15 @@ int ops_score_forward(const AceSynth *                    ctx,
                       int                                 batch_n,
                       const float *                       pred_latents,
                       std::vector<LyricScoreComparison> & out_scores,
-                      SynthState &                        s) {
+                      SynthState &                        s,
+                      bool (*cancel)(void *),
+                      void * cancel_data) {
     if (!pred_latents || batch_n <= 0 || s.num_steps <= 0) {
         fprintf(stderr, "[Score] FATAL: predicted latents, batch, and inference steps are required\n");
+        return -1;
+    }
+    if (cancel && cancel(cancel_data)) {
+        fprintf(stderr, "[Score] Cancelled before attention forwards\n");
         return -1;
     }
 
@@ -1044,11 +1050,19 @@ int ops_score_forward(const AceSynth *                    ctx,
         fprintf(stderr, "[Score] FATAL: pure-noise score forward failed\n");
         return -1;
     }
+    if (cancel && cancel(cancel_data)) {
+        fprintf(stderr, "[Score] Cancelled between attention forwards\n");
+        return -1;
+    }
     rc = dit_ggml_score_forward(dit, regressed_latents.data(), s.context.data(), s.enc_hidden.data(), s.enc_S,
                                 s.per_enc_S.data(), s.T, batch_n, t_last, score_layers.data(),
                                 (int) score_layers.size(), dit_attentions);
     if (rc != 0) {
         fprintf(stderr, "[Score] FATAL: regressed-latent score forward failed\n");
+        return -1;
+    }
+    if (cancel && cancel(cancel_data)) {
+        fprintf(stderr, "[Score] Cancelled after attention forwards\n");
         return -1;
     }
     fprintf(stderr, "[Score] Attention forwards: %.1f ms\n", s.timer.ms());

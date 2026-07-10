@@ -112,10 +112,13 @@ void ace_synth_free(AceSynth * ctx);
 // pred_latents: [batch_n, pred_T_latent, 64] generated latent tensor.
 // Each request seed must be resolved (non-negative) before calling.
 // Returns one LyricScoreComparison per batch item in out_scores.
-// Returns 0 on success, -1 on error.
+// cancel/cancel_data: abort callback, polled before and between DiT forwards.
+// Returns 0 on success, -1 on error or cancellation.
 int ace_synth_score(AceSynth *                          ctx,
                     const AceRequest *                  reqs,
                     int                                 batch_n,
                     const float *                       pred_latents,
                     int                                 pred_T_latent,
-                    std::vector<LyricScoreComparison> & out_scores);
+                    std::vector<LyricScoreComparison> & out_scores,
+                    bool (*cancel)(void *) = nullptr,
+                    void * cancel_data     = nullptr);

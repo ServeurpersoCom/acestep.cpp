@@ -1448,11 +1448,16 @@ static void score_worker(std::shared_ptr<Job>    job,
     }
 
     std::vector<LyricScoreComparison> scores;
-    int rc = ace_synth_score(ctx, ace_reqs.data(), (int) ace_reqs.size(), pred_latents.data(), pred_T_latent, scores);
+    int rc = ace_synth_score(ctx, ace_reqs.data(), (int) ace_reqs.size(), pred_latents.data(), pred_T_latent, scores,
+                             server_cancel_job, (void *) &job->cancel);
     ace_synth_free(ctx);
 
+    if (job->cancel.load()) {
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
     if (rc != 0) {
-        job->status.store(job->cancel.load() ? JobStatus::CANCELLED : JobStatus::FAILED);
+        job->status.store(JobStatus::FAILED);
         return;
     }
 
@@ -1486,6 +1491,11 @@ static void score_worker(std::shared_ptr<Job>    job,
         job->status.store(JobStatus::FAILED);
         return;
     }
+    if (job->cancel.load()) {
+        free(json_str);
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
 
     job->result_body = std::string(json_str, len);
     job->result_mime = "application/json";
@@ -1501,6 +1511,12 @@ static void score_worker(std::shared_ptr<Job>    job,
         g_loaded_adapter_scale = 1.0f;
     }
 
+    if (job->cancel.load()) {
+        job->result_body.clear();
+        job->result_mime.clear();
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
     fprintf(stderr, "[Server] Job %s done (score)\n", job->id.c_str());
     job->status.store(JobStatus::DONE);
 }

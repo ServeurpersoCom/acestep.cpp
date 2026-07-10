@@ -79,9 +79,12 @@ int ops_vae_decode(const AceSynth * ctx,
 // ops_init_noise (for noise + context latents) to have been run first.
 //
 // out_scores: filled with one LM/DiT score comparison per batch item.
-// Returns 0 on success, -1 on error.
+// cancel/cancel_data: abort callback, polled before and between DiT forwards.
+// Returns 0 on success, -1 on error or cancellation.
 int ops_score_forward(const AceSynth *                    ctx,
                       int                                 batch_n,
                       const float *                       pred_latents,
                       std::vector<LyricScoreComparison> & out_scores,
-                      SynthState &                        s);
+                      SynthState &                        s,
+                      bool (*cancel)(void *),
+                      void * cancel_data);
