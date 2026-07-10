@@ -60,16 +60,26 @@ static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
 }
 
 // Load and validate lyric-alignment heads from the DiT GGUF config JSON,
-// falling back to the architecture defaults when metadata is absent or invalid.
+// falling back to architecture defaults only when the metadata key is absent.
 static void dit_meta_load_alignment_config(DiTMeta * meta, const GGUFModel & gf) {
     const char * config_json = gf_get_str(gf, "acestep.config_json");
     bool         invalid     = false;
+    bool         has_config  = false;
 
     if (config_json && config_json[0]) {
         yyjson_doc * doc    = yyjson_read(config_json, strlen(config_json), 0);
         yyjson_val * root   = doc ? yyjson_doc_get_root(doc) : nullptr;
-        yyjson_val * config = root ? yyjson_obj_get(root, "lyric_alignment_layers_config") : nullptr;
-        if (config && yyjson_is_obj(config)) {
+        yyjson_val * config = nullptr;
+        if (!doc || !yyjson_is_obj(root)) {
+            invalid = true;
+        } else {
+            config     = yyjson_obj_get(root, "lyric_alignment_layers_config");
+            has_config = config != nullptr;
+            if (has_config && !yyjson_is_obj(config)) {
+                invalid = true;
+            }
+        }
+        if (!invalid && has_config) {
             size_t       idx, max;
             yyjson_val * key;
             yyjson_val * heads;
@@ -98,14 +108,15 @@ static void dit_meta_load_alignment_config(DiTMeta * meta, const GGUFModel & gf)
                 }
             }
         }
-        yyjson_doc_free(doc);
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
     }
 
     if (invalid) {
-        fprintf(stderr, "[Store] WARNING: invalid lyric_alignment_layers_config; using architecture default\n");
+        fprintf(stderr, "[Store] WARNING: invalid lyric_alignment_layers_config; ignoring scoring heads\n");
         meta->lyric_alignment_heads.clear();
-    }
-    if (meta->lyric_alignment_heads.empty()) {
+    } else if (!has_config && meta->lyric_alignment_heads.empty()) {
         dit_meta_set_default_alignment_config(meta);
     }
     if (meta->lyric_alignment_heads.empty()) {
