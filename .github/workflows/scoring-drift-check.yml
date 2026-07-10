@@ -27,7 +27,7 @@ jobs:
       - name: Fetch upstream Python scoring files
         run: |
           BASE="https://raw.githubusercontent.com/ace-step/ACE-Step-1.5/main"
-          CURL=(curl -fsSL --max-time 30 --retry 2)
+          CURL=(curl -fsSL --max-time 30 --retry 2 --retry-max-time 60)
           "${CURL[@]}" "$BASE/acestep/core/scoring/_dtw.py" -o _dtw.py
           "${CURL[@]}" "$BASE/acestep/core/scoring/dit_score.py" -o dit_score.py
           "${CURL[@]}" "$BASE/acestep/core/generation/handler/lyric_score.py" -o lyric_score.py
