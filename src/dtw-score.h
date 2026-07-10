@@ -383,7 +383,7 @@ static bool preprocess_attention(const float *                attention,
     for (int c = 0; c < config_count; c++) {
         int layer = config[c].layer;
         int head  = config[c].head;
-        if (layer < n_layers && head < n_heads) {
+        if (layer >= 0 && layer < n_layers && head >= 0 && head < n_heads) {
             const float * ptr =
                 attention + (size_t) layer * n_heads * tokens * frames + (size_t) head * tokens * frames;
             selected.emplace_back(ptr, ptr + (size_t) tokens * frames);

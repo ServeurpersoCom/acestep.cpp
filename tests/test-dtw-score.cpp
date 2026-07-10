@@ -289,6 +289,19 @@ static void test_multi_head_averaging() {
     //   energy[0,0] = 0.75, energy[0,2] = 0.25
     CHECK_NEAR(energy_matrix[0], 0.75f, 1e-5, "multi-head averaged energy [0,0]");
     CHECK_NEAR(energy_matrix[2], 0.25f, 1e-5, "multi-head averaged energy [0,2]");
+
+    ScoreLayerHeadConfig negative_layer[] = {
+        { -1, 0 }
+    };
+    ScoreLayerHeadConfig negative_head[] = {
+        { 0, -1 }
+    };
+    CHECK(!preprocess_attention(attn.data(), n_layers, n_heads, tokens, frames, negative_layer, 1, 1, calc_matrix,
+                                energy_matrix),
+          "preprocess rejects a negative layer");
+    CHECK(!preprocess_attention(attn.data(), n_layers, n_heads, tokens, frames, negative_head, 1, 1, calc_matrix,
+                                energy_matrix),
+          "preprocess rejects a negative head");
 }
 
 // ============================================================================
