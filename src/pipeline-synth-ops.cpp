@@ -405,6 +405,8 @@ struct TextEncForward {
     int                S_lyric;
 };
 
+// Build the exact language-and-lyric prefix used for both text encoding and
+// pure-lyric token-range extraction so their encoder row offsets stay aligned.
 static std::string build_lyric_header(const AceRequest & rb) {
     const char * language = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
     return std::string("# Languages\n") + language + "\n\n# Lyric\n";

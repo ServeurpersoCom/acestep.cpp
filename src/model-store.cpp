@@ -25,6 +25,8 @@
 #include <unordered_map>
 #include <vector>
 
+// Populate the official lyric-alignment layer/head defaults for supported
+// 2B and XL DiT architectures when model metadata does not provide them.
 static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
     if (meta->cfg.n_layers == 24 && meta->cfg.n_heads == 16) {
         static const DiTScoreHeadConfig defaults[] = {
@@ -57,6 +59,8 @@ static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
     }
 }
 
+// Load and validate lyric-alignment heads from the DiT GGUF config JSON,
+// falling back to the architecture defaults when metadata is absent or invalid.
 static void dit_meta_load_alignment_config(DiTMeta * meta, const GGUFModel & gf) {
     const char * config_json = gf_get_str(gf, "acestep.config_json");
     bool         invalid     = false;
