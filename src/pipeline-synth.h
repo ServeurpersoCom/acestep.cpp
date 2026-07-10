@@ -21,7 +21,7 @@ struct ModelStore;
 struct AceSynthParams {
     const char * text_encoder_path;  // Qwen3 text encoder GGUF (required)
     const char * dit_path;           // DiT GGUF (required)
-    const char * vae_path;           // VAE GGUF (required)
+    const char * vae_path;           // VAE GGUF (required except for score-only contexts)
     const char * adapter_path;       // adapter safetensors or directory (NULL to disable)
     float        adapter_scale;      // user scale multiplier
     bool         use_fa;             // flash attention
@@ -46,6 +46,9 @@ void ace_synth_default_params(AceSynthParams * p);
 // and T resolution can run before the DiT itself is ever loaded. All GPU
 // modules are acquired per op, never owned by the context. NULL on failure.
 AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params);
+
+// Score-only variant: text encoder and DiT are required, but VAE is not.
+AceSynth * ace_synth_load_score(ModelStore * store, const AceSynthParams * params);
 
 // Phase 1: encode sources, build context, run all DiT denoising steps.
 // Modules are acquired as needed: VAE encoder for source and timbre, FSQ
@@ -102,14 +105,17 @@ void ace_audio_free(AceAudio * audio);
 
 void ace_synth_free(AceSynth * ctx);
 
-// Phase 1 scoring: run a single DiT forward pass with cross-attention capture
-// and compute lyric alignment metrics. Requires the same phase 1 setup as
-// ace_synth_job_run_dit (text encoding, context build, noise init) but does
-// NOT run the full denoising loop — just one forward pass to extract attention.
+// Lyric scoring against generated DiT latents. Runs the Python reference's
+// pure-noise and regressed-latent attention passes, then computes LM and DiT
+// alignment metrics on the pure lyric token range.
 //
-// Returns one LyricScoreResult per batch item in out_scores.
+// pred_latents: [batch_n, pred_T_latent, 64] generated latent tensor.
+// Each request seed must be resolved (non-negative) before calling.
+// Returns one LyricScoreComparison per batch item in out_scores.
 // Returns 0 on success, -1 on error.
-int ace_synth_score(AceSynth *         ctx,
-                    const AceRequest * reqs,
-                    int                batch_n,
-                    std::vector<LyricScoreResult> & out_scores);
+int ace_synth_score(AceSynth *                          ctx,
+                    const AceRequest *                  reqs,
+                    int                                 batch_n,
+                    const float *                       pred_latents,
+                    int                                 pred_T_latent,
+                    std::vector<LyricScoreComparison> & out_scores);

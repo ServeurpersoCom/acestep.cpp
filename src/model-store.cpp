@@ -14,14 +14,103 @@
 
 #include "gguf-weights.h"
 #include "timer.h"
+#include "yyjson.h"
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
+    if (meta->cfg.n_layers == 24 && meta->cfg.n_heads == 16) {
+        static const DiTScoreHeadConfig defaults[] = {
+            { 2, 6  },
+            { 3, 10 },
+            { 3, 11 },
+            { 4, 3  },
+            { 5, 8  },
+            { 5, 9  },
+            { 6, 8  },
+        };
+        meta->lyric_alignment_heads.assign(defaults, defaults + sizeof(defaults) / sizeof(defaults[0]));
+        return;
+    }
+    if (meta->cfg.n_layers == 32 && meta->cfg.n_heads == 32) {
+        static const DiTScoreHeadConfig defaults[] = {
+            { 3, 18 },
+            { 3, 27 },
+            { 4, 22 },
+            { 5, 5  },
+            { 5, 6  },
+            { 5, 7  },
+            { 6, 2  },
+            { 6, 12 },
+            { 6, 13 },
+            { 7, 20 },
+            { 7, 21 },
+        };
+        meta->lyric_alignment_heads.assign(defaults, defaults + sizeof(defaults) / sizeof(defaults[0]));
+    }
+}
+
+static void dit_meta_load_alignment_config(DiTMeta * meta, const GGUFModel & gf) {
+    const char * config_json = gf_get_str(gf, "acestep.config_json");
+    bool         invalid     = false;
+
+    if (config_json && config_json[0]) {
+        yyjson_doc * doc    = yyjson_read(config_json, strlen(config_json), 0);
+        yyjson_val * root   = doc ? yyjson_doc_get_root(doc) : nullptr;
+        yyjson_val * config = root ? yyjson_obj_get(root, "lyric_alignment_layers_config") : nullptr;
+        if (config && yyjson_is_obj(config)) {
+            size_t       idx, max;
+            yyjson_val * key;
+            yyjson_val * heads;
+            yyjson_obj_foreach(config, idx, max, key, heads) {
+                const char * layer_text = yyjson_get_str(key);
+                char *       end        = nullptr;
+                long         layer      = layer_text ? strtol(layer_text, &end, 10) : -1;
+                if (!layer_text || !end || *end != '\0' || layer < 0 || layer >= meta->cfg.n_layers ||
+                    !yyjson_is_arr(heads)) {
+                    invalid = true;
+                    break;
+                }
+
+                size_t       head_idx, head_max;
+                yyjson_val * head_val;
+                yyjson_arr_foreach(heads, head_idx, head_max, head_val) {
+                    int head = yyjson_is_int(head_val) ? (int) yyjson_get_int(head_val) : -1;
+                    if (head < 0 || head >= meta->cfg.n_heads) {
+                        invalid = true;
+                        break;
+                    }
+                    meta->lyric_alignment_heads.push_back({ (int) layer, head });
+                }
+                if (invalid) {
+                    break;
+                }
+            }
+        }
+        yyjson_doc_free(doc);
+    }
+
+    if (invalid) {
+        fprintf(stderr, "[Store] WARNING: invalid lyric_alignment_layers_config; using architecture default\n");
+        meta->lyric_alignment_heads.clear();
+    }
+    if (meta->lyric_alignment_heads.empty()) {
+        dit_meta_set_default_alignment_config(meta);
+    }
+    if (meta->lyric_alignment_heads.empty()) {
+        fprintf(stderr, "[Store] WARNING: no lyric alignment head config for %dL/%dH DiT\n", meta->cfg.n_layers,
+                meta->cfg.n_heads);
+    } else {
+        fprintf(stderr, "[Store] Lyric alignment: %zu configured heads\n", meta->lyric_alignment_heads.size());
+    }
+}
 
 namespace {
 
@@ -544,6 +633,7 @@ const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path) {
         return nullptr;
     }
     meta->is_turbo = gf_get_bool(gf, "acestep.is_turbo");
+    dit_meta_load_alignment_config(meta, gf);
 
     // silence_latent: [15000, 64] f32, also accessible via store_silence for
     // callers that only need the pointer. Cached here too so DiTMeta is

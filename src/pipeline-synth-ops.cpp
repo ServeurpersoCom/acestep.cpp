@@ -11,9 +11,11 @@
 #include "dtw-score.h"
 #include "philox.h"
 #include "pipeline-synth-impl.h"
+#include "sampling.h"
 #include "task-types.h"
 #include "vae-enc.h"
 
+#include <algorithm>
 #include <charconv>
 #include <cstdio>
 #include <cstdlib>
@@ -403,6 +405,11 @@ struct TextEncForward {
     int                S_lyric;
 };
 
+static std::string build_lyric_header(const AceRequest & rb) {
+    const char * language = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
+    return std::string("# Languages\n") + language + "\n\n# Lyric\n";
+}
+
 // Build the text/lyric prompt pair that feeds the text encoder for one batch
 // element. instruction is the DiT instruction header (main or non-cover).
 static void build_prompt_strings(const AceRequest &  rb,
@@ -416,14 +423,12 @@ static void build_prompt_strings(const AceRequest &  rb,
     }
     const char * keyscale_b = rb.keyscale.empty() ? "N/A" : rb.keyscale.c_str();
     const char * timesig_b  = rb.timesignature.empty() ? "N/A" : rb.timesignature.c_str();
-    const char * language_b = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
-
-    char metas_b[512];
+    char         metas_b[512];
     snprintf(metas_b, sizeof(metas_b), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
              bpm_b, timesig_b, keyscale_b, (int) duration);
     text_out = std::string("# Instruction\n") + instruction + "\n\n" + "# Caption\n" + rb.caption + "\n\n" +
                "# Metas\n" + metas_b + "<|endoftext|>\n";
-    lyric_out = std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
+    lyric_out = build_lyric_header(rb) + rb.lyrics + "<|endoftext|>";
 }
 
 int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
@@ -442,8 +447,9 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
 
     s.need_enc_switch = s.use_source_context && !s.is_repaint && !s.is_lego_region && s.rr.audio_cover_strength < 1.0f;
 
-    // Persist lyric token IDs for /score endpoint (per-batch).
+    // Persist the pure lyric token range for /score (per-batch).
     s.per_lyric_ids.resize(batch_n);
+    s.per_lyric_start.assign(batch_n, -1);
 
     BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
     if (!bpe) {
@@ -479,7 +485,10 @@ int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             int  S_text    = (int) text_ids.size();
             int  S_lyric   = (int) lyric_ids.size();
 
-            s.per_lyric_ids[b] = lyric_ids;  // persist for /score
+            std::vector<int>  header_ids = bpe_encode(bpe, build_lyric_header(reqs[b]), false);
+            LyricTokenSegment segment    = extract_lyric_token_segment(lyric_ids, (int) header_ids.size(), bpe->eos_id);
+            s.per_lyric_ids[b]           = std::move(segment.token_ids);
+            s.per_lyric_start[b]         = segment.start;
 
             main_fwd[b].S_text  = S_text;
             main_fwd[b].S_lyric = S_lyric;
@@ -966,20 +975,19 @@ int ops_vae_decode(const AceSynth * ctx,
     return 0;
 }
 
-// Scoring forward pass: extract cross-attention matrices and compute lyric
-// alignment metrics. Matches Python ACE-Step dit_score.py:calculate_score.
-//
-// The Python reference runs the full DiT forward with output_attentions=True
-// on the generated audio + lyrics, then extracts cross-attention from
-// specific layers/heads to score lyric alignment quality.
-//
-// Here we run a single DiT forward on the current noise/context/encoder
-// state, capture cross-attention from the default score layers, and compute
-// coverage/monotonicity/confidence via dtw-score.h.
-int ops_score_forward(const AceSynth * ctx,
-                      int              batch_n,
-                      std::vector<LyricScoreResult> & out_scores,
-                      SynthState &     s) {
+// Scoring forward pass: build the two latent states from Python
+// LyricScoreMixin.get_lyric_score(), capture their cross-attention, slice to
+// pure lyric rows, and compute alignment metrics via dtw-score.h.
+int ops_score_forward(const AceSynth *                    ctx,
+                      int                                 batch_n,
+                      const float *                       pred_latents,
+                      std::vector<LyricScoreComparison> & out_scores,
+                      SynthState &                        s) {
+    if (!pred_latents || batch_n <= 0 || s.num_steps <= 0) {
+        fprintf(stderr, "[Score] FATAL: predicted latents, batch, and inference steps are required\n");
+        return -1;
+    }
+
     DiTGGML * dit = store_require_dit(ctx->store, ctx->dit_key);
     if (!dit) {
         fprintf(stderr, "[Score] FATAL: store_require_dit failed\n");
@@ -991,107 +999,115 @@ int ops_score_forward(const AceSynth * ctx,
         dit->use_flash_attn = false;
     }
 
-    // Default score layers from Python: {2, 3, 4, 5, 6}
-    // Heads are selected per-layer in dtw-score.h:DEFAULT_SCORE_HEADS
-    static const int score_layers[] = { 2, 3, 4, 5, 6 };
-    static const int n_score_layers = 5;
-
-    fprintf(stderr, "[Score] Starting: T=%d, S=%d, enc_S=%d, batch=%d, %d score layers\n",
-            s.T, s.S, s.enc_S, batch_n, n_score_layers);
-
-    // Run scoring forward pass with cross-attention capture
-    std::vector<std::vector<float>> layer_attentions;
-    s.timer.reset();
-    int rc = dit_ggml_score_forward(dit, s.noise.data(), s.context.data(), s.enc_hidden.data(),
-                                    s.enc_S, s.per_enc_S.data(), s.T, batch_n,
-                                    score_layers, n_score_layers, layer_attentions);
-    if (rc != 0) {
-        fprintf(stderr, "[Score] FATAL: dit_ggml_score_forward failed\n");
+    if (ctx->meta->lyric_alignment_heads.empty()) {
+        fprintf(stderr, "[Score] FATAL: model has no lyric alignment layer/head configuration\n");
         return -1;
     }
-    fprintf(stderr, "[Score] DiT forward: %.1f ms\n", s.timer.ms());
 
-    // Get BPE tokenizer for decoding token IDs to strings (type mask)
-    BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
-    if (!bpe) {
-        fprintf(stderr, "[Score] WARNING: store_bpe failed, using all-lyric mask\n");
+    std::vector<ScoreLayerHeadConfig> absolute_heads;
+    std::vector<int>                  score_layers;
+    for (const DiTScoreHeadConfig & head : ctx->meta->lyric_alignment_heads) {
+        absolute_heads.push_back({ head.layer, head.head });
+        if (std::find(score_layers.begin(), score_layers.end(), head.layer) == score_layers.end()) {
+            score_layers.push_back(head.layer);
+        }
     }
 
-    // DiT config
-    DiTGGMLConfig & c   = dit->cfg;
-    int             Nh  = c.n_heads;
-    int             S   = s.S;
-    int             enc_S = s.enc_S;
+    std::vector<ScoreLayerHeadConfig> compact_heads;
+    if (!remap_score_heads(absolute_heads.data(), (int) absolute_heads.size(), score_layers.data(),
+                           (int) score_layers.size(), dit->cfg.n_heads, compact_heads)) {
+        fprintf(stderr, "[Score] FATAL: invalid lyric alignment layer/head configuration\n");
+        return -1;
+    }
 
-    // Compute scores per batch item
+    fprintf(stderr, "[Score] Starting: T=%d, S=%d, enc_S=%d, batch=%d, %d score layers\n", s.T, s.S, s.enc_S, batch_n,
+            (int) score_layers.size());
+
+    // Python scores both pure noise (LM score, t=1) and a latent regressed
+    // toward the generated result (DiT score, t=1/inference_steps).
+    float              t_last       = 1.0f / (float) s.num_steps;
+    size_t             latent_count = (size_t) batch_n * s.T * s.Oc;
+    std::vector<float> regressed_latents(latent_count);
+    for (size_t i = 0; i < latent_count; i++) {
+        regressed_latents[i] = t_last * s.noise[i] + (1.0f - t_last) * pred_latents[i];
+    }
+
+    std::vector<std::vector<float>> lm_attentions;
+    std::vector<std::vector<float>> dit_attentions;
+    s.timer.reset();
+    int rc =
+        dit_ggml_score_forward(dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.per_enc_S.data(),
+                               s.T, batch_n, 1.0f, score_layers.data(), (int) score_layers.size(), lm_attentions);
+    if (rc != 0) {
+        fprintf(stderr, "[Score] FATAL: pure-noise score forward failed\n");
+        return -1;
+    }
+    rc = dit_ggml_score_forward(dit, regressed_latents.data(), s.context.data(), s.enc_hidden.data(), s.enc_S,
+                                s.per_enc_S.data(), s.T, batch_n, t_last, score_layers.data(),
+                                (int) score_layers.size(), dit_attentions);
+    if (rc != 0) {
+        fprintf(stderr, "[Score] FATAL: regressed-latent score forward failed\n");
+        return -1;
+    }
+    fprintf(stderr, "[Score] Attention forwards: %.1f ms\n", s.timer.ms());
+
+    BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.text_encoder_path);
+    if (!bpe) {
+        fprintf(stderr, "[Score] FATAL: store_bpe failed\n");
+        return -1;
+    }
+
+    int Nh    = dit->cfg.n_heads;
+    int S     = s.S;
+    int enc_S = s.enc_S;
+
+    auto stack_attention = [&](const std::vector<std::vector<float>> & attentions, int batch_index, int token_start,
+                               int token_count, std::vector<float> & stacked) -> bool {
+        size_t layer_size = (size_t) Nh * token_count * S;
+        stacked.assign(score_layers.size() * layer_size, 0.0f);
+        for (size_t sl = 0; sl < score_layers.size(); sl++) {
+            if (sl >= attentions.size() || attentions[sl].empty()) {
+                return false;
+            }
+            std::vector<float> slice;
+            if (!extract_attention_slice(attentions[sl].data(), attentions[sl].size(), enc_S, S, Nh, batch_n,
+                                         batch_index, token_start, token_count, slice)) {
+                return false;
+            }
+            std::copy(slice.begin(), slice.end(), stacked.begin() + (size_t) sl * layer_size);
+        }
+        return true;
+    };
+
     out_scores.resize(batch_n);
     for (int b = 0; b < batch_n; b++) {
-        // Build decoded token strings for the type mask
-        std::vector<std::string> decoded_tokens;
-        if (b < (int) s.per_lyric_ids.size() && !s.per_lyric_ids[b].empty()) {
-            int n_lyric = (int) s.per_lyric_ids[b].size();
-            decoded_tokens.resize(n_lyric);
-            if (bpe) {
-                for (int i = 0; i < n_lyric; i++) {
-                    int tid = s.per_lyric_ids[b][i];
-                    if (tid >= 0 && tid < bpe->n_vocab) {
-                        decoded_tokens[i] = bpe->id_to_str[tid];
-                    }
-                }
-            } else {
-                // No tokenizer: treat all as lyric tokens
-                std::fill(decoded_tokens.begin(), decoded_tokens.end(), std::string("lyric"));
-            }
-        } else {
-            // No lyric IDs: single dummy token
-            decoded_tokens = { "lyric" };
+        if (b >= (int) s.per_lyric_ids.size() || b >= (int) s.per_lyric_start.size() || s.per_lyric_ids[b].empty() ||
+            s.per_lyric_start[b] < 0) {
+            fprintf(stderr, "[Score] ERROR: batch %d has no pure lyric tokens\n", b);
+            return -1;
         }
 
-        // Stack attention from all captured layers into [n_layers, Nh, enc_S, S]
-        // Each layer_attentions[sl] is [enc_S, S, Nh] (batch 0 only)
-        // We need [n_layers, n_heads, tokens, frames] for calculate_lyric_score
-        // But the attention matrix is [enc_S (KV=tokens), S (Q=frames), Nh]
-        // So: tokens = enc_S, frames = S, n_heads = Nh, n_layers = n_score_layers
-        //
-        // Note: the Python reference uses per-lyric-token attention (enc_S = lyric_tokens).
-        // Here enc_S is the full encoder sequence (text + lyric). We use the full
-        // sequence and the type mask to distinguish lyric from structural tokens.
-        int n_heads_total = Nh;
-        int n_layers_total = n_score_layers;
-
-        // Stack: [n_layers * n_heads * enc_S * S]
-        std::vector<float> stacked((size_t) n_layers_total * n_heads_total * enc_S * S, 0.0f);
-
-        for (int sl = 0; sl < n_score_layers; sl++) {
-            if (sl >= (int) layer_attentions.size() || layer_attentions[sl].empty()) {
-                continue;
-            }
-            // layer_attentions[sl] is [enc_S, S, Nh] row-major
-            // We need [n_layers, n_heads, enc_S, S] = layer * (Nh * enc_S * S) + head * (enc_S * S) + ...
-            const float * src = layer_attentions[sl].data();
-            for (int h = 0; h < Nh; h++) {
-                for (int t = 0; t < enc_S; t++) {
-                    for (int f = 0; f < S; f++) {
-                        // src index: [enc_S, S, Nh] = t * (S * Nh) + f * Nh + h
-                        size_t src_idx = (size_t) t * S * Nh + (size_t) f * Nh + h;
-                        // dst index: [n_layers, n_heads, enc_S, S] = sl * (Nh * enc_S * S) + h * (enc_S * S) + t * S + f
-                        size_t dst_idx = (size_t) sl * n_heads_total * enc_S * S +
-                                         (size_t) h * enc_S * S +
-                                         (size_t) t * S + f;
-                        if (src_idx < layer_attentions[sl].size()) {
-                            stacked[dst_idx] = src[src_idx];
-                        }
-                    }
-                }
-            }
+        int                      lyric_tokens = (int) s.per_lyric_ids[b].size();
+        std::vector<std::string> decoded_tokens(lyric_tokens);
+        for (int i = 0; i < lyric_tokens; i++) {
+            decoded_tokens[i] = bpe_decode(*bpe, std::vector<int>{ s.per_lyric_ids[b][i] });
         }
 
-        // Calculate lyric score
-        LyricScoreResult result = calculate_lyric_score(
-            stacked.data(), n_layers_total, n_heads_total, enc_S, S, decoded_tokens);
+        std::vector<float> lm_stacked;
+        std::vector<float> dit_stacked;
+        if (!stack_attention(lm_attentions, b, s.per_lyric_start[b], lyric_tokens, lm_stacked) ||
+            !stack_attention(dit_attentions, b, s.per_lyric_start[b], lyric_tokens, dit_stacked)) {
+            fprintf(stderr, "[Score] FATAL: failed to slice attention for batch %d\n", b);
+            return -1;
+        }
 
-        fprintf(stderr, "[Score] Batch %d: coverage=%.4f monotonicity=%.4f confidence=%.4f lyrics_score=%.4f\n",
-                b, result.coverage, result.monotonicity, result.confidence, result.lyrics_score);
+        LyricScoreComparison result;
+        result.lm  = calculate_lyric_score(lm_stacked.data(), (int) score_layers.size(), Nh, lyric_tokens, S,
+                                           decoded_tokens, compact_heads.data(), (int) compact_heads.size());
+        result.dit = calculate_lyric_score(dit_stacked.data(), (int) score_layers.size(), Nh, lyric_tokens, S,
+                                           decoded_tokens, compact_heads.data(), (int) compact_heads.size());
+
+        fprintf(stderr, "[Score] Batch %d: lm=%.4f dit=%.4f\n", b, result.lm.lyrics_score, result.dit.lyrics_score);
 
         out_scores[b] = result;
     }

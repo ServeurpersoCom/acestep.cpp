@@ -41,6 +41,9 @@ jobs:
           ./build/ace-synth --help 2>&1 | head -5
           ./build/quantize --help 2>&1 | head -3
 
+      - name: Unit tests
+        run: ctest --test-dir build --output-on-failure
+
   lint:
     name: Lint & Static Analysis
     runs-on: ubuntu-latest

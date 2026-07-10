@@ -4,6 +4,8 @@
 // Direct port of the Python ACE-Step scoring modules:
 //   acestep/core/scoring/_dtw.py    — DTW + median filter (numba-jitted)
 //   acestep/core/scoring/dit_score.py — MusicLyricScorer (coverage, monotonicity, confidence)
+// Integration parity follows generation/handler/lyric_score.py and
+// lyric_alignment_common.py for latent states, lyric slicing, and model heads.
 //
 // Pinned to ace-step/ACE-Step-1.5 commit 82252c24 (2026-07-09).
 // If the Python scoring algorithm changes upstream, this port will need
@@ -41,7 +43,9 @@ struct DTWPath {
 static DTWPath dtw_backtrace(std::vector<float> & trace, int N, int M) {
     // Boundary handling (matches _dtw.py:61-62)
     // trace is (N+1) x (M+1), row-major
-    auto T = [&](int i, int j) -> float & { return trace[(size_t) i * (M + 1) + j]; };
+    auto T = [&](int i, int j) -> float & {
+        return trace[(size_t) i * (M + 1) + j];
+    };
     for (int j = 0; j <= M; j++) {
         T(0, j) = 2;
     }
@@ -50,7 +54,7 @@ static DTWPath dtw_backtrace(std::vector<float> & trace, int N, int M) {
     }
 
     // Pre-allocate (max path length = N + M), fill from the end
-    int max_path_len = N + M;
+    int              max_path_len = N + M;
     std::vector<int> path_text(max_path_len, 0);
     std::vector<int> path_time(max_path_len, 0);
 
@@ -75,7 +79,7 @@ static DTWPath dtw_backtrace(std::vector<float> & trace, int N, int M) {
         }
     }
 
-    int start = path_idx + 1;
+    int     start = path_idx + 1;
     DTWPath result;
     result.text_idx.assign(path_text.begin() + start, path_text.end());
     result.time_idx.assign(path_time.begin() + start, path_time.end());
@@ -94,7 +98,9 @@ static DTWPath dtw_cpu(const float * x, int N, int M) {
     std::vector<float> cost((size_t) (N + 1) * (M + 1), std::numeric_limits<float>::infinity());
     std::vector<float> trace((size_t) (N + 1) * (M + 1), -1.0f);
 
-    auto C = [&](int i, int j) -> float & { return cost[(size_t) i * (M + 1) + j]; };
+    auto C = [&](int i, int j) -> float & {
+        return cost[(size_t) i * (M + 1) + j];
+    };
 
     C(0, 0) = 0.0f;
 
@@ -117,7 +123,7 @@ static DTWPath dtw_cpu(const float * x, int N, int M) {
                 t = 2;
             }
 
-            C(i, j) = x[(size_t) (i - 1) * M + (j - 1)] + c;
+            C(i, j)                         = x[(size_t) (i - 1) * M + (j - 1)] + c;
             trace[(size_t) i * (M + 1) + j] = t;
         }
     }
@@ -137,7 +143,7 @@ static DTWPath dtw_cpu(const float * x, int N, int M) {
 // Python uses F.pad(mode="reflect") then unfold + sort + pick middle.
 // We replicate with a sliding window sort.
 static std::vector<float> median_filter_1d(const std::vector<float> & x, int filter_width) {
-    int n = (int) x.size();
+    int n   = (int) x.size();
     int pad = filter_width / 2;
     if (n <= pad) {
         return x;
@@ -146,7 +152,7 @@ static std::vector<float> median_filter_1d(const std::vector<float> & x, int fil
     // Reflect padding (matches torch F.pad mode="reflect")
     std::vector<float> padded(n + 2 * pad);
     for (int i = 0; i < pad; i++) {
-        padded[i] = x[pad - i];           // reflect from left
+        padded[i] = x[pad - i];  // reflect from left
     }
     for (int i = 0; i < n; i++) {
         padded[pad + i] = x[i];
@@ -157,7 +163,7 @@ static std::vector<float> median_filter_1d(const std::vector<float> & x, int fil
 
     std::vector<float> result(n);
     std::vector<float> window(filter_width);
-    int mid = filter_width / 2;
+    int                mid = filter_width / 2;
 
     for (int i = 0; i < n; i++) {
         for (int j = 0; j < filter_width; j++) {
@@ -174,7 +180,10 @@ static std::vector<float> median_filter_1d(const std::vector<float> & x, int fil
 // Returns [rows, cols] row-major.
 //
 // Matches median_filter in _dtw.py:90-110 which operates on the last dim.
-static std::vector<float> median_filter_2d_rows(const std::vector<float> & input, int rows, int cols, int filter_width) {
+static std::vector<float> median_filter_2d_rows(const std::vector<float> & input,
+                                                int                        rows,
+                                                int                        cols,
+                                                int                        filter_width) {
     std::vector<float> result((size_t) rows * cols);
     for (int r = 0; r < rows; r++) {
         std::vector<float> row(input.begin() + (size_t) r * cols, input.begin() + (size_t) r * cols + cols);
@@ -189,20 +198,131 @@ static std::vector<float> median_filter_2d_rows(const std::vector<float> & input
 // Ported from acestep/core/scoring/dit_score.py:MusicLyricScorer
 // ============================================================================
 
-// Default layer/head configuration for cross-attention extraction.
+// Default 2B layer/head configuration for cross-attention extraction.
 // Matches the Python default: dit_score.py uses custom_config with
 //   {2: [6], 3: [10, 11], 4: [3], 5: [8, 9], 6: [8]}
 // 5 layers, 7 heads total. These are the cross-attention heads that
-// best track lyric-to-audio alignment.
+// best track lyric-to-audio alignment. Layer values are absolute DiT layer
+// numbers. Callers that compact captured layers must remap them before
+// preprocess_attention() indexes the compact attention buffer.
 struct ScoreLayerHeadConfig {
     int layer;
     int head;
 };
 
-static const ScoreLayerHeadConfig DEFAULT_SCORE_HEADS[] = {
-    {2, 6}, {3, 10}, {3, 11}, {4, 3}, {5, 8}, {5, 9}, {6, 8},
+static const ScoreLayerHeadConfig DEFAULT_2B_SCORE_HEADS[] = {
+    { 2, 6  },
+    { 3, 10 },
+    { 3, 11 },
+    { 4, 3  },
+    { 5, 8  },
+    { 5, 9  },
+    { 6, 8  },
 };
-static const int DEFAULT_SCORE_HEADS_COUNT = 7;
+static const int DEFAULT_2B_SCORE_HEADS_COUNT = 7;
+
+// Remap absolute DiT layer numbers to compact slots in captured_layers.
+// Returns false when any configured layer/head is unavailable; silently
+// scoring a partial or model-incompatible configuration produces misleading
+// alignment values.
+static bool remap_score_heads(const ScoreLayerHeadConfig *        config,
+                              int                                 config_count,
+                              const int *                         captured_layers,
+                              int                                 captured_count,
+                              int                                 n_heads,
+                              std::vector<ScoreLayerHeadConfig> & remapped) {
+    remapped.clear();
+    if (!config || config_count <= 0 || !captured_layers || captured_count <= 0 || n_heads <= 0) {
+        return false;
+    }
+
+    for (int c = 0; c < config_count; c++) {
+        if (config[c].head < 0 || config[c].head >= n_heads) {
+            remapped.clear();
+            return false;
+        }
+
+        int compact_layer = -1;
+        for (int i = 0; i < captured_count; i++) {
+            if (captured_layers[i] == config[c].layer) {
+                compact_layer = i;
+                break;
+            }
+        }
+        if (compact_layer < 0) {
+            remapped.clear();
+            return false;
+        }
+        remapped.push_back({ compact_layer, config[c].head });
+    }
+    return !remapped.empty();
+}
+
+// Extract one batch item's pure-lyric rows from a GGML attention output.
+// source layout is [tokens, frames, heads, batches] with tokens (ne[0])
+// contiguous. destination layout is [heads, lyric_tokens, frames], matching
+// the per-layer slice expected by preprocess_attention().
+static bool extract_attention_slice(const float *        source,
+                                    size_t               source_size,
+                                    int                  tokens,
+                                    int                  frames,
+                                    int                  heads,
+                                    int                  batches,
+                                    int                  batch_index,
+                                    int                  token_start,
+                                    int                  token_count,
+                                    std::vector<float> & destination) {
+    destination.clear();
+    if (!source || tokens <= 0 || frames <= 0 || heads <= 0 || batches <= 0 || batch_index < 0 ||
+        batch_index >= batches || token_start < 0 || token_count <= 0 || token_start + token_count > tokens) {
+        return false;
+    }
+
+    size_t expected = (size_t) tokens * frames * heads * batches;
+    if (source_size < expected) {
+        return false;
+    }
+
+    destination.resize((size_t) heads * token_count * frames);
+    for (int h = 0; h < heads; h++) {
+        for (int t = 0; t < token_count; t++) {
+            for (int f = 0; f < frames; f++) {
+                size_t src_idx = (size_t) (token_start + t) +
+                                 (size_t) tokens * (f + (size_t) frames * (h + (size_t) heads * batch_index));
+                size_t dst_idx       = ((size_t) h * token_count + t) * frames + f;
+                destination[dst_idx] = source[src_idx];
+            }
+        }
+    }
+    return true;
+}
+
+struct LyricTokenSegment {
+    int              start;
+    std::vector<int> token_ids;
+};
+
+// Match Python _extract_lyric_segment(): strip the generated prompt header and
+// stop at the first end-of-text token. The returned start is also the row
+// offset into encoder_hidden_states because the condition encoder packs lyric
+// tokens first.
+static LyricTokenSegment extract_lyric_token_segment(const std::vector<int> & raw_ids, int header_tokens, int eos_id) {
+    LyricTokenSegment result = { header_tokens, {} };
+    if (header_tokens < 0 || header_tokens > (int) raw_ids.size()) {
+        result.start = -1;
+        return result;
+    }
+
+    int end = (int) raw_ids.size();
+    for (int i = header_tokens; i < end; i++) {
+        if (raw_ids[i] == eos_id) {
+            end = i;
+            break;
+        }
+    }
+    result.token_ids.assign(raw_ids.begin() + header_tokens, raw_ids.begin() + end);
+    return result;
+}
 
 // Token type mask: 1 = lyric token, 0 = structural tag (inside [...]).
 // Ported from dit_score.py:_generate_token_type_mask (lines 32-55).
@@ -211,9 +331,9 @@ static const int DEFAULT_SCORE_HEADS_COUNT = 7;
 // token. Here we accept a pre-decoded vector of token strings from the caller
 // (the BPE tokenizer is available in the C++ pipeline but not in this header).
 static std::vector<int> generate_token_type_mask(const std::vector<std::string> & decoded_tokens) {
-    int n = (int) decoded_tokens.size();
+    int              n = (int) decoded_tokens.size();
     std::vector<int> mask(n, 1);
-    bool in_bracket = false;
+    bool             in_bracket = false;
 
     for (int i = 0; i < n; i++) {
         const std::string & s = decoded_tokens[i];
@@ -225,7 +345,7 @@ static std::vector<int> generate_token_type_mask(const std::vector<std::string> 
         }
         if (s.find(']') != std::string::npos) {
             in_bracket = false;
-            mask[i] = 0;
+            mask[i]    = 0;
         }
     }
     return mask;
@@ -245,16 +365,16 @@ static std::vector<int> generate_token_type_mask(const std::vector<std::string> 
 //   calc_matrix: squared energy for DTW pathfinding [tokens, frames]
 //   energy_matrix: normalized energy for scoring [tokens, frames]
 // Returns false if no valid heads were found.
-static bool preprocess_attention(const float *         attention,
-                                 int                  n_layers,
-                                 int                  n_heads,
-                                 int                  tokens,
-                                 int                  frames,
+static bool preprocess_attention(const float *                attention,
+                                 int                          n_layers,
+                                 int                          n_heads,
+                                 int                          tokens,
+                                 int                          frames,
                                  const ScoreLayerHeadConfig * config,
-                                 int                  config_count,
-                                 int                  medfilt_width,
-                                 std::vector<float> & calc_matrix,
-                                 std::vector<float> & energy_matrix) {
+                                 int                          config_count,
+                                 int                          medfilt_width,
+                                 std::vector<float> &         calc_matrix,
+                                 std::vector<float> &         energy_matrix) {
     // 1. Select heads and stack (matches dit_score.py:84-93)
     std::vector<std::vector<float>> selected;
     for (int c = 0; c < config_count; c++) {
@@ -294,8 +414,12 @@ static bool preprocess_attention(const float *         attention,
     float e_min = std::numeric_limits<float>::max();
     float e_max = std::numeric_limits<float>::lowest();
     for (float v : energy_matrix) {
-        if (v < e_min) e_min = v;
-        if (v > e_max) e_max = v;
+        if (v < e_min) {
+            e_min = v;
+        }
+        if (v > e_max) {
+            e_max = v;
+        }
     }
 
     if (e_max - e_min > 1e-9f) {
@@ -332,18 +456,20 @@ struct AlignmentMetrics {
 };
 
 static AlignmentMetrics compute_alignment_metrics(const std::vector<float> & energy_matrix,
-                                                  int                       rows,
-                                                  int                       cols,
-                                                  const DTWPath &           path,
-                                                  const std::vector<int> &  type_mask,
-                                                  double                    time_weight        = 0.01,
-                                                  double                    overlap_frames     = 9.0,
-                                                  double                    instrumental_weight = 1.0) {
-    auto E = [&](int i, int j) -> double { return (double) energy_matrix[(size_t) i * cols + j]; };
+                                                  int                        rows,
+                                                  int                        cols,
+                                                  const DTWPath &            path,
+                                                  const std::vector<int> &   type_mask,
+                                                  double                     time_weight         = 0.01,
+                                                  double                     overlap_frames      = 9.0,
+                                                  double                     instrumental_weight = 1.0) {
+    auto E = [&](int i, int j) -> double {
+        return (double) energy_matrix[(size_t) i * cols + j];
+    };
 
     // ================= A. Coverage Score (dit_score.py:150-161) =================
-    int total_sung_rows = 0;
-    int valid_sung_rows = 0;
+    int          total_sung_rows    = 0;
+    int          valid_sung_rows    = 0;
     const double coverage_threshold = 0.1;
 
     for (int i = 0; i < rows; i++) {
@@ -352,7 +478,9 @@ static AlignmentMetrics compute_alignment_metrics(const std::vector<float> & ene
             double row_max = 0.0;
             for (int j = 0; j < cols; j++) {
                 double e = E(i, j);
-                if (e > row_max) row_max = e;
+                if (e > row_max) {
+                    row_max = e;
+                }
             }
             if (row_max > coverage_threshold) {
                 valid_sung_rows++;
@@ -389,7 +517,7 @@ static AlignmentMetrics compute_alignment_metrics(const std::vector<float> & ene
     }
 
     double monotonicity;
-    int cnt = (int) sung_centroids.size();
+    int    cnt = (int) sung_centroids.size();
     if (cnt > 1) {
         double non_decreasing = 0.0;
         for (int k = 0; k < cnt - 1; k++) {
@@ -404,13 +532,13 @@ static AlignmentMetrics compute_alignment_metrics(const std::vector<float> & ene
 
     // ================= C. Path Confidence (dit_score.py:193-212) =================
     double path_confidence;
-    int path_len = (int) path.text_idx.size();
+    int    path_len = (int) path.text_idx.size();
     if (path_len > 0) {
-        double total_energy  = 0.0;
-        double total_steps   = 0.0;
+        double total_energy = 0.0;
+        double total_steps  = 0.0;
         for (int k = 0; k < path_len; k++) {
-            int r = path.text_idx[k];
-            int c = path.time_idx[k];
+            int    r  = path.text_idx[k];
+            int    c  = path.time_idx[k];
             double pe = E(r, c);
             double sw = (type_mask[r] == 0) ? instrumental_weight : 1.0;
             total_energy += pe * sw;
@@ -432,23 +560,29 @@ static AlignmentMetrics compute_alignment_metrics(const std::vector<float> & ene
 // config / config_count: which (layer, head) pairs to use
 // medfilt_width: median filter window (1 = disabled)
 //
-// Returns the final lyrics_score = cov^2 * mono^2 * conf, clipped to [0, 1].
+// Returns the final lyrics_score = cov^2 * mono^2 * conf, clipped to [0, 1]
+// and rounded to four decimal places like the Python API.
 struct LyricScoreResult {
-    double coverage;
-    double monotonicity;
-    double confidence;
-    double lyrics_score;  // cov^2 * mono^2 * conf, clipped [0,1]
+    double  coverage;
+    double  monotonicity;
+    double  confidence;
+    double  lyrics_score;  // cov^2 * mono^2 * conf, clipped [0,1]
     DTWPath path;
 };
 
-static LyricScoreResult calculate_lyric_score(const float *                     attention,
+struct LyricScoreComparison {
+    LyricScoreResult lm;
+    LyricScoreResult dit;
+};
+
+static LyricScoreResult calculate_lyric_score(const float *                    attention,
                                               int                              n_layers,
                                               int                              n_heads,
                                               int                              tokens,
                                               int                              frames,
                                               const std::vector<std::string> & decoded_tokens,
-                                              const ScoreLayerHeadConfig *     config     = DEFAULT_SCORE_HEADS,
-                                              int                              config_count = DEFAULT_SCORE_HEADS_COUNT,
+                                              const ScoreLayerHeadConfig *     config,
+                                              int                              config_count,
                                               int                              medfilt_width = 1) {
     LyricScoreResult result = { 0, 0, 0, 0, {} };
 
@@ -477,16 +611,20 @@ static LyricScoreResult calculate_lyric_score(const float *                     
     result.path = dtw_cpu(neg_calc.data(), tokens, frames);
 
     // 4. Compute metrics (dit_score.py:313-320)
-    AlignmentMetrics m = compute_alignment_metrics(energy_matrix, tokens, frames, result.path, type_mask);
+    AlignmentMetrics m  = compute_alignment_metrics(energy_matrix, tokens, frames, result.path, type_mask);
     result.coverage     = m.coverage;
     result.monotonicity = m.monotonicity;
     result.confidence   = m.confidence;
 
     // 5. Final score: cov^2 * mono^2 * conf (dit_score.py:324-325)
     double final_score = (m.coverage * m.coverage) * (m.monotonicity * m.monotonicity) * m.confidence;
-    if (final_score < 0.0) final_score = 0.0;
-    if (final_score > 1.0) final_score = 1.0;
-    result.lyrics_score = final_score;
+    if (final_score < 0.0) {
+        final_score = 0.0;
+    }
+    if (final_score > 1.0) {
+        final_score = 1.0;
+    }
+    result.lyrics_score = std::round(final_score * 10000.0) / 10000.0;
 
     return result;
 }

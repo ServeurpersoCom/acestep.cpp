@@ -112,10 +112,11 @@ struct SynthState {
     std::vector<int>                per_enc_S_nc;
     bool                            need_enc_switch;
 
-    // lyric token IDs (per-batch) — persisted for /score endpoint.
-    // Set by ops_encode_text, used by ops_score_forward to generate the
-    // token type mask (lyric vs structural tag) for DTW alignment scoring.
-    std::vector<std::vector<int>>   per_lyric_ids;
+    // Pure lyric token IDs and their row offset in the packed condition
+    // sequence (per batch). The prompt header and trailing end-of-text tokens
+    // are excluded so /score measures lyrics rather than metadata/caption.
+    std::vector<std::vector<int>> per_lyric_ids;
+    std::vector<int>              per_lyric_start;
 
     // stacked encoder hidden states
     int                max_enc_S;

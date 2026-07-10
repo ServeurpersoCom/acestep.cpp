@@ -114,7 +114,7 @@ Debug:
 <details>
 <summary>API endpoints</summary>
 
-The server exposes four POST endpoints and two GET endpoints:
+The server exposes five POST endpoints and two GET endpoints:
 
 **POST /lm** - Generate lyrics and audio codes from a caption. Returns JSON.
 
@@ -125,6 +125,13 @@ win over audio when both are sent on the same side).
 
 **POST /understand** - Reverse pipeline: audio in, metadata + lyrics + codes out.
 Multipart only (source audio or pre-encoded latents required, optional request JSON for params).
+
+**POST /score** - Score lyric alignment for generated DiT latents. Multipart
+only: send `request` as one AceRequest or an array and `pred_latents` as raw
+f32 `[batch, T, 64]` data (`latent` is accepted as an alias). A single request
+can reuse the latent part returned by `/synth`; batched latents are concatenated
+in request order. Results contain separate pure-noise (`lm`) and regressed
+generated-latent (`dit`) metrics.
 
 **POST /vae** - Standalone VAE entrypoint: send `audio` to encode (latents
 out), send `src_latents` to decode (audio out). Multipart only, the two

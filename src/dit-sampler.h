@@ -706,29 +706,29 @@ static int dit_ggml_generate(DiTGGML *           model,
 //
 // Builds the same DiT graph as generation but forces the f32 attention path
 // for the specified score_layers, marking the softmax attention weights as
-// graph outputs. Runs one forward pass at t=0 (pure noise input) and reads
-// back the cross-attention scores.
+// graph outputs. Runs one forward pass at the supplied flow-matching timestep
+// and reads back the cross-attention scores for every batch item.
 //
 // The caller is responsible for:
 //   - text encoding (enc_hidden, enc_S, real_enc_S)
 //   - context build (context_latents)
-//   - noise generation (noise)
+//   - constructing the latent state for the supplied timestep
 //   - running calculate_lyric_score() on the returned attention matrices
 //
-// attention_out: filled with [n_score_layers][Nh][enc_S][S] attention weights
-//   (one vector per captured layer, each enc_S*S*Nh floats, row-major).
-//   Only the conditional (first) batch sample is extracted.
+// attention_out: one vector per captured layer. Each vector uses GGML layout
+//   [enc_S, S, Nh, N], where enc_S is the contiguous dimension.
 // Returns 0 on success, -1 on error.
-static int dit_ggml_score_forward(DiTGGML *             model,
-                                  const float *         noise,
-                                  const float *         context_latents,
-                                  const float *         enc_hidden_data,
-                                  int                   enc_S,
-                                  const int *           real_enc_S,
-                                  int                   T,
-                                  int                   N,
-                                  const int *           score_layers,
-                                  int                   n_score_layers,
+static int dit_ggml_score_forward(DiTGGML *                         model,
+                                  const float *                     latents,
+                                  const float *                     context_latents,
+                                  const float *                     enc_hidden_data,
+                                  int                               enc_S,
+                                  const int *                       real_enc_S,
+                                  int                               T,
+                                  int                               N,
+                                  float                             timestep,
+                                  const int *                       score_layers,
+                                  int                               n_score_layers,
                                   std::vector<std::vector<float>> & attention_out) {
     DiTGGMLConfig & c      = model->cfg;
     int             Oc     = c.out_channels;
@@ -737,18 +737,17 @@ static int dit_ggml_score_forward(DiTGGML *             model,
     int             S      = T / c.patch_size;
     int             n_per  = T * Oc;
 
-    // Scoring uses a single forward pass (no CFG, no sampling loop).
-    // The Python reference runs batch=2 (noise + partial) but we only need
-    // the conditional pass — the attention patterns from the conditional
-    // branch are what the scorer consumes.
+    // Scoring uses a single conditional forward pass (no CFG or sampling
+    // loop). The caller invokes this for the pure-noise and regressed-latent
+    // states used by the Python reference.
     int N_graph = N;
 
-    fprintf(stderr, "[DiT-Score] Forward: N=%d, T=%d, S=%d, enc_S=%d, %d score layers\n",
-            N, T, S, enc_S, n_score_layers);
+    fprintf(stderr, "[DiT-Score] Forward: N=%d, T=%d, S=%d, enc_S=%d, %d score layers\n", N, T, S, enc_S,
+            n_score_layers);
 
     // Graph context
-    size_t               ctx_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
-    std::vector<uint8_t> ctx_buf(ctx_size);
+    size_t                  ctx_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
+    std::vector<uint8_t>    ctx_buf(ctx_size);
     struct ggml_init_params gparams = {
         /*.mem_size   =*/ctx_size,
         /*.mem_buffer =*/ctx_buf.data(),
@@ -758,8 +757,8 @@ static int dit_ggml_score_forward(DiTGGML *             model,
 
     struct ggml_tensor * t_input  = NULL;
     struct ggml_tensor * t_output = NULL;
-    struct ggml_cgraph * gf = dit_ggml_build_graph(model, ctx, T, enc_S, N_graph, &t_input, &t_output,
-                                                    score_layers, n_score_layers);
+    struct ggml_cgraph * gf =
+        dit_ggml_build_graph(model, ctx, T, enc_S, N_graph, &t_input, &t_output, score_layers, n_score_layers);
 
     fprintf(stderr, "[DiT-Score] Graph: %d nodes\n", ggml_graph_n_nodes(gf));
 
@@ -785,12 +784,11 @@ static int dit_ggml_score_forward(DiTGGML *             model,
         return -1;
     }
 
-    // Set timesteps to 0 (matches Python reference which scores at t=0)
+    // Python passes t_r=t, so the reference-time embedding receives zero.
     struct ggml_tensor * t_t  = ggml_graph_get_tensor(gf, "t");
     struct ggml_tensor * t_tr = ggml_graph_get_tensor(gf, "t_r");
-    float t_zero = 0.0f;
-    ggml_backend_tensor_set(t_t, &t_zero, 0, sizeof(float));
-    ggml_backend_tensor_set(t_tr, &t_zero, 0, sizeof(float));
+    ggml_backend_tensor_set(t_t, &timestep, 0, sizeof(float));
+    ggml_backend_tensor_set(t_tr, &timestep, 0, sizeof(float));
 
     // Positions
     struct ggml_tensor * t_pos = ggml_graph_get_tensor(gf, "positions");
@@ -802,15 +800,16 @@ static int dit_ggml_score_forward(DiTGGML *             model,
     }
     ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
 
-    // Self-attention mask (full attention for scoring — no sliding window)
+    // Self-attention mask for the model's sliding-window layers. Full-attention
+    // layers do not consume this tensor, matching the generation graph.
     struct ggml_tensor *  t_sa_mask_sw = ggml_graph_get_tensor(gf, "sa_mask_sw");
-    int                   win = c.sliding_window;
+    int                   win          = c.sliding_window;
     std::vector<uint16_t> sa_sw_data(S * S * N_graph);
     for (int b = 0; b < N_graph; b++) {
         for (int qi = 0; qi < S; qi++) {
             for (int ki = 0; ki < S; ki++) {
-                int  dist   = (qi > ki) ? (qi - ki) : (ki - qi);
-                bool in_win = (win <= 0) || (S <= win) || (dist <= win);
+                int  dist                           = (qi > ki) ? (qi - ki) : (ki - qi);
+                bool in_win                         = (win <= 0) || (S <= win) || (dist <= win);
                 sa_sw_data[b * S * S + qi * S + ki] = ggml_fp32_to_fp16(in_win ? 0.0f : -INFINITY);
             }
         }
@@ -824,7 +823,7 @@ static int dit_ggml_score_forward(DiTGGML *             model,
         int re = real_enc_S ? real_enc_S[b] : enc_S;
         for (int qi = 0; qi < S; qi++) {
             for (int ki = 0; ki < enc_S; ki++) {
-                float v = (ki < re) ? 0.0f : -INFINITY;
+                float v                                  = (ki < re) ? 0.0f : -INFINITY;
                 ca_data[b * enc_S * S + qi * enc_S + ki] = ggml_fp32_to_fp16(v);
             }
         }
@@ -834,13 +833,13 @@ static int dit_ggml_score_forward(DiTGGML *             model,
     // Encoder hidden states
     ggml_backend_tensor_set(t_enc, enc_hidden_data, 0, H_enc * enc_S * N * sizeof(float));
 
-    // Input: context_latents + noise
+    // Input: context_latents + latent state at this timestep.
     std::vector<float> input_buf(in_ch * T * N_graph);
     for (int b = 0; b < N; b++) {
         for (int t = 0; t < T; t++) {
             memcpy(&input_buf[b * T * in_ch + t * in_ch], &context_latents[b * T * ctx_ch + t * ctx_ch],
                    ctx_ch * sizeof(float));
-            memcpy(&input_buf[b * T * in_ch + t * in_ch + ctx_ch], &noise[b * n_per + t * Oc], Oc * sizeof(float));
+            memcpy(&input_buf[b * T * in_ch + t * in_ch + ctx_ch], &latents[b * n_per + t * Oc], Oc * sizeof(float));
         }
     }
     ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
@@ -860,17 +859,17 @@ static int dit_ggml_score_forward(DiTGGML *             model,
         }
 
         // Scores shape: [enc_S, S, Nh, N] (ne[0]=enc_S, ne[1]=S, ne[2]=Nh, ne[3]=N)
-        // Extract only batch 0: [enc_S, S, Nh] = enc_S * S * Nh floats
-        int layer_enc_S = (int) t_scores->ne[0];
-        int layer_S     = (int) t_scores->ne[1];
-        int layer_Nh    = (int) t_scores->ne[2];
-        size_t batch0_elems = (size_t) layer_enc_S * layer_S * layer_Nh;
+        int    layer_enc_S = (int) t_scores->ne[0];
+        int    layer_S     = (int) t_scores->ne[1];
+        int    layer_Nh    = (int) t_scores->ne[2];
+        int    layer_N     = (int) t_scores->ne[3];
+        size_t layer_elems = (size_t) layer_enc_S * layer_S * layer_Nh * layer_N;
 
-        attention_out[sl].resize(batch0_elems);
-        ggml_backend_tensor_get(t_scores, attention_out[sl].data(), 0, batch0_elems * sizeof(float));
+        attention_out[sl].resize(layer_elems);
+        ggml_backend_tensor_get(t_scores, attention_out[sl].data(), 0, layer_elems * sizeof(float));
 
-        fprintf(stderr, "[DiT-Score] Layer %d: %d heads, [%d x %d] attention matrix\n",
-                score_layers[sl], layer_Nh, layer_enc_S, layer_S);
+        fprintf(stderr, "[DiT-Score] Layer %d: %d heads, %d batch, [%d x %d] attention matrix\n", score_layers[sl],
+                layer_Nh, layer_N, layer_enc_S, layer_S);
     }
 
     ggml_free(ctx);

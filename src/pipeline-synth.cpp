@@ -35,7 +35,7 @@ void ace_synth_default_params(AceSynthParams * p) {
     p->dump_dir          = NULL;
 }
 
-AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
+static AceSynth * ace_synth_load_impl(ModelStore * store, const AceSynthParams * params, bool require_vae) {
     if (!store || !params) {
         fprintf(stderr, "[Synth-Load] ERROR: store and params are required\n");
         return NULL;
@@ -48,7 +48,7 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
         fprintf(stderr, "[Synth-Load] ERROR: text_encoder_path is NULL\n");
         return NULL;
     }
-    if (!params->vae_path) {
+    if (require_vae && !params->vae_path) {
         fprintf(stderr, "[Synth-Load] ERROR: vae_path is NULL\n");
         return NULL;
     }
@@ -89,10 +89,10 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     ctx->dit_key.adapter_scale = params->adapter_scale;
 
     ctx->vae_enc_key.kind = MODEL_VAE_ENC;
-    ctx->vae_enc_key.path = params->vae_path;
+    ctx->vae_enc_key.path = params->vae_path ? params->vae_path : "";
 
     ctx->vae_dec_key.kind = MODEL_VAE_DEC;
-    ctx->vae_dec_key.path = params->vae_path;
+    ctx->vae_dec_key.path = params->vae_path ? params->vae_path : "";
 
     fprintf(stderr, "[Synth-Load] Ready: turbo=%s, fa=%s, batch_cfg=%s\n", ctx->meta->is_turbo ? "yes" : "no",
             params->use_fa ? "yes" : "no", params->use_batch_cfg ? "yes" : "no");
@@ -104,6 +104,14 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     }
 
     return ctx;
+}
+
+AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
+    return ace_synth_load_impl(store, params, true);
+}
+
+AceSynth * ace_synth_load_score(ModelStore * store, const AceSynthParams * params) {
+    return ace_synth_load_impl(store, params, false);
 }
 
 // Allocate job and init the SynthState fields every task poses the same way.
@@ -696,27 +704,35 @@ void ace_synth_free(AceSynth * ctx) {
     delete ctx;
 }
 
-// Scoring: run phase 1 setup (encode, context, noise) then a single DiT
-// forward with cross-attention capture instead of the full denoising loop.
-// Matches Python ACE-Step dit_score.py:get_lyric_score flow.
-int ace_synth_score(AceSynth *         ctx,
-                    const AceRequest * reqs,
-                    int                batch_n,
-                    std::vector<LyricScoreResult> & out_scores) {
-    if (!ctx || !reqs || batch_n < 1 || batch_n > 9) {  // same limit as ace_synth_job_run
+// Scoring: run phase 1 setup, then compare pure-noise and regressed generated
+// latent attention as in Python LyricScoreMixin.get_lyric_score().
+int ace_synth_score(AceSynth *                          ctx,
+                    const AceRequest *                  reqs,
+                    int                                 batch_n,
+                    const float *                       pred_latents,
+                    int                                 pred_T_latent,
+                    std::vector<LyricScoreComparison> & out_scores) {
+    if (!ctx || !reqs || !pred_latents || batch_n < 1 || batch_n > 9 || pred_T_latent <= 0) {
         return -1;
     }
 
     // Scoring only supports text2music (pure generation) — the Python reference
     // also scores on the text2music forward pass.
-    const std::string & task = reqs[0].task_type;
-    if (task != TASK_TEXT2MUSIC) {
-        fprintf(stderr, "[Score] ERROR: scoring only supports task 'text2music', got '%s'\n", task.c_str());
-        return -1;
+    for (int i = 0; i < batch_n; ++i) {
+        const std::string & task = reqs[i].task_type;
+        if (task != TASK_TEXT2MUSIC) {
+            fprintf(stderr, "[Score] ERROR: scoring only supports task 'text2music', got '%s' at batch %d\n",
+                    task.c_str(), i);
+            return -1;
+        }
+        if (reqs[i].seed < 0) {
+            fprintf(stderr, "[Score] ERROR: seed must be resolved before scoring at batch %d\n", i);
+            return -1;
+        }
     }
 
-    AceSynthJob * job = alloc_job(ctx, reqs, batch_n);
-    SynthState &  s   = job->state;
+    AceSynthJob * job    = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s      = job->state;
     s.use_source_context = !reqs[0].audio_codes.empty();
     s.instruction_str    = s.use_source_context ? DIT_INSTR_COVER : DIT_INSTR_TEXT2MUSIC;
 
@@ -733,7 +749,11 @@ int ace_synth_score(AceSynth *         ctx,
         delete job;
         return -1;
     }
-    ops_build_schedule(s);
+    if (s.T != pred_T_latent) {
+        fprintf(stderr, "[Score] ERROR: predicted latent has %d frames, request resolves to %d\n", pred_T_latent, s.T);
+        delete job;
+        return -1;
+    }
     if (ops_encode_text(ctx, reqs, batch_n, s) != 0) {
         delete job;
         return -1;
@@ -745,8 +765,7 @@ int ace_synth_score(AceSynth *         ctx,
     ops_build_context_silence(ctx, batch_n, s);
     ops_init_noise(ctx, reqs, batch_n, s);
 
-    // Scoring forward pass (single DiT forward with cross-attention capture)
-    int rc = ops_score_forward(ctx, batch_n, out_scores, s);
+    int rc = ops_score_forward(ctx, batch_n, pred_latents, out_scores, s);
 
     delete job;
     return rc;

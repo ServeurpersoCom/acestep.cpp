@@ -19,25 +19,25 @@
 static int g_pass = 0;
 static int g_fail = 0;
 
-#define CHECK(cond, msg)                                                                 \
-    do {                                                                                 \
-        if (cond) {                                                                      \
-            g_pass++;                                                                    \
-        } else {                                                                         \
-            g_fail++;                                                                    \
-            fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__);                      \
-        }                                                                                \
+#define CHECK(cond, msg)                                            \
+    do {                                                            \
+        if (cond) {                                                 \
+            g_pass++;                                               \
+        } else {                                                    \
+            g_fail++;                                               \
+            fprintf(stderr, "FAIL: %s (line %d)\n", msg, __LINE__); \
+        }                                                           \
     } while (0)
 
-#define CHECK_NEAR(a, b, eps, msg)                                                       \
-    do {                                                                                 \
-        if (fabs((double) (a) - (double) (b)) < (eps)) {                                 \
-            g_pass++;                                                                    \
-        } else {                                                                         \
-            g_fail++;                                                                    \
-            fprintf(stderr, "FAIL: %s — expected %.8g, got %.8g (line %d)\n",            \
-                    msg, (double) (b), (double) (a), __LINE__);                          \
-        }                                                                                \
+#define CHECK_NEAR(a, b, eps, msg)                                                                             \
+    do {                                                                                                       \
+        if (fabs((double) (a) - (double) (b)) < (eps)) {                                                       \
+            g_pass++;                                                                                          \
+        } else {                                                                                               \
+            g_fail++;                                                                                          \
+            fprintf(stderr, "FAIL: %s — expected %.8g, got %.8g (line %d)\n", msg, (double) (b), (double) (a), \
+                    __LINE__);                                                                                 \
+        }                                                                                                      \
     } while (0)
 
 // ============================================================================
@@ -50,8 +50,8 @@ static void test_dtw_diagonal() {
     //         [9, 0, 9],
     //         [9, 9, 0]]
     // DTW on this should find the diagonal path.
-    float cost[] = { 0, 9, 9, 9, 0, 9, 9, 9, 0 };
-    DTWPath path = dtw_cpu(cost, 3, 3);
+    float   cost[] = { 0, 9, 9, 9, 0, 9, 9, 9, 0 };
+    DTWPath path   = dtw_cpu(cost, 3, 3);
 
     // Path should visit (0,0), (1,1), (2,2)
     CHECK(path.text_idx.size() == 3, "diagonal DTW path length == 3");
@@ -69,8 +69,8 @@ static void test_dtw_horizontal_step() {
     // [[0, 0, 0],
     //  [9, 9, 0]]
     // The optimal path should go right along row 0, then diagonal to (1,2).
-    float cost[] = { 0, 0, 0, 9, 9, 0 };
-    DTWPath path = dtw_cpu(cost, 2, 3);
+    float   cost[] = { 0, 0, 0, 9, 9, 0 };
+    DTWPath path   = dtw_cpu(cost, 2, 3);
 
     // Path must start at (0,0) and end at (1,2)
     CHECK(!path.text_idx.empty(), "horizontal DTW path non-empty");
@@ -86,7 +86,7 @@ static void test_dtw_horizontal_step() {
 static void test_median_filter() {
     // Window=3 on a smooth ramp: [1, 2, 3, 4, 5] -> [1, 2, 3, 4, 5]
     // (reflect padding keeps edges intact for monotonic data)
-    std::vector<float> ramp = { 1, 2, 3, 4, 5 };
+    std::vector<float> ramp     = { 1, 2, 3, 4, 5 };
     auto               filtered = median_filter_1d(ramp, 3);
     CHECK(filtered.size() == 5, "median filter preserves length");
     CHECK_NEAR(filtered[2], 3.0f, 1e-6, "median filter middle of ramp");
@@ -95,7 +95,7 @@ static void test_median_filter() {
     // Reflect padding: [2,1,2,100,4,5,4]
     // Windows: [2,1,2]=2, [1,2,100]=2, [2,100,4]=4, [100,4,5]=5, [4,5,4]=4
     std::vector<float> spike = { 1, 2, 100, 4, 5 };
-    auto               fs = median_filter_1d(spike, 3);
+    auto               fs    = median_filter_1d(spike, 3);
     CHECK_NEAR(fs[0], 2.0f, 1e-6, "median filter spike removal [0]");
     CHECK_NEAR(fs[1], 2.0f, 1e-6, "median filter spike removal [1]");
     CHECK_NEAR(fs[2], 4.0f, 1e-6, "median filter spike removal [2]");
@@ -114,7 +114,7 @@ static void test_token_type_mask() {
     // Tokens: "hello", "[", "Verse", "]", "world"
     // Mask:   1,       0,    0,       0,    1
     std::vector<std::string> tokens = { "hello", "[", "Verse", "]", "world" };
-    auto                     mask = generate_token_type_mask(tokens);
+    auto                     mask   = generate_token_type_mask(tokens);
     CHECK(mask.size() == 5, "token type mask size");
     CHECK(mask[0] == 1, "token type mask: lyric before bracket");
     CHECK(mask[1] == 0, "token type mask: opening bracket");
@@ -124,7 +124,7 @@ static void test_token_type_mask() {
 
     // Multi-token bracket: "[", "Intro", "Guitar", "]"
     std::vector<std::string> tokens2 = { "[", "Intro", "Guitar", "]", "sing" };
-    auto                     mask2 = generate_token_type_mask(tokens2);
+    auto                     mask2   = generate_token_type_mask(tokens2);
     CHECK(mask2[0] == 0, "multi-token bracket: open");
     CHECK(mask2[1] == 0, "multi-token bracket: inside 1");
     CHECK(mask2[2] == 0, "multi-token bracket: inside 2");
@@ -140,8 +140,8 @@ static void test_scoring_perfect_alignment() {
     // Create a 4-token, 4-frame attention matrix where the diagonal has
     // high energy and off-diagonal is near zero. With 1 layer, 1 head.
     // This simulates perfect lyric-to-audio alignment.
-    int tokens = 4;
-    int frames = 4;
+    int                tokens = 4;
+    int                frames = 4;
     std::vector<float> attn((size_t) tokens * frames, 0.01f);
     // Diagonal high energy
     for (int i = 0; i < tokens; i++) {
@@ -152,10 +152,11 @@ static void test_scoring_perfect_alignment() {
     std::vector<std::string> decoded(tokens, "lyric");
 
     // Use a custom config: just layer 0, head 0
-    ScoreLayerHeadConfig config[] = { { 0, 0 } };
+    ScoreLayerHeadConfig config[] = {
+        { 0, 0 }
+    };
 
-    LyricScoreResult result =
-        calculate_lyric_score(attn.data(), 1, 1, tokens, frames, decoded, config, 1, 1);
+    LyricScoreResult result = calculate_lyric_score(attn.data(), 1, 1, tokens, frames, decoded, config, 1, 1);
 
     // With perfect diagonal alignment:
     // - Coverage: all lyric rows have max energy 1.0 > 0.1, so coverage = 1.0
@@ -176,16 +177,17 @@ static void test_scoring_perfect_alignment() {
 // Uniform attention should yield low confidence and low score.
 // ============================================================================
 static void test_scoring_uniform_attention() {
-    int tokens = 4;
-    int frames = 8;
+    int                tokens = 4;
+    int                frames = 8;
     // Uniform attention — no structure
     std::vector<float> attn((size_t) tokens * frames, 0.5f);
 
     std::vector<std::string> decoded(tokens, "lyric");
-    ScoreLayerHeadConfig     config[] = { { 0, 0 } };
+    ScoreLayerHeadConfig     config[] = {
+        { 0, 0 }
+    };
 
-    LyricScoreResult result =
-        calculate_lyric_score(attn.data(), 1, 1, tokens, frames, decoded, config, 1, 1);
+    LyricScoreResult result = calculate_lyric_score(attn.data(), 1, 1, tokens, frames, decoded, config, 1, 1);
 
     // With uniform attention, min-max normalization zeros everything out
     // (e_max - e_min < 1e-9), so energy_matrix = 0, confidence = 0, score = 0
@@ -198,8 +200,8 @@ static void test_scoring_uniform_attention() {
 static void test_scoring_with_tags() {
     // 5 tokens: lyric, [Intro], lyric, lyric, lyric
     // 5 frames: perfect diagonal for lyric tokens, tag token gets low energy
-    int tokens = 5;
-    int frames = 5;
+    int                tokens = 5;
+    int                frames = 5;
     std::vector<float> attn((size_t) tokens * frames, 0.01f);
 
     // Diagonal energy for all tokens (including tag)
@@ -208,11 +210,15 @@ static void test_scoring_with_tags() {
     }
 
     // Token 1 is a structural tag
-    std::vector<std::string> decoded = { "sing", "[", "more", "singing", "here" };
-    ScoreLayerHeadConfig     config[] = { { 0, 0 } };
+    std::vector<std::string> decoded  = { "sing", "[Intro]", "more", "singing", "here" };
+    ScoreLayerHeadConfig     config[] = {
+        { 0, 0 }
+    };
 
-    LyricScoreResult result =
-        calculate_lyric_score(attn.data(), 1, 1, tokens, frames, decoded, config, 1, 1);
+    std::vector<int> type_mask = generate_token_type_mask(decoded);
+    CHECK(type_mask == std::vector<int>({ 1, 0, 1, 1, 1 }), "tagged alignment mask excludes only the tag");
+
+    LyricScoreResult result = calculate_lyric_score(attn.data(), 1, 1, tokens, frames, decoded, config, 1, 1);
 
     // Coverage: 4 lyric tokens, all with max energy 1.0 > 0.1 -> coverage = 1.0
     // Monotonicity: lyric centroids [0, 2, 3, 4] strictly increasing -> mono = 1.0
@@ -229,8 +235,8 @@ static void test_scoring_with_tags() {
 // Test 8: Multi-head attention averaging
 // ============================================================================
 static void test_multi_head_averaging() {
-    int tokens = 3;
-    int frames = 3;
+    int tokens   = 3;
+    int frames   = 3;
     int n_layers = 2;
     int n_heads  = 2;
 
@@ -247,18 +253,23 @@ static void test_multi_head_averaging() {
 
     // 3 of 4 heads have diagonal, 1 has anti-diagonal
     for (int t = 0; t < tokens; t++) {
-        A(0, 0, t, t) = 1.0f;
+        A(0, 0, t, t)              = 1.0f;
         A(0, 1, t, tokens - 1 - t) = 1.0f;  // anti-diagonal
-        A(1, 0, t, t) = 1.0f;
-        A(1, 1, t, t) = 1.0f;
+        A(1, 0, t, t)              = 1.0f;
+        A(1, 1, t, t)              = 1.0f;
     }
 
     // Select all 4 heads
-    ScoreLayerHeadConfig config[] = { { 0, 0 }, { 0, 1 }, { 1, 0 }, { 1, 1 } };
+    ScoreLayerHeadConfig config[] = {
+        { 0, 0 },
+        { 0, 1 },
+        { 1, 0 },
+        { 1, 1 }
+    };
 
     std::vector<float> calc_matrix, energy_matrix;
-    bool ok = preprocess_attention(attn.data(), n_layers, n_heads, tokens, frames, config, 4, 1,
-                                   calc_matrix, energy_matrix);
+    bool               ok =
+        preprocess_attention(attn.data(), n_layers, n_heads, tokens, frames, config, 4, 1, calc_matrix, energy_matrix);
     CHECK(ok, "multi-head preprocess succeeded");
 
     // Average: 3/4 diagonal + 1/4 anti-diagonal
@@ -270,17 +281,79 @@ static void test_multi_head_averaging() {
 }
 
 // ============================================================================
-// Test 9: DTW path monotonicity (paths must be non-decreasing in both dims)
+// Test 9: Remap absolute model layers to compact captured-layer slots
+// ============================================================================
+static void test_score_head_remap() {
+    int                               captured_layers[] = { 2, 3, 4, 5, 6 };
+    std::vector<ScoreLayerHeadConfig> remapped;
+    bool ok = remap_score_heads(DEFAULT_2B_SCORE_HEADS, DEFAULT_2B_SCORE_HEADS_COUNT, captured_layers, 5, 16, remapped);
+    CHECK(ok, "score head remap succeeds");
+    CHECK(remapped.size() == 7, "score head remap preserves every configured head");
+    CHECK(remapped[0].layer == 0 && remapped[0].head == 6, "absolute layer 2 maps to compact layer 0");
+    CHECK(remapped[1].layer == 1 && remapped[1].head == 10, "absolute layer 3 maps to compact layer 1");
+    CHECK(remapped[6].layer == 4 && remapped[6].head == 8, "absolute layer 6 maps to compact layer 4");
+
+    int missing_layers[] = { 2, 3, 4 };
+    CHECK(!remap_score_heads(DEFAULT_2B_SCORE_HEADS, DEFAULT_2B_SCORE_HEADS_COUNT, missing_layers, 3, 16, remapped),
+          "score head remap rejects a partial capture");
+}
+
+// ============================================================================
+// Test 10: GGML attention layout and per-batch pure-lyric slicing
+// ============================================================================
+static void test_attention_slice_layout() {
+    const int          tokens  = 4;
+    const int          frames  = 2;
+    const int          heads   = 2;
+    const int          batches = 2;
+    std::vector<float> source((size_t) tokens * frames * heads * batches);
+
+    for (int b = 0; b < batches; b++) {
+        for (int h = 0; h < heads; h++) {
+            for (int f = 0; f < frames; f++) {
+                for (int t = 0; t < tokens; t++) {
+                    size_t index  = (size_t) t + (size_t) tokens * (f + frames * (h + heads * b));
+                    source[index] = (float) (1000 * b + 100 * h + 10 * f + t);
+                }
+            }
+        }
+    }
+
+    std::vector<float> slice;
+    bool ok = extract_attention_slice(source.data(), source.size(), tokens, frames, heads, batches, 1, 1, 2, slice);
+    CHECK(ok, "attention slice succeeds");
+    CHECK(slice.size() == 8, "attention slice has heads*lyric_tokens*frames elements");
+    CHECK_NEAR(slice[0], 1001.0f, 1e-6, "attention slice batch 1, head 0, token 1, frame 0");
+    CHECK_NEAR(slice[1], 1011.0f, 1e-6, "attention slice batch 1, head 0, token 1, frame 1");
+    CHECK_NEAR(slice[6], 1102.0f, 1e-6, "attention slice batch 1, head 1, token 2, frame 0");
+    CHECK_NEAR(slice[7], 1112.0f, 1e-6, "attention slice batch 1, head 1, token 2, frame 1");
+}
+
+// ============================================================================
+// Test 11: Strip lyric prompt headers and trailing end-of-text tokens
+// ============================================================================
+static void test_lyric_token_segment() {
+    std::vector<int>  raw     = { 10, 11, 20, 21, 151643, 151643 };
+    LyricTokenSegment segment = extract_lyric_token_segment(raw, 2, 151643);
+    CHECK(segment.start == 2, "lyric segment preserves encoder row offset");
+    CHECK(segment.token_ids == std::vector<int>({ 20, 21 }), "lyric segment excludes header and end tokens");
+
+    LyricTokenSegment invalid = extract_lyric_token_segment(raw, 10, 151643);
+    CHECK(invalid.start == -1 && invalid.token_ids.empty(), "lyric segment rejects an invalid header length");
+}
+
+// ============================================================================
+// Test 12: DTW path monotonicity (paths must be non-decreasing in both dims)
 // ============================================================================
 static void test_dtw_path_monotonic() {
     // Random-ish cost matrix
-    int N = 5, M = 7;
+    int                N = 5, M = 7;
     std::vector<float> cost((size_t) N * M);
     for (int i = 0; i < N; i++) {
         for (int j = 0; j < M; j++) {
             // Cheaper near the diagonal (i/N * j/M)
-            float di = (float) i / N;
-            float dj = (float) j / M;
+            float di                 = (float) i / N;
+            float dj                 = (float) j / M;
             cost[(size_t) i * M + j] = fabsf(di - dj) + 0.01f * ((i * 7 + j * 3) % 5);
         }
     }
@@ -331,6 +404,15 @@ int main(int argc, char ** argv) {
 
     test_multi_head_averaging();
     fprintf(stderr, "test_multi_head_averaging: done\n");
+
+    test_score_head_remap();
+    fprintf(stderr, "test_score_head_remap: done\n");
+
+    test_attention_slice_layout();
+    fprintf(stderr, "test_attention_slice_layout: done\n");
+
+    test_lyric_token_segment();
+    fprintf(stderr, "test_lyric_token_segment: done\n");
 
     test_dtw_path_monotonic();
     fprintf(stderr, "test_dtw_path_monotonic: done\n");

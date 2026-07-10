@@ -71,17 +71,17 @@ int ops_vae_decode(const AceSynth * ctx,
                    bool (*cancel)(void *),
                    void * cancel_data);
 
-// Scoring primitive: single DiT forward with cross-attention capture.
-// Runs one forward pass on the current noise + context + encoder states,
-// extracts cross-attention matrices from the configured score layers,
-// and computes lyric alignment metrics (coverage, monotonicity, confidence).
+// Scoring primitive: DiT cross-attention capture for the Python reference's
+// pure-noise and regressed-latent states. pred_latents is the generated DiT
+// output [batch_n, T, 64].
 //
 // Requires ops_encode_text (for s.per_lyric_ids) and ops_build_context +
 // ops_init_noise (for noise + context latents) to have been run first.
 //
-// out_scores: filled with one LyricScoreResult per batch item.
+// out_scores: filled with one LM/DiT score comparison per batch item.
 // Returns 0 on success, -1 on error.
-int ops_score_forward(const AceSynth * ctx,
-                      int              batch_n,
-                      std::vector<LyricScoreResult> & out_scores,
-                      SynthState &     s);
+int ops_score_forward(const AceSynth *                    ctx,
+                      int                                 batch_n,
+                      const float *                       pred_latents,
+                      std::vector<LyricScoreComparison> & out_scores,
+                      SynthState &                        s);
