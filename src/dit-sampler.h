@@ -785,7 +785,7 @@ static int dit_ggml_score_forward(DiTGGML *             model,
         return -1;
     }
 
-    // Set timesteps to 0 (scoring uses the final denoised state)
+    // Set timesteps to 0 (matches Python reference which scores at t=0)
     struct ggml_tensor * t_t  = ggml_graph_get_tensor(gf, "t");
     struct ggml_tensor * t_tr = ggml_graph_get_tensor(gf, "t_r");
     float t_zero = 0.0f;

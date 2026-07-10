@@ -601,21 +601,22 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
         struct ggml_tensor * sa_mask = (m->layers[i].layer_type == 0) ? sa_mask_sw : nullptr;
 
         // Check if this layer should capture cross-attention scores
-        struct ggml_tensor * capture = nullptr;
+        bool                 capture_this_layer = false;
+        struct ggml_tensor * capture            = nullptr;
         if (score_layers) {
             for (int sl = 0; sl < n_score_layers; sl++) {
                 if (score_layers[sl] == i) {
-                    capture = (struct ggml_tensor *) 1;  // sentinel: non-NULL triggers capture
+                    capture_this_layer = true;
                     break;
                 }
             }
         }
 
         hidden = dit_ggml_build_layer(ctx, m, i, hidden, tproj, enc, positions, sa_mask, ca_mask, S, enc_S, N,
-                                      capture ? &capture : nullptr);
+                                      capture_this_layer ? &capture : nullptr);
 
         // Name captured cross-attention scores for later retrieval
-        if (capture && capture != (struct ggml_tensor *) 1) {
+        if (capture) {
             char score_name[64];
             snprintf(score_name, sizeof(score_name), "cross_attn_scores_L%d", i);
             ggml_set_name(capture, score_name);

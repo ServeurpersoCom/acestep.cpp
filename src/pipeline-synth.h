@@ -102,8 +102,6 @@ void ace_audio_free(AceAudio * audio);
 
 void ace_synth_free(AceSynth * ctx);
 
-// LyricScoreResult is defined in dtw-score.h (included above).
-
 // Phase 1 scoring: run a single DiT forward pass with cross-attention capture
 // and compute lyric alignment metrics. Requires the same phase 1 setup as
 // ace_synth_job_run_dit (text encoding, context build, noise init) but does

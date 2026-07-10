@@ -40,14 +40,14 @@ jobs:
           echo "dit_score.py: expected=$EXPECTED_SCORE actual=$ACTUAL_SCORE"
 
           if [ "$ACTUAL_DTW" != "$EXPECTED_DTW" ]; then
-            echo "::warning::_dtw.py has drifted from the pinned commit (82252c24)."
-            echo "::warning::The C++ port in src/dtw-score.h may need updating."
+            echo "::error::_dtw.py has drifted from the pinned commit (82252c24)."
+            echo "::error::The C++ port in src/dtw-score.h may need updating."
             exit 1
           fi
 
           if [ "$ACTUAL_SCORE" != "$EXPECTED_SCORE" ]; then
-            echo "::warning::dit_score.py has drifted from the pinned commit (82252c24)."
-            echo "::warning::The C++ port in src/dtw-score.h may need updating."
+            echo "::error::dit_score.py has drifted from the pinned commit (82252c24)."
+            echo "::error::The C++ port in src/dtw-score.h may need updating."
             exit 1
           fi
 

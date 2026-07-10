@@ -1509,13 +1509,10 @@ static void handle_score(const httplib::Request & req, httplib::Response & res) 
             for (size_t i = 0; i < n; i++) {
                 AceRequest r;
                 request_init(&r);
-                yyjson_val * obj = yyjson_arr_get(yyjson_doc_get_root(doc), i);
-                if (!request_parse_json(&r, yyjson_val_write(obj, 0, nullptr))) {
-                    // Fallback: use the raw object directly
-                    char * obj_str = yyjson_val_write(obj, 0, nullptr);
-                    request_parse_json(&r, obj_str);
-                    free(obj_str);
-                }
+                yyjson_val * obj     = yyjson_arr_get(yyjson_doc_get_root(doc), i);
+                char *       obj_str = yyjson_val_write(obj, 0, nullptr);
+                request_parse_json(&r, obj_str);
+                free(obj_str);
                 ace_reqs.push_back(std::move(r));
             }
             yyjson_doc_free(doc);

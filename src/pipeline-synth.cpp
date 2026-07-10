@@ -703,7 +703,7 @@ int ace_synth_score(AceSynth *         ctx,
                     const AceRequest * reqs,
                     int                batch_n,
                     std::vector<LyricScoreResult> & out_scores) {
-    if (!ctx || !reqs || batch_n < 1 || batch_n > 9) {
+    if (!ctx || !reqs || batch_n < 1 || batch_n > 9) {  // same limit as ace_synth_job_run
         return -1;
     }
 
