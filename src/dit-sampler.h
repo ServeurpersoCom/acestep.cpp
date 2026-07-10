@@ -696,3 +696,183 @@ static int dit_ggml_generate(DiTGGML *           model,
     ggml_free(ctx);
     return 0;
 }
+
+// ============================================================================
+// Scoring forward pass: single DiT forward with cross-attention capture.
+//
+// Matches Python ACE-Step lyric_score.py:get_lyric_score() which runs a
+// single DiT forward with output_attentions=True to extract cross-attention
+// matrices for lyric alignment scoring.
+//
+// Builds the same DiT graph as generation but forces the f32 attention path
+// for the specified score_layers, marking the softmax attention weights as
+// graph outputs. Runs one forward pass at t=0 (pure noise input) and reads
+// back the cross-attention scores.
+//
+// The caller is responsible for:
+//   - text encoding (enc_hidden, enc_S, real_enc_S)
+//   - context build (context_latents)
+//   - noise generation (noise)
+//   - running calculate_lyric_score() on the returned attention matrices
+//
+// attention_out: filled with [n_score_layers][Nh][enc_S][S] attention weights
+//   (one vector per captured layer, each enc_S*S*Nh floats, row-major).
+//   Only the conditional (first) batch sample is extracted.
+// Returns 0 on success, -1 on error.
+static int dit_ggml_score_forward(DiTGGML *             model,
+                                  const float *         noise,
+                                  const float *         context_latents,
+                                  const float *         enc_hidden_data,
+                                  int                   enc_S,
+                                  const int *           real_enc_S,
+                                  int                   T,
+                                  int                   N,
+                                  const int *           score_layers,
+                                  int                   n_score_layers,
+                                  std::vector<std::vector<float>> & attention_out) {
+    DiTGGMLConfig & c      = model->cfg;
+    int             Oc     = c.out_channels;
+    int             ctx_ch = c.in_channels - Oc;
+    int             in_ch  = c.in_channels;
+    int             S      = T / c.patch_size;
+    int             n_per  = T * Oc;
+
+    // Scoring uses a single forward pass (no CFG, no sampling loop).
+    // The Python reference runs batch=2 (noise + partial) but we only need
+    // the conditional pass — the attention patterns from the conditional
+    // branch are what the scorer consumes.
+    int N_graph = N;
+
+    fprintf(stderr, "[DiT-Score] Forward: N=%d, T=%d, S=%d, enc_S=%d, %d score layers\n",
+            N, T, S, enc_S, n_score_layers);
+
+    // Graph context
+    size_t               ctx_size = ggml_tensor_overhead() * 8192 + ggml_graph_overhead_custom(8192, false);
+    std::vector<uint8_t> ctx_buf(ctx_size);
+    struct ggml_init_params gparams = {
+        /*.mem_size   =*/ctx_size,
+        /*.mem_buffer =*/ctx_buf.data(),
+        /*.no_alloc   =*/true,
+    };
+    struct ggml_context * ctx = ggml_init(gparams);
+
+    struct ggml_tensor * t_input  = NULL;
+    struct ggml_tensor * t_output = NULL;
+    struct ggml_cgraph * gf = dit_ggml_build_graph(model, ctx, T, enc_S, N_graph, &t_input, &t_output,
+                                                    score_layers, n_score_layers);
+
+    fprintf(stderr, "[DiT-Score] Graph: %d nodes\n", ggml_graph_n_nodes(gf));
+
+    struct ggml_tensor * t_enc = ggml_graph_get_tensor(gf, "enc_hidden");
+    int                  H_enc = (int) t_enc->ne[0];
+
+    // Allocate compute buffers
+    ggml_backend_sched_reset(model->sched);
+    if (model->backend != model->cpu_backend) {
+        const char * input_names[] = {
+            "enc_hidden", "input_latents", "t", "t_r", "positions", "sa_mask_sw", "ca_mask"
+        };
+        for (const char * iname : input_names) {
+            struct ggml_tensor * t = ggml_graph_get_tensor(gf, iname);
+            if (t) {
+                ggml_backend_sched_set_tensor_backend(model->sched, t, model->backend);
+            }
+        }
+    }
+    if (!ggml_backend_sched_alloc_graph(model->sched, gf)) {
+        fprintf(stderr, "[DiT-Score] FATAL: failed to allocate graph\n");
+        ggml_free(ctx);
+        return -1;
+    }
+
+    // Set timesteps to 0 (scoring uses the final denoised state)
+    struct ggml_tensor * t_t  = ggml_graph_get_tensor(gf, "t");
+    struct ggml_tensor * t_tr = ggml_graph_get_tensor(gf, "t_r");
+    float t_zero = 0.0f;
+    ggml_backend_tensor_set(t_t, &t_zero, 0, sizeof(float));
+    ggml_backend_tensor_set(t_tr, &t_zero, 0, sizeof(float));
+
+    // Positions
+    struct ggml_tensor * t_pos = ggml_graph_get_tensor(gf, "positions");
+    std::vector<int32_t> pos_data(S * N_graph);
+    for (int b = 0; b < N_graph; b++) {
+        for (int i = 0; i < S; i++) {
+            pos_data[b * S + i] = i;
+        }
+    }
+    ggml_backend_tensor_set(t_pos, pos_data.data(), 0, S * N_graph * sizeof(int32_t));
+
+    // Self-attention mask (full attention for scoring — no sliding window)
+    struct ggml_tensor *  t_sa_mask_sw = ggml_graph_get_tensor(gf, "sa_mask_sw");
+    int                   win = c.sliding_window;
+    std::vector<uint16_t> sa_sw_data(S * S * N_graph);
+    for (int b = 0; b < N_graph; b++) {
+        for (int qi = 0; qi < S; qi++) {
+            for (int ki = 0; ki < S; ki++) {
+                int  dist   = (qi > ki) ? (qi - ki) : (ki - qi);
+                bool in_win = (win <= 0) || (S <= win) || (dist <= win);
+                sa_sw_data[b * S * S + qi * S + ki] = ggml_fp32_to_fp16(in_win ? 0.0f : -INFINITY);
+            }
+        }
+    }
+    ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0, S * S * N_graph * sizeof(uint16_t));
+
+    // Cross-attention mask
+    struct ggml_tensor *  t_ca_mask = ggml_graph_get_tensor(gf, "ca_mask");
+    std::vector<uint16_t> ca_data(enc_S * S * N_graph);
+    for (int b = 0; b < N; b++) {
+        int re = real_enc_S ? real_enc_S[b] : enc_S;
+        for (int qi = 0; qi < S; qi++) {
+            for (int ki = 0; ki < enc_S; ki++) {
+                float v = (ki < re) ? 0.0f : -INFINITY;
+                ca_data[b * enc_S * S + qi * enc_S + ki] = ggml_fp32_to_fp16(v);
+            }
+        }
+    }
+    ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
+
+    // Encoder hidden states
+    ggml_backend_tensor_set(t_enc, enc_hidden_data, 0, H_enc * enc_S * N * sizeof(float));
+
+    // Input: context_latents + noise
+    std::vector<float> input_buf(in_ch * T * N_graph);
+    for (int b = 0; b < N; b++) {
+        for (int t = 0; t < T; t++) {
+            memcpy(&input_buf[b * T * in_ch + t * in_ch], &context_latents[b * T * ctx_ch + t * ctx_ch],
+                   ctx_ch * sizeof(float));
+            memcpy(&input_buf[b * T * in_ch + t * in_ch + ctx_ch], &noise[b * n_per + t * Oc], Oc * sizeof(float));
+        }
+    }
+    ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
+
+    // Run forward pass
+    ggml_backend_sched_graph_compute(model->sched, gf);
+
+    // Read back cross-attention scores for each captured layer
+    attention_out.resize(n_score_layers);
+    for (int sl = 0; sl < n_score_layers; sl++) {
+        char score_name[64];
+        snprintf(score_name, sizeof(score_name), "cross_attn_scores_L%d", score_layers[sl]);
+        struct ggml_tensor * t_scores = ggml_graph_get_tensor(gf, score_name);
+        if (!t_scores) {
+            fprintf(stderr, "[DiT-Score] WARNING: could not find tensor %s\n", score_name);
+            continue;
+        }
+
+        // Scores shape: [enc_S, S, Nh, N] (ne[0]=enc_S, ne[1]=S, ne[2]=Nh, ne[3]=N)
+        // Extract only batch 0: [enc_S, S, Nh] = enc_S * S * Nh floats
+        int layer_enc_S = (int) t_scores->ne[0];
+        int layer_S     = (int) t_scores->ne[1];
+        int layer_Nh    = (int) t_scores->ne[2];
+        size_t batch0_elems = (size_t) layer_enc_S * layer_S * layer_Nh;
+
+        attention_out[sl].resize(batch0_elems);
+        ggml_backend_tensor_get(t_scores, attention_out[sl].data(), 0, batch0_elems * sizeof(float));
+
+        fprintf(stderr, "[DiT-Score] Layer %d: %d heads, [%d x %d] attention matrix\n",
+                score_layers[sl], layer_Nh, layer_enc_S, layer_S);
+    }
+
+    ggml_free(ctx);
+    return 0;
+}

@@ -120,16 +120,26 @@ static struct ggml_tensor * dit_ggml_build_temb(struct ggml_context * ctx,
 // Q: [D, S, Nh], K: [D, S_kv, Nkv], V: [D, S_kv, Nkv]
 // mask: [S_kv, S] F16 or NULL, scale: 1/sqrt(D)
 // Returns: [D, Nh, S] (same layout as flash_attn_ext output)
+//
+// When capture_scores is non-NULL, the softmax scores tensor (attention weights)
+// is marked as a graph output and stored at *capture_scores. Shape: [S_kv, S, Nh, N].
+// This is used by the /score endpoint to extract cross-attention matrices for
+// lyric alignment scoring. Ported from Python ACE-Step output_attentions=True.
 static struct ggml_tensor * dit_attn_f32(struct ggml_context * ctx,
                                          struct ggml_tensor *  q,
                                          struct ggml_tensor *  k,
                                          struct ggml_tensor *  v,
                                          struct ggml_tensor *  mask,
-                                         float                 scale) {
+                                         float                 scale,
+                                         struct ggml_tensor ** capture_scores = nullptr) {
     struct ggml_tensor * scores = ggml_mul_mat(ctx, k, q);
     scores                      = ggml_soft_max_ext(ctx, scores, mask, scale, 0.0f);
-    struct ggml_tensor * vt     = ggml_cont(ctx, ggml_transpose(ctx, v));
-    struct ggml_tensor * out    = ggml_mul_mat(ctx, vt, scores);
+    if (capture_scores) {
+        *capture_scores = scores;
+        ggml_set_output(scores);
+    }
+    struct ggml_tensor * vt  = ggml_cont(ctx, ggml_transpose(ctx, v));
+    struct ggml_tensor * out = ggml_mul_mat(ctx, vt, scores);
     return ggml_cont(ctx, ggml_permute(ctx, out, 0, 2, 1, 3));
 }
 
@@ -271,6 +281,9 @@ static struct ggml_tensor * dit_ggml_build_mlp(struct ggml_context * ctx,
 // Build cross-attention sub-graph for a single layer.
 // norm_ca: [H, S, N] pre-normalized hidden state (Q source)
 // enc:     [H, enc_S, N] condition-embedded encoder states (K/V source)
+// When capture_scores is non-NULL, forces the f32 attention path and stores
+// the softmax attention weights tensor at *capture_scores (marked as graph
+// output). Shape: [enc_S, S, Nh, N]. Used by /score for lyric alignment.
 // Returns: output [H, S, N] (NOT added to residual yet)
 static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
                                                       DiTGGML *             m,
@@ -281,7 +294,8 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
                                                       struct ggml_tensor *  mask,       // [enc_S, S, 1, N] F16 or NULL
                                                       int                   S,
                                                       int                   enc_S,
-                                                      int                   N) {
+                                                      int                   N,
+                                                      struct ggml_tensor ** capture_scores = nullptr) {
     DiTGGMLConfig & c   = m->cfg;
     int             D   = c.head_dim;
     int             Nh  = c.n_heads;
@@ -334,9 +348,13 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
     // mask blocks padding positions in encoder hidden states
     float scale = 1.0f / sqrtf((float) D);
 
+    // When capturing scores, force the f32 path (flash_attn_ext does not
+    // materialize the attention weights as a separate tensor).
+    bool use_fa = m->use_flash_attn && !capture_scores;
+
     // K/V come in F32 from mul_mat (no KV cache here). Cast to F16 before FA,
     // mirroring llama.cpp build_attn_mha for graphs without a KV cache.
-    if (m->use_flash_attn) {
+    if (use_fa) {
         if (k->type == GGML_TYPE_F32) {
             k = ggml_cast(ctx, k, GGML_TYPE_F16);
         }
@@ -345,9 +363,9 @@ static struct ggml_tensor * dit_ggml_build_cross_attn(struct ggml_context * ctx,
         }
     }
 
-    struct ggml_tensor * attn = m->use_flash_attn ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
-                                                    dit_attn_f32(ctx, q, k, v, mask, scale);
-    if (m->use_flash_attn) {
+    struct ggml_tensor * attn = use_fa ? ggml_flash_attn_ext(ctx, q, k, v, mask, scale, 0.0f, 0.0f) :
+                                         dit_attn_f32(ctx, q, k, v, mask, scale, capture_scores);
+    if (use_fa) {
         ggml_flash_attn_ext_set_prec(attn, GGML_PREC_F32);
     }
 
@@ -375,7 +393,8 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
                                                  struct ggml_tensor *  ca_mask,    // [enc_S, S, 1, N] or NULL
                                                  int                   S,
                                                  int                   enc_S,
-                                                 int                   N) {
+                                                 int                   N,
+                                                 struct ggml_tensor ** capture_scores = nullptr) {
     DiTGGMLConfig & c  = m->cfg;
     DiTGGMLLayer *  ly = &m->layers[layer_idx];
     int             H  = c.hidden_size;
@@ -428,7 +447,7 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
     if (enc) {
         struct ggml_tensor * norm_ca = dit_ggml_rms_norm_weighted(ctx, hidden, ly->cross_attn_norm, c.rms_norm_eps);
         struct ggml_tensor * ca_out =
-            dit_ggml_build_cross_attn(ctx, m, ly, norm_ca, enc, positions, ca_mask, S, enc_S, N);
+            dit_ggml_build_cross_attn(ctx, m, ly, norm_ca, enc, positions, ca_mask, S, enc_S, N, capture_scores);
         hidden = ggml_add(ctx, hidden, ca_out);
     }
 
@@ -462,13 +481,20 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
 //
 // Graph outputs:
 //   "velocity"        [out_channels, T, N]  predicted flow velocity
+//
+// When score_layers is non-NULL, cross-attention scores are captured for the
+// specified layers (forced f32 path). Each captured layer produces a named
+// output tensor "cross_attn_scores_L{layer}" of shape [enc_S, S, Nh, N].
+// These are retrieved after graph compute for lyric alignment scoring.
 static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
                                                  struct ggml_context * ctx,
                                                  int                   T,           // temporal length (before patching)
                                                  int                   enc_S,       // encoder sequence length
                                                  int                   N,           // batch size
                                                  struct ggml_tensor ** p_input,     // [out] input tensor to fill
-                                                 struct ggml_tensor ** p_output) {  // [out] output tensor to read
+                                                 struct ggml_tensor ** p_output,    // [out] output tensor to read
+                                                 const int *           score_layers = nullptr,  // layers to capture, or NULL
+                                                 int                   n_score_layers = 0) {
 
     DiTGGMLConfig & c = m->cfg;
     int             S = T / c.patch_size;  // sequence length after patching
@@ -573,7 +599,27 @@ static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
     for (int i = 0; i < c.n_layers; i++) {
         // layer_type=0 (sliding window): sa_mask_sw, layer_type=1 (full): unmasked
         struct ggml_tensor * sa_mask = (m->layers[i].layer_type == 0) ? sa_mask_sw : nullptr;
-        hidden = dit_ggml_build_layer(ctx, m, i, hidden, tproj, enc, positions, sa_mask, ca_mask, S, enc_S, N);
+
+        // Check if this layer should capture cross-attention scores
+        struct ggml_tensor * capture = nullptr;
+        if (score_layers) {
+            for (int sl = 0; sl < n_score_layers; sl++) {
+                if (score_layers[sl] == i) {
+                    capture = (struct ggml_tensor *) 1;  // sentinel: non-NULL triggers capture
+                    break;
+                }
+            }
+        }
+
+        hidden = dit_ggml_build_layer(ctx, m, i, hidden, tproj, enc, positions, sa_mask, ca_mask, S, enc_S, N,
+                                      capture ? &capture : nullptr);
+
+        // Name captured cross-attention scores for later retrieval
+        if (capture && capture != (struct ggml_tensor *) 1) {
+            char score_name[64];
+            snprintf(score_name, sizeof(score_name), "cross_attn_scores_L%d", i);
+            ggml_set_name(capture, score_name);
+        }
         // Debug dumps at key layers: 0, 6, 12, 18, last
         if (i == 0 || i == 6 || i == 12 || i == 18 || i == c.n_layers - 1) {
             char lname[64];

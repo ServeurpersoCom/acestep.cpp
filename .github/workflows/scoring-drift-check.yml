@@ -1,0 +1,54 @@
+# Check if the upstream Python scoring reference has drifted from the
+# commit pinned in src/dtw-score.h. The C++ port is a snapshot of:
+#   ace-step/ACE-Step-1.5@82252c24
+#   acestep/core/scoring/_dtw.py
+#   acestep/core/scoring/dit_score.py
+#
+# If the upstream files change, this workflow fails and the C++ port
+# needs re-evaluation. The expected SHA256 hashes are embedded below
+# so there's no separate file to maintain — update both hashes and
+# the pin comment in dtw-score.h when re-syncing.
+name: Scoring Drift Check
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # weekly: Monday 08:00 UTC
+  workflow_dispatch:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch upstream Python scoring files
+        run: |
+          BASE="https://raw.githubusercontent.com/ace-step/ACE-Step-1.5/82252c24"
+          curl -fsSL "$BASE/acestep/core/scoring/_dtw.py" -o _dtw.py
+          curl -fsSL "$BASE/acestep/core/scoring/dit_score.py" -o dit_score.py
+
+      - name: Verify hashes match pinned snapshot
+        run: |
+          # Expected SHA256 of the Python files at commit 82252c24.
+          # Update these (and the pin comment in src/dtw-score.h) when
+          # re-syncing the C++ port after an upstream algorithm change.
+          EXPECTED_DTW="2d2252e7108f296cd26722c7b622e1c1a1ed47c71459a8ff873164c4c1ada962"
+          EXPECTED_SCORE="73700ff976549339dad3d6c500f8cbe9a8cce08d1979bbb85e3e3ed53e0605a1"
+
+          ACTUAL_DTW=$(sha256sum _dtw.py | cut -d' ' -f1)
+          ACTUAL_SCORE=$(sha256sum dit_score.py | cut -d' ' -f1)
+
+          echo "_dtw.py:      expected=$EXPECTED_DTW actual=$ACTUAL_DTW"
+          echo "dit_score.py: expected=$EXPECTED_SCORE actual=$ACTUAL_SCORE"
+
+          if [ "$ACTUAL_DTW" != "$EXPECTED_DTW" ]; then
+            echo "::warning::_dtw.py has drifted from the pinned commit (82252c24)."
+            echo "::warning::The C++ port in src/dtw-score.h may need updating."
+            exit 1
+          fi
+
+          if [ "$ACTUAL_SCORE" != "$EXPECTED_SCORE" ]; then
+            echo "::warning::dit_score.py has drifted from the pinned commit (82252c24)."
+            echo "::warning::The C++ port in src/dtw-score.h may need updating."
+            exit 1
+          fi
+
+          echo "No drift detected. C++ port matches pinned Python reference."

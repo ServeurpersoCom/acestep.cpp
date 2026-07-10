@@ -8,9 +8,11 @@
 // caches everything across calls. DiT weight swap between phases is an
 // invisible consequence of the store, not an orchestration concern anymore.
 
+#include "dtw-score.h"
 #include "request.h"
 
 #include <cstdlib>
+#include <vector>
 
 struct AceSynth;
 struct AceSynthJob;
@@ -99,3 +101,17 @@ void ace_synth_job_free(AceSynthJob * job);
 void ace_audio_free(AceAudio * audio);
 
 void ace_synth_free(AceSynth * ctx);
+
+// LyricScoreResult is defined in dtw-score.h (included above).
+
+// Phase 1 scoring: run a single DiT forward pass with cross-attention capture
+// and compute lyric alignment metrics. Requires the same phase 1 setup as
+// ace_synth_job_run_dit (text encoding, context build, noise init) but does
+// NOT run the full denoising loop — just one forward pass to extract attention.
+//
+// Returns one LyricScoreResult per batch item in out_scores.
+// Returns 0 on success, -1 on error.
+int ace_synth_score(AceSynth *         ctx,
+                    const AceRequest * reqs,
+                    int                batch_n,
+                    std::vector<LyricScoreResult> & out_scores);

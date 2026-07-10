@@ -1367,6 +1367,185 @@ static void encode_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * 
 }
 
 // POST /vae
+// score worker: load DiT + Text-Enc, run scoring forward pass, store JSON result.
+static void score_worker(std::shared_ptr<Job>    job,
+                         std::vector<AceRequest> ace_reqs) {
+    if (job->cancel.load()) {
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+
+    // Resolve DiT + Text-Enc (VAE not needed for scoring, but the pipeline
+    // requires it in the registry to build the context).
+    std::string        dit_name = resolve_name(g_registry.dit, ace_reqs[0].synth_model, g_loaded_dit);
+    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
+    if (!dit) {
+        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    if (g_registry.text_enc.empty()) {
+        fprintf(stderr, "[Server] Missing Text-Enc in registry\n");
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    std::string        vae_name = resolve_name(g_registry.vae, ace_reqs[0].vae, g_loaded_vae);
+    const ModelEntry * vae      = registry_find(g_registry.vae, vae_name.c_str());
+    if (!vae) {
+        fprintf(stderr, "[Server] VAE not found: %s\n", vae_name.c_str());
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+
+    AceSynthParams p    = g_synth_params;
+    p.text_encoder_path = g_registry.text_enc[0].path.c_str();
+    p.dit_path          = dit->path.c_str();
+    p.vae_path          = vae->path.c_str();
+    p.adapter_path      = nullptr;
+    p.adapter_scale     = 1.0f;
+
+    fprintf(stderr, "[Server] Loading score: DiT=%s\n", dit_name.c_str());
+    AceSynth * ctx = ace_synth_load(g_store, &p);
+    if (!ctx) {
+        fprintf(stderr, "[Server] FATAL: synth load failed for scoring\n");
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+
+    std::vector<LyricScoreResult> scores;
+    int rc = ace_synth_score(ctx, ace_reqs.data(), (int) ace_reqs.size(), scores);
+    ace_synth_free(ctx);
+
+    if (rc != 0) {
+        job->status.store(job->cancel.load() ? JobStatus::CANCELLED : JobStatus::FAILED);
+        return;
+    }
+
+    // Build JSON result
+    // Format: {"scores":[{"coverage":0.95,"monotonicity":0.88,"confidence":0.72,"lyrics_score":0.61},...]}
+    yyjson_mut_doc * doc = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * root = yyjson_mut_arr(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    for (size_t i = 0; i < scores.size(); i++) {
+        yyjson_mut_val * obj = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_real(doc, obj, "coverage", scores[i].coverage);
+        yyjson_mut_obj_add_real(doc, obj, "monotonicity", scores[i].monotonicity);
+        yyjson_mut_obj_add_real(doc, obj, "confidence", scores[i].confidence);
+        yyjson_mut_obj_add_real(doc, obj, "lyrics_score", scores[i].lyrics_score);
+        yyjson_mut_arr_append(root, obj);
+    }
+
+    yyjson_write_err err;
+    size_t           len = 0;
+    char *           json_str = yyjson_mut_write_opts(doc, 0, NULL, &len, &err);
+    yyjson_mut_doc_free(doc);
+    if (!json_str) {
+        fprintf(stderr, "[Server] FATAL: JSON serialization failed: %s\n", err.msg);
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+
+    job->result_body  = std::string(json_str, len);
+    job->result_mime  = "application/json";
+    free(json_str);
+
+    if (g_keep_loaded) {
+        g_loaded_dit = dit_name;
+        g_loaded_vae = vae_name;
+    }
+
+    fprintf(stderr, "[Server] Job %s done (score)\n", job->id.c_str());
+    job->status.store(JobStatus::DONE);
+}
+
+// POST /score
+// Accepts the same JSON request format as /synth (plain JSON or array),
+// but only uses caption, lyrics, duration, and seed to run a single DiT
+// forward pass with cross-attention capture for lyric alignment scoring.
+// No audio is generated — the result is a JSON array of per-request scores.
+//   returns: JSON {"id":"N"} immediately. Result is JSON array of
+//   {"coverage","monotonicity","confidence","lyrics_score"} per request.
+static void handle_score(const httplib::Request & req, httplib::Response & res) {
+    if (g_registry.dit.empty() || g_registry.text_enc.empty() || g_registry.vae.empty()) {
+        json_error(res, 501, "No score models in registry (need dit + text-encoder + vae)");
+        return;
+    }
+
+    // Parse request: plain JSON (single or array), same as /synth minus audio parts.
+    std::vector<AceRequest> ace_reqs;
+
+    if (req.is_multipart_form_data()) {
+        AceRequest ace_req;
+        std::string json_body;
+        if (req.form.has_file("request")) {
+            json_body = req.form.get_file("request").content;
+        } else if (req.form.has_field("request")) {
+            json_body = req.form.get_field("request");
+        } else {
+            json_error(res, 400, "Multipart: missing 'request' part");
+            return;
+        }
+        if (!request_parse_json(&ace_req, json_body.c_str())) {
+            json_error(res, 400, "Multipart: invalid JSON in 'request' part");
+            return;
+        }
+        ace_reqs.push_back(std::move(ace_req));
+    } else {
+        // Plain JSON: single object or array
+        if (req.body.empty()) {
+            json_error(res, 400, "Empty request body");
+            return;
+        }
+        AceRequest ace_req;
+        if (!request_parse_json(&ace_req, req.body.c_str())) {
+            // Try as array
+            yyjson_doc * doc = yyjson_read(req.body.c_str(), req.body.size(), 0);
+            if (!doc || !yyjson_is_arr(yyjson_doc_get_root(doc))) {
+                yyjson_doc_free(doc);
+                json_error(res, 400, "Invalid JSON (expected object or array)");
+                return;
+            }
+            size_t n = yyjson_arr_size(yyjson_doc_get_root(doc));
+            for (size_t i = 0; i < n; i++) {
+                AceRequest r;
+                request_init(&r);
+                yyjson_val * obj = yyjson_arr_get(yyjson_doc_get_root(doc), i);
+                if (!request_parse_json(&r, yyjson_val_write(obj, 0, nullptr))) {
+                    // Fallback: use the raw object directly
+                    char * obj_str = yyjson_val_write(obj, 0, nullptr);
+                    request_parse_json(&r, obj_str);
+                    free(obj_str);
+                }
+                ace_reqs.push_back(std::move(r));
+            }
+            yyjson_doc_free(doc);
+        } else {
+            ace_reqs.push_back(std::move(ace_req));
+        }
+    }
+
+    if (ace_reqs.empty()) {
+        json_error(res, 400, "Empty request");
+        return;
+    }
+    if (ace_reqs[0].caption.empty()) {
+        json_error(res, 400, "Caption is required");
+        return;
+    }
+
+    // Create job, spawn worker, return ID
+    auto job = job_create();
+    fprintf(stderr, "[Server] Job %s created (score, %d requests)\n", job->id.c_str(), (int) ace_reqs.size());
+
+    work_push([job, reqs = std::move(ace_reqs)]() mutable {
+        score_worker(job, std::move(reqs));
+    });
+
+    // Return job ID immediately
+    std::string body = "{\"id\":\"" + job->id + "\"}";
+    res.set_content(body, "application/json");
+}
+
 // multipart/form-data: single VAE entrypoint, dispatches on which side is
 // supplied in the request body. Symmetric with /synth and /understand on
 // the 'audio or src_latents' input contract, except here they are mutually
@@ -1764,6 +1943,7 @@ int main(int argc, char ** argv) {
     svr.Post("/synth", handle_synth);
     svr.Post("/understand", handle_understand);
     svr.Post("/vae", handle_vae);
+    svr.Post("/score", handle_score);
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });

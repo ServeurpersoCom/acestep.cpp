@@ -695,3 +695,59 @@ void ace_synth_free(AceSynth * ctx) {
     }
     delete ctx;
 }
+
+// Scoring: run phase 1 setup (encode, context, noise) then a single DiT
+// forward with cross-attention capture instead of the full denoising loop.
+// Matches Python ACE-Step dit_score.py:get_lyric_score flow.
+int ace_synth_score(AceSynth *         ctx,
+                    const AceRequest * reqs,
+                    int                batch_n,
+                    std::vector<LyricScoreResult> & out_scores) {
+    if (!ctx || !reqs || batch_n < 1 || batch_n > 9) {
+        return -1;
+    }
+
+    // Scoring only supports text2music (pure generation) — the Python reference
+    // also scores on the text2music forward pass.
+    const std::string & task = reqs[0].task_type;
+    if (task != TASK_TEXT2MUSIC) {
+        fprintf(stderr, "[Score] ERROR: scoring only supports task 'text2music', got '%s'\n", task.c_str());
+        return -1;
+    }
+
+    AceSynthJob * job = alloc_job(ctx, reqs, batch_n);
+    SynthState &  s   = job->state;
+    s.use_source_context = !reqs[0].audio_codes.empty();
+    s.instruction_str    = s.use_source_context ? DIT_INSTR_COVER : DIT_INSTR_TEXT2MUSIC;
+
+    // Phase 1 setup (same as run_text2music minus the DiT generate)
+    if (!pinned_encode_src_and_timbre(ctx, NULL, 0, NULL, 0, NULL, 0, NULL, 0, s)) {
+        delete job;
+        return -1;
+    }
+    if (ops_resolve_params(ctx, reqs, batch_n, s) != 0) {
+        delete job;
+        return -1;
+    }
+    if (ops_resolve_T(ctx, s) != 0) {
+        delete job;
+        return -1;
+    }
+    ops_build_schedule(s);
+    if (ops_encode_text(ctx, reqs, batch_n, s) != 0) {
+        delete job;
+        return -1;
+    }
+    if (ops_build_context(ctx, reqs, batch_n, s) != 0) {
+        delete job;
+        return -1;
+    }
+    ops_build_context_silence(ctx, batch_n, s);
+    ops_init_noise(ctx, reqs, batch_n, s);
+
+    // Scoring forward pass (single DiT forward with cross-attention capture)
+    int rc = ops_score_forward(ctx, batch_n, out_scores, s);
+
+    delete job;
+    return rc;
+}
