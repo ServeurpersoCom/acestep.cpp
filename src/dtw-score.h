@@ -112,10 +112,13 @@ static DTWPath dtw_cpu(const float * x, int N, int M) {
 
             float c;
             float t;
-            if (c0 < c1 && c0 < c2) {
+            // The pinned Python snapshot uses strict comparisons here, which
+            // can select a larger c2 when c0 and c1 tie. Keep the intended
+            // diagonal -> up -> left priority while always choosing a minimum.
+            if (c0 <= c1 && c0 <= c2) {
                 c = c0;
                 t = 0;
-            } else if (c1 < c0 && c1 < c2) {
+            } else if (c1 <= c2) {
                 c = c1;
                 t = 1;
             } else {

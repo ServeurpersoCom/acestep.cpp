@@ -78,6 +78,16 @@ static void test_dtw_horizontal_step() {
     CHECK(path.time_idx.front() == 0, "horizontal DTW starts at time=0");
     CHECK(path.text_idx.back() == 1, "horizontal DTW ends at text=1");
     CHECK(path.time_idx.back() == 2, "horizontal DTW ends at time=2");
+
+    // Diagonal-first tie-breaking selects the minimum-cost three-step path:
+    // (0,0) -> (0,1) -> (1,2). The old strict comparisons instead selected
+    // the expensive four-step path through (1,0) and (1,1).
+    CHECK(path.text_idx.size() == 3, "horizontal DTW path length == 3");
+    if (path.text_idx.size() == 3) {
+        CHECK(path.text_idx[0] == 0 && path.time_idx[0] == 0, "horizontal DTW step 0");
+        CHECK(path.text_idx[1] == 0 && path.time_idx[1] == 1, "horizontal DTW step 1");
+        CHECK(path.text_idx[2] == 1 && path.time_idx[2] == 2, "horizontal DTW step 2");
+    }
 }
 
 // ============================================================================
@@ -161,15 +171,17 @@ static void test_scoring_perfect_alignment() {
     // With perfect diagonal alignment:
     // - Coverage: all lyric rows have max energy 1.0 > 0.1, so coverage = 1.0
     // - Monotonicity: centroids are [0, 1, 2, 3], strictly increasing, so mono = 1.0
-    // - Confidence: DTW tie-breaking (prefers left/up over diagonal when costs
-    //   are equal) creates a 7-step zigzag path through the 4x4 matrix.
-    //   4 diagonal cells have energy 1.0, 3 off-diagonal have 0.0.
-    //   confidence = 4/7 ≈ 0.571
-    // - lyrics_score = 1^2 * 1^2 * (4/7) = 4/7 ≈ 0.571
+    // - Diagonal-first tie-breaking keeps the four-step path on the diagonal.
+    // - Confidence and lyrics_score are therefore both 1.0.
     CHECK_NEAR(result.coverage, 1.0, 1e-6, "perfect alignment coverage");
     CHECK_NEAR(result.monotonicity, 1.0, 1e-6, "perfect alignment monotonicity");
-    CHECK_NEAR(result.confidence, 4.0 / 7.0, 0.01, "perfect alignment confidence");
-    CHECK_NEAR(result.lyrics_score, 4.0 / 7.0, 0.01, "perfect alignment final score");
+    CHECK_NEAR(result.confidence, 1.0, 1e-6, "perfect alignment confidence");
+    CHECK_NEAR(result.lyrics_score, 1.0, 1e-6, "perfect alignment final score");
+    CHECK(result.path.text_idx.size() == 4, "perfect alignment path length == 4");
+    for (size_t i = 0; i < result.path.text_idx.size(); i++) {
+        CHECK(result.path.text_idx[i] == (int) i && result.path.time_idx[i] == (int) i,
+              "perfect alignment path stays diagonal");
+    }
 }
 
 // ============================================================================
@@ -222,13 +234,12 @@ static void test_scoring_with_tags() {
 
     // Coverage: 4 lyric tokens, all with max energy 1.0 > 0.1 -> coverage = 1.0
     // Monotonicity: lyric centroids [0, 2, 3, 4] strictly increasing -> mono = 1.0
-    // Confidence: DTW tie-breaking creates a 9-step zigzag through the 5x5
-    //   matrix. 5 diagonal cells have energy 1.0, 4 off-diagonal have 0.0.
-    //   confidence = 5/9 ≈ 0.556
-    //   lyrics_score = 1 * 1 * (5/9) = 5/9 ≈ 0.556
+    // Diagonal-first tie-breaking keeps all five path steps on energy 1.0,
+    // so confidence and lyrics_score are both 1.0.
     CHECK_NEAR(result.coverage, 1.0, 1e-6, "tagged alignment coverage");
     CHECK_NEAR(result.monotonicity, 1.0, 1e-6, "tagged alignment monotonicity");
-    CHECK_NEAR(result.lyrics_score, 5.0 / 9.0, 0.01, "tagged alignment final score");
+    CHECK_NEAR(result.confidence, 1.0, 1e-6, "tagged alignment confidence");
+    CHECK_NEAR(result.lyrics_score, 1.0, 1e-6, "tagged alignment final score");
 }
 
 // ============================================================================
