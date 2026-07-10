@@ -405,8 +405,8 @@ struct TextEncForward {
     int                S_lyric;
 };
 
-// Build the exact language-and-lyric prefix used for both text encoding and
-// pure-lyric token-range extraction so their encoder row offsets stay aligned.
+/// Build the exact language-and-lyric prefix used for both text encoding and
+/// pure-lyric token-range extraction so their encoder row offsets stay aligned.
 static std::string build_lyric_header(const AceRequest & rb) {
     const char * language = rb.vocal_language.empty() ? "unknown" : rb.vocal_language.c_str();
     return std::string("# Languages\n") + language + "\n\n# Lyric\n";
@@ -433,6 +433,7 @@ static void build_prompt_strings(const AceRequest &  rb,
     lyric_out = build_lyric_header(rb) + rb.lyrics + "<|endoftext|>";
 }
 
+/// Encode text and lyrics while preserving each request's pure-lyric token range for scoring.
 int ops_encode_text(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s) {
     // Per-batch text encoding in two GPU phases to keep EVICT_STRICT at one
     // module resident at a time:

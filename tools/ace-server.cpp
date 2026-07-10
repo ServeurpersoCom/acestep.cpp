@@ -1847,6 +1847,7 @@ static void usage(const char * prog) {
             prog, synth_d.vae_chunk, synth_d.vae_overlap, g_max_batch, lm_d.max_seq);
 }
 
+/// Parse server options, register HTTP routes, and run the worker-backed API server.
 int main(int argc, char ** argv) {
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);

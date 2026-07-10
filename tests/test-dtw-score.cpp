@@ -373,8 +373,7 @@ static void test_dtw_path_monotonic() {
     CHECK(path.time_idx.back() == M - 1, "DTW path ends at time M-1");
 }
 
-// ============================================================================
-
+/// Run the self-contained DTW and lyric-alignment regression suite.
 int main(int argc, char ** argv) {
     (void) argc;
     (void) argv;

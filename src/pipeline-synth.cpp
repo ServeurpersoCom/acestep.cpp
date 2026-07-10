@@ -21,6 +21,7 @@
 #include <string>
 #include <vector>
 
+/// Initialize synthesis parameters with the library's generation defaults.
 void ace_synth_default_params(AceSynthParams * p) {
     p->text_encoder_path = NULL;
     p->dit_path          = NULL;
@@ -35,8 +36,8 @@ void ace_synth_default_params(AceSynthParams * p) {
     p->dump_dir          = NULL;
 }
 
-// Validate model paths and construct the shared lightweight synth context.
-// Score-only contexts may omit the VAE while generation contexts require it.
+/// Validate model paths and construct the shared lightweight synth context.
+/// Score-only contexts may omit the VAE while generation contexts require it.
 static AceSynth * ace_synth_load_impl(ModelStore * store, const AceSynthParams * params, bool require_vae) {
     if (!store || !params) {
         fprintf(stderr, "[Synth-Load] ERROR: store and params are required\n");
@@ -108,10 +109,12 @@ static AceSynth * ace_synth_load_impl(ModelStore * store, const AceSynthParams *
     return ctx;
 }
 
+/// Create a generation-capable synthesis context that requires VAE weights.
 AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params) {
     return ace_synth_load_impl(store, params, true);
 }
 
+/// Create a score-only synthesis context without requiring VAE weights.
 AceSynth * ace_synth_load_score(ModelStore * store, const AceSynthParams * params) {
     return ace_synth_load_impl(store, params, false);
 }

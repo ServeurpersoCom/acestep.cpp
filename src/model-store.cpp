@@ -25,8 +25,8 @@
 #include <unordered_map>
 #include <vector>
 
-// Populate the official lyric-alignment layer/head defaults for supported
-// 2B and XL DiT architectures when model metadata does not provide them.
+/// Populate the official lyric-alignment layer/head defaults for supported
+/// 2B and XL DiT architectures when model metadata does not provide them.
 static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
     if (meta->cfg.n_layers == 24 && meta->cfg.n_heads == 16) {
         static const DiTScoreHeadConfig defaults[] = {
@@ -59,8 +59,8 @@ static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
     }
 }
 
-// Load and validate lyric-alignment heads from the DiT GGUF config JSON,
-// falling back to architecture defaults only when the metadata key is absent.
+/// Load and validate lyric-alignment heads from the DiT GGUF config JSON,
+/// falling back to architecture defaults only when the metadata key is absent.
 static void dit_meta_load_alignment_config(DiTMeta * meta, const GGUFModel & gf) {
     const char * config_json = gf_get_str(gf, "acestep.config_json");
     bool         invalid     = false;
@@ -628,6 +628,7 @@ MetadataFSM * store_fsm(ModelStore * s, const char * lm_path, int vocab_size) {
     return fsm;
 }
 
+/// Load and cache the CPU-resident DiT configuration and scoring metadata.
 const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path) {
     std::lock_guard<std::mutex> lock(s->mtx);
     std::string                 key = dit_path ? dit_path : "";
