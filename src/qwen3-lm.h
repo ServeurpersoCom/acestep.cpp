@@ -5,6 +5,7 @@
 
 #include "graph-arena.h"
 #include "qwen3-enc.h"  // Qwen3Layer, Qwen3Config, layer build helpers
+#include "static-graph.h"
 
 #include <cmath>
 #include <cstdio>
@@ -37,19 +38,23 @@ struct Qwen3LMConfig {
 // base set, and the partial head window hold within a generation. A prefill
 // forward clobbers the shared sched allocation, so it invalidates this cache.
 struct Qw3lmGraphCache {
-    bool                 built         = false;
-    int                  key_n_kv_pad  = 0;
-    int                  key_N         = 0;
-    int                  key_s0        = 0;
-    int                  key_lm_offset = 0;
-    int                  key_lm_count  = 0;
-    int                  out_V         = 0;
-    struct ggml_cgraph * gf            = nullptr;
-    struct ggml_tensor * token_ids_t   = nullptr;
-    struct ggml_tensor * positions     = nullptr;
-    struct ggml_tensor * kv_rows       = nullptr;
-    struct ggml_tensor * attn_mask     = nullptr;
-    struct ggml_tensor * lgt           = nullptr;
+    bool                  built         = false;
+    int                   key_n_kv_pad  = 0;
+    int                   key_N         = 0;
+    int                   key_s0        = 0;
+    int                   key_lm_offset = 0;
+    int                   key_lm_count  = 0;
+    int                   out_V         = 0;
+    struct ggml_cgraph *  gf            = nullptr;
+    struct ggml_tensor *  token_ids_t   = nullptr;
+    struct ggml_tensor *  positions     = nullptr;
+    struct ggml_tensor *  kv_rows       = nullptr;
+    struct ggml_tensor *  attn_mask     = nullptr;
+    struct ggml_tensor *  lgt           = nullptr;
+    StaticGraph           graph;
+    std::vector<int>      pos_data;
+    std::vector<int64_t>  rows_data;
+    std::vector<uint16_t> mask_data;
 };
 
 struct Qwen3LM {
@@ -473,9 +478,10 @@ static struct ggml_tensor * qw3lm_build_attn(struct ggml_context * ctx,
 // Forward pass: token_ids[n_tokens] -> logits[vocab_size] (last token only)
 // kv_set: which KV cache set to use (0=conditional, 1=unconditional for CFG)
 static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens, int kv_set, float * logits) {
-    // A prefill or single forward reallocates the shared sched, so the batched
-    // decode graph must rebuild on its next call.
-    m->batch_graph.built = false;
+    if (m->batch_graph.graph.sched_allocated) {
+        static_graph_release(&m->batch_graph.graph, m->sched);
+        m->batch_graph.built = false;
+    }
 
     const Qwen3LMConfig & c      = m->cfg;
     int                   H      = c.hidden_size;
@@ -665,6 +671,8 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
                             m->batch_graph.key_N != N || m->batch_graph.key_s0 != s0 ||
                             m->batch_graph.key_lm_offset != lm_offset || m->batch_graph.key_lm_count != lm_count;
     if (need_build) {
+        static_graph_release(&m->batch_graph.graph, m->sched);
+        m->batch_graph.built      = false;
         struct ggml_context * ctx = graph_arena_begin(&m->arena_batch);
         gf                        = ggml_new_graph_custom(ctx, QW3LM_GRAPH_NODES, false);
 
@@ -820,9 +828,7 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
         ggml_set_output(lgt);
         ggml_build_forward_expand(gf, lgt);
 
-        // Allocate
-        ggml_backend_sched_reset(m->sched);
-        if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
+        if (!static_graph_alloc(&m->batch_graph.graph, m->backend, m->sched, gf)) {
             fprintf(stderr, "[LM] FATAL: failed to allocate graph (batch decode, N=%d)\n", N);
             exit(1);
         }
@@ -839,7 +845,10 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
         m->batch_graph.key_s0        = s0;
         m->batch_graph.key_lm_offset = lm_offset;
         m->batch_graph.key_lm_count  = lm_count;
-        m->batch_graph.built         = true;
+        m->batch_graph.pos_data.resize((size_t) N);
+        m->batch_graph.rows_data.resize((size_t) N);
+        m->batch_graph.mask_data.resize((size_t) n_kv_pad * (size_t) N);
+        m->batch_graph.built = true;
     } else {
         gf          = m->batch_graph.gf;
         token_ids_t = m->batch_graph.token_ids_t;
@@ -853,37 +862,26 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
     // Set token IDs
     ggml_backend_tensor_set(token_ids_t, token_ids, 0, N * sizeof(int));
 
-    // Positions: per-element kv_pos
-    {
-        std::vector<int> pos_data(N);
-        for (int i = 0; i < N; i++) {
-            pos_data[i] = m->kv_pos[kv_sets[i]];
-        }
-        ggml_backend_tensor_set(positions, pos_data.data(), 0, N * sizeof(int));
-
-        std::vector<int64_t> rows_data(N);
-        for (int i = 0; i < N; i++) {
-            rows_data[i] = (int64_t) m->kv_pos[kv_sets[i]];
-        }
-        ggml_backend_tensor_set(kv_rows, rows_data.data(), 0, N * sizeof(int64_t));
+    for (int i = 0; i < N; i++) {
+        m->batch_graph.pos_data[(size_t) i]  = m->kv_pos[kv_sets[i]];
+        m->batch_graph.rows_data[(size_t) i] = (int64_t) m->kv_pos[kv_sets[i]];
     }
+    ggml_backend_tensor_set(positions, m->batch_graph.pos_data.data(), 0, (size_t) N * sizeof(int));
+    ggml_backend_tensor_set(kv_rows, m->batch_graph.rows_data.data(), 0, (size_t) N * sizeof(int64_t));
 
     // Attention mask: [n_kv_pad, 1, 1, N] f16
     // 0.0 for valid KV positions, neg inf past each element's kv_len,
     // padded tail included
-    {
-        std::vector<uint16_t> mask_data((size_t) n_kv_pad * N);
-        for (int i = 0; i < N; i++) {
-            int kvl = m->kv_pos[kv_sets[i]] + 1;  // kv_len after write
-            for (int j = 0; j < n_kv_pad; j++) {
-                mask_data[(size_t) i * n_kv_pad + j] = ggml_fp32_to_fp16((j < kvl) ? 0.0f : -INFINITY);
-            }
+    for (int i = 0; i < N; i++) {
+        int kvl = m->kv_pos[kv_sets[i]] + 1;
+        for (int j = 0; j < n_kv_pad; j++) {
+            m->batch_graph.mask_data[(size_t) i * (size_t) n_kv_pad + (size_t) j] =
+                ggml_fp32_to_fp16((j < kvl) ? 0.0f : -INFINITY);
         }
-        ggml_backend_tensor_set(attn_mask, mask_data.data(), 0, mask_data.size() * sizeof(uint16_t));
     }
-
-    // Compute
-    ggml_backend_sched_graph_compute(m->sched, gf);
+    ggml_backend_tensor_set(attn_mask, m->batch_graph.mask_data.data(), 0,
+                            m->batch_graph.mask_data.size() * sizeof(uint16_t));
+    static_graph_compute(&m->batch_graph.graph, m->backend, m->sched, gf);
 
     // Read logits [out_V, N]
     ggml_backend_tensor_get(lgt, logits, 0, (size_t) out_V * N * sizeof(float));
@@ -897,6 +895,7 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
 
 // Free all resources
 static void qw3lm_free(Qwen3LM * m) {
+    static_graph_release(&m->batch_graph.graph, m->sched);
     graph_arena_free(&m->arena_batch);
     graph_arena_free(&m->arena_decode);
     graph_arena_free(&m->arena_prefill);
