@@ -1398,8 +1398,8 @@ static void encode_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * 
     fprintf(stderr, "[Server] Job %s done (encode)\n", job->id.c_str());
 }
 
-// Score worker: load DiT + Text-Enc, run reference-compatible attention
-// scoring against generated latents, and store the JSON result.
+// Score worker: load DiT + Text-Enc, run lyric-alignment attention scoring
+// against generated latents, and store the JSON result.
 static void score_worker(std::shared_ptr<Job>    job,
                          std::vector<AceRequest> ace_reqs,
                          std::vector<float>      pred_latents,

@@ -77,4 +77,5 @@ jobs:
             exit 1
           fi
 
-          echo "No drift detected. C++ port matches pinned Python reference."
+          echo "No upstream source drift detected against the pinned snapshot."
+          echo "The C++ implementation may contain documented correctness fixes."

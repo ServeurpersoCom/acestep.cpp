@@ -1,7 +1,7 @@
 #pragma once
 // dtw-score.h: DTW pathfinding + lyric alignment scoring (pure C++)
 //
-// Direct port of the Python ACE-Step scoring modules:
+// C++ implementation based on the Python ACE-Step scoring modules:
 //   acestep/core/scoring/_dtw.py    — DTW + median filter (numba-jitted)
 //   acestep/core/scoring/dit_score.py — MusicLyricScorer (coverage, monotonicity, confidence)
 // Integration parity follows generation/handler/lyric_score.py and
@@ -9,7 +9,8 @@
 //
 // Pinned to ace-step/ACE-Step-1.5 commit 82252c24 (2026-07-09).
 // If the Python scoring algorithm changes upstream, this port will need
-// re-evaluation. The file:line references in comments below map to that commit.
+// re-evaluation. The file:line references in comments below map to that commit;
+// documented correctness fixes may intentionally differ from the pinned source.
 //
 // No external dependencies beyond <vector>, <cmath>, <algorithm>, <cstdint>.
 // All compute is CPU-side on small matrices (tokens x frames), matching the
@@ -112,9 +113,10 @@ static DTWPath dtw_cpu(const float * x, int N, int M) {
 
             float c;
             float t;
-            // The pinned Python snapshot uses strict comparisons here, which
-            // can select a larger c2 when c0 and c1 tie. Keep the intended
-            // diagonal -> up -> left priority while always choosing a minimum.
+            // Intentional correctness divergence from the pinned Python
+            // snapshot: its strict comparisons can select a larger c2 when
+            // c0 and c1 tie. Keep diagonal -> up -> left priority while
+            // always choosing a minimum.
             if (c0 <= c1 && c0 <= c2) {
                 c = c0;
                 t = 0;

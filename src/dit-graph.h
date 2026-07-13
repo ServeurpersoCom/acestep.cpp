@@ -488,14 +488,13 @@ static struct ggml_tensor * dit_ggml_build_layer(struct ggml_context * ctx,
 // These are retrieved after graph compute for lyric alignment scoring.
 static struct ggml_cgraph * dit_ggml_build_graph(DiTGGML *             m,
                                                  struct ggml_context * ctx,
-                                                 int                   T,           // temporal length (before patching)
-                                                 int                   enc_S,       // encoder sequence length
-                                                 int                   N,           // batch size
-                                                 struct ggml_tensor ** p_input,     // [out] input tensor to fill
-                                                 struct ggml_tensor ** p_output,    // [out] output tensor to read
-                                                 const int *           score_layers = nullptr,  // layers to capture, or NULL
-                                                 int                   n_score_layers = 0) {
-
+                                                 int                   T,         // temporal length (before patching)
+                                                 int                   enc_S,     // encoder sequence length
+                                                 int                   N,         // batch size
+                                                 struct ggml_tensor ** p_input,   // [out] input tensor to fill
+                                                 struct ggml_tensor ** p_output,  // [out] output tensor to read
+                                                 const int * score_layers   = nullptr,  // layers to capture, or NULL
+                                                 int         n_score_layers = 0) {
     DiTGGMLConfig & c = m->cfg;
     int             S = T / c.patch_size;  // sequence length after patching
     int             H = c.hidden_size;
