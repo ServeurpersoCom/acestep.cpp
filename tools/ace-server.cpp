@@ -274,7 +274,8 @@ static const char * MULTIPART_BOUNDARY = "ace-batch-boundary";
 
 static std::string multipart_build_audio_latent(const std::vector<std::string> &        audio_parts,
                                                 const char *                            audio_mime,
-                                                const std::vector<std::vector<float>> & latents) {
+                                                const std::vector<std::vector<float>> & latents,
+                                                const std::vector<std::string> *        lyric_timings = nullptr) {
     std::string body;
     for (size_t i = 0; i < audio_parts.size(); i++) {
         if (audio_parts[i].empty()) {
@@ -293,6 +294,14 @@ static std::string multipart_build_audio_latent(const std::vector<std::string> &
         body += "Content-Disposition: form-data; name=\"latent\"\r\n\r\n";
         body.append(reinterpret_cast<const char *>(latents[i].data()), latents[i].size() * sizeof(float));
         body += "\r\n";
+        if (lyric_timings && i < lyric_timings->size() && !(*lyric_timings)[i].empty()) {
+            body += "--";
+            body += MULTIPART_BOUNDARY;
+            body += "\r\nContent-Type: application/json\r\n";
+            body += "Content-Disposition: form-data; name=\"lyric_timing\"\r\n\r\n";
+            body += (*lyric_timings)[i];
+            body += "\r\n";
+        }
     }
     body += "--";
     body += MULTIPART_BOUNDARY;
@@ -801,9 +810,10 @@ static void synth_worker(std::shared_ptr<Job>    job,
     const float *                   src_lat_ptr = src_latents.empty() ? nullptr : src_latents.data();
     const float *                   ref_lat_ptr = ref_latents.empty() ? nullptr : ref_latents.data();
     std::vector<std::vector<float>> captured_latents;
+    std::vector<std::string>        lyric_timings;
     const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, src_lat_ptr, src_T_latent, ref_interleaved,
                                    ref_len, ref_lat_ptr, ref_T_latent, audio.data(), &captured_latents,
-                                   server_cancel_job, (void *) &job->cancel);
+                                   &lyric_timings, server_cancel_job, (void *) &job->cancel);
     ace_synth_free(ctx);
     free(src_interleaved);
     free(ref_interleaved);
@@ -856,7 +866,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     // part and one latent part per generated track, paired in wire order.
     // The audio mime is per-part so the client knows wav vs mp3 without a
     // query. The latent reproduces its track's audio when fed back to /vae.
-    job->result_body = multipart_build_audio_latent(encoded, mime, captured_latents);
+    job->result_body = multipart_build_audio_latent(encoded, mime, captured_latents, &lyric_timings);
     job->result_mime = MULTIPART_MIME;
 
     job->status.store(job->cancel.load() ? JobStatus::CANCELLED : JobStatus::DONE);
