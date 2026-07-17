@@ -57,12 +57,18 @@
 	let dragging = false;
 	let dragEdge: 'lo' | 'hi' | 'new' = 'new';
 	let anchor = -1;
-	let mouseOver = false;
 
-	// shift+drag rubber-band zoom state
+	// shift+drag rubber-band zoom state (mouse)
 	let rbDragging = false;
 	let rbAnchor = 0;
 	let rbCurrent = 0;
+
+	// two-finger touch zoom state
+	let activeTouches = new Map<number, number>();
+	let touchZoom = false;
+	let touchPending = false; // single finger down, action deferred until move/up
+
+	const waveId = 'waveform-' + Math.random().toString(36).slice(2, 9);
 
 	onMount(() => {
 		cw = WAVEFORM_BINS;
@@ -99,65 +105,10 @@
 			})
 			.catch(() => {});
 
-		function onTouchStart(e: TouchEvent) {
-			if (e.touches.length >= 2 && onZoomSelect) {
-				e.preventDefault();
-				const t0 = e.touches[0];
-				const t1 = e.touches[1];
-				rbAnchor = xToNorm(Math.min(t0.clientX, t1.clientX));
-				rbCurrent = xToNorm(Math.max(t0.clientX, t1.clientX));
-				rbDragging = true;
-				draw();
-			} else {
-				e.preventDefault();
-			}
-		}
-		function onTouchMove(e: TouchEvent) {
-			if (rbDragging && e.touches.length >= 2) {
-				e.preventDefault();
-				const t0 = e.touches[0];
-				const t1 = e.touches[1];
-				rbAnchor = xToNorm(Math.min(t0.clientX, t1.clientX));
-				rbCurrent = xToNorm(Math.max(t0.clientX, t1.clientX));
-				draw();
-			} else {
-				e.preventDefault();
-			}
-		}
-		function onTouchEnd(e: TouchEvent) {
-			if (rbDragging && e.touches.length < 2) {
-				rbDragging = false;
-				const lo = Math.min(rbAnchor, rbCurrent);
-				const hi = Math.max(rbAnchor, rbCurrent);
-				if (hi - lo > (viewEnd - viewStart) * 0.02) onZoomSelect?.(lo, hi);
-				draw();
-			}
-		}
-		canvas.addEventListener('touchstart', onTouchStart, { passive: false });
-		canvas.addEventListener('touchmove', onTouchMove, { passive: false });
-		canvas.addEventListener('touchend', onTouchEnd);
-		canvas.addEventListener('touchcancel', onTouchEnd);
-
+		// Shift shows the rubber-band zoom affordance; arrow-key panning lives on
+		// the focusable scrollbar (see onScrollKeyDown) rather than global hover.
 		function onKeyDown(e: KeyboardEvent) {
 			if (e.key === 'Shift' && onZoomSelect) canvas.style.cursor = 'crosshair';
-			if (!mouseOver || viewStart === 0 && viewEnd === 1) return;
-			const span = viewEnd - viewStart;
-			const step = span * 0.1;
-			if (e.key === 'ArrowLeft') {
-				e.preventDefault();
-				const ns = Math.max(0, viewStart - step);
-				viewStart = ns;
-				viewEnd = Math.min(1, ns + span);
-				updateDisplayPeaks();
-				draw();
-			} else if (e.key === 'ArrowRight') {
-				e.preventDefault();
-				const ne = Math.min(1, viewEnd + step);
-				viewEnd = ne;
-				viewStart = Math.max(0, ne - span);
-				updateDisplayPeaks();
-				draw();
-			}
 		}
 		function onKeyUp(e: KeyboardEvent) {
 			if (e.key === 'Shift') canvas.style.cursor = '';
@@ -165,7 +116,7 @@
 		function onWheel(e: WheelEvent) {
 			if (viewStart === 0 && viewEnd === 1) return;
 			e.preventDefault();
-			const raw = e.deltaX !== 0 ? e.deltaX : (e.shiftKey ? e.deltaY : 0);
+			const raw = e.deltaX !== 0 ? e.deltaX : e.shiftKey ? e.deltaY : 0;
 			if (raw === 0) return;
 			const span = viewEnd - viewStart;
 			const pan = (raw / 500) * span;
@@ -181,8 +132,6 @@
 			}
 			viewStart = ns;
 			viewEnd = ne;
-			updateDisplayPeaks();
-			draw();
 		}
 		canvas.addEventListener('wheel', onWheel, { passive: false });
 		window.addEventListener('keydown', onKeyDown);
@@ -191,19 +140,11 @@
 		return () => {
 			stopPlayback();
 			cancelLoop();
-			canvas.removeEventListener('touchstart', onTouchStart);
-			canvas.removeEventListener('touchmove', onTouchMove);
-			canvas.removeEventListener('touchend', onTouchEnd);
-			canvas.removeEventListener('touchcancel', onTouchEnd);
 			canvas.removeEventListener('wheel', onWheel);
 			window.removeEventListener('keydown', onKeyDown);
 			window.removeEventListener('keyup', onKeyUp);
 		};
 	});
-
-	function preventTouch(e: TouchEvent) {
-		e.preventDefault();
-	}
 
 	// redraw when theme, selectable, or zoom changes
 	$effect(() => {
@@ -475,20 +416,12 @@
 		draw();
 	}
 
-	function onPointerDown(e: PointerEvent) {
-		canvas.setPointerCapture(e.pointerId);
-		if (e.shiftKey && onZoomSelect) {
-			rbDragging = true;
-			rbAnchor = xToNorm(e.clientX);
-			rbCurrent = rbAnchor;
-			draw();
-			return;
-		}
+	function pointerActionDown(clientX: number) {
 		dragging = true;
 		if (selectable) {
-			const pos = xToNorm(e.clientX);
+			const pos = xToNorm(clientX);
 			const cur = pos * dur;
-			// snap closest edge to mouse, or start new range
+			// snap closest edge to pointer, or start new range
 			if (rangeEnd > rangeStart && dur > 0) {
 				const dLo = Math.abs(pos - rangeStart / dur);
 				const dHi = Math.abs(pos - rangeEnd / dur);
@@ -507,11 +440,68 @@
 			}
 			draw();
 		} else {
-			seekTo(xToNorm(e.clientX));
+			seekTo(xToNorm(clientX));
 		}
 	}
 
+	function commitZoom() {
+		const lo = Math.min(rbAnchor, rbCurrent);
+		const hi = Math.max(rbAnchor, rbCurrent);
+		if (hi - lo > (viewEnd - viewStart) * 0.02) onZoomSelect?.(lo, hi);
+		draw();
+	}
+
+	function onPointerDown(e: PointerEvent) {
+		canvas.setPointerCapture(e.pointerId);
+
+		// Touch runs a two-finger state machine so the first finger never seeks
+		// or mutates the range before we know whether a zoom gesture is starting.
+		if (e.pointerType === 'touch') {
+			activeTouches.set(e.pointerId, e.clientX);
+			if (onZoomSelect && activeTouches.size >= 2) {
+				// second finger: abandon any deferred single-finger action
+				touchPending = false;
+				dragging = false;
+				const xs = [...activeTouches.values()];
+				rbAnchor = xToNorm(Math.min(xs[0], xs[1]));
+				rbCurrent = xToNorm(Math.max(xs[0], xs[1]));
+				touchZoom = true;
+				rbDragging = true;
+				draw();
+				return;
+			}
+			// first finger: defer the action until a move (drag) or up (tap)
+			touchPending = activeTouches.size === 1;
+			return;
+		}
+
+		if (e.shiftKey && onZoomSelect) {
+			rbDragging = true;
+			rbAnchor = xToNorm(e.clientX);
+			rbCurrent = rbAnchor;
+			draw();
+			return;
+		}
+		pointerActionDown(e.clientX);
+	}
+
 	function onPointerMove(e: PointerEvent) {
+		if (touchZoom) {
+			if (activeTouches.has(e.pointerId)) {
+				activeTouches.set(e.pointerId, e.clientX);
+				const xs = [...activeTouches.values()];
+				rbAnchor = xToNorm(Math.min(xs[0], xs[1]));
+				rbCurrent = xToNorm(Math.max(xs[0], xs[1]));
+				draw();
+			}
+			return;
+		}
+		if (touchPending) {
+			// first finger dragged before a second arrived: commit the action now
+			touchPending = false;
+			pointerActionDown(e.clientX);
+			return;
+		}
 		if (rbDragging) {
 			rbCurrent = xToNorm(e.clientX);
 			draw();
@@ -541,15 +531,43 @@
 		}
 	}
 
-	function onPointerUp() {
-		if (rbDragging) {
-			rbDragging = false;
-			const lo = Math.min(rbAnchor, rbCurrent);
-			const hi = Math.max(rbAnchor, rbCurrent);
-			if (hi - lo > (viewEnd - viewStart) * 0.02) onZoomSelect?.(lo, hi);
-			draw();
+	function onPointerUp(e: PointerEvent) {
+		if (e.pointerType === 'touch') {
+			activeTouches.delete(e.pointerId);
+			if (touchZoom) {
+				// commit only once we drop below two fingers
+				if (activeTouches.size < 2) {
+					touchZoom = false;
+					rbDragging = false;
+					commitZoom();
+				}
+				return;
+			}
+			if (touchPending) {
+				// tap without a second finger: commit as a single-finger action
+				touchPending = false;
+				pointerActionDown(e.clientX);
+			}
+			dragging = false;
 			return;
 		}
+		if (rbDragging) {
+			rbDragging = false;
+			commitZoom();
+			return;
+		}
+		dragging = false;
+	}
+
+	function onPointerCancel(e: PointerEvent) {
+		if (e.pointerType === 'touch') activeTouches.delete(e.pointerId);
+		// abort an in-flight gesture without committing a partial zoom
+		if (touchZoom || rbDragging) {
+			touchZoom = false;
+			rbDragging = false;
+			draw();
+		}
+		touchPending = false;
 		dragging = false;
 	}
 
@@ -580,10 +598,9 @@
 				ne = 1;
 				ns = 1 - span;
 			}
+			// the reactive $effect on viewStart/viewEnd repaints; no direct scan here
 			viewStart = ns;
 			viewEnd = ne;
-			updateDisplayPeaks();
-			draw();
 		}
 	}
 
@@ -603,14 +620,50 @@
 			ne = 1;
 			ns = 1 - span;
 		}
+		// the reactive $effect on viewStart/viewEnd repaints; no direct scan here
 		viewStart = ns;
 		viewEnd = ne;
-		updateDisplayPeaks();
-		draw();
 	}
 
 	function onScrollUp() {
 		scrollDragging = false;
+	}
+
+	function panByStep(dir: number) {
+		if (viewStart === 0 && viewEnd === 1) return;
+		const span = viewEnd - viewStart;
+		let ns = viewStart + span * 0.1 * dir;
+		let ne = ns + span;
+		if (ns < 0) {
+			ns = 0;
+			ne = span;
+		}
+		if (ne > 1) {
+			ne = 1;
+			ns = 1 - span;
+		}
+		// the reactive $effect on viewStart/viewEnd repaints
+		viewStart = ns;
+		viewEnd = ne;
+	}
+
+	function onScrollKeyDown(e: KeyboardEvent) {
+		const span = viewEnd - viewStart;
+		if (e.key === 'ArrowLeft') {
+			e.preventDefault();
+			panByStep(-1);
+		} else if (e.key === 'ArrowRight') {
+			e.preventDefault();
+			panByStep(1);
+		} else if (e.key === 'Home') {
+			e.preventDefault();
+			viewStart = 0;
+			viewEnd = span;
+		} else if (e.key === 'End') {
+			e.preventDefault();
+			viewEnd = 1;
+			viewStart = 1 - span;
+		}
 	}
 </script>
 
@@ -618,20 +671,28 @@
 	<!-- svelte-ignore a11y_no_static_element_interactions -->
 	<canvas
 		bind:this={canvas}
+		id={waveId}
 		class="waveform"
 		onpointerdown={onPointerDown}
 		onpointermove={onPointerMove}
 		onpointerup={onPointerUp}
-		onmouseenter={() => mouseOver = true}
-		onmouseleave={() => mouseOver = false}
+		onpointercancel={onPointerCancel}
 	></canvas>
 	{#if viewStart > 0 || viewEnd < 1}
-		<!-- svelte-ignore a11y_no_static_element_interactions -->
 		<div
 			class="scroll-track"
+			role="scrollbar"
+			tabindex="0"
+			aria-label="Waveform pan"
+			aria-controls={waveId}
+			aria-orientation="horizontal"
+			aria-valuemin={0}
+			aria-valuemax={100}
+			aria-valuenow={Math.round(viewStart * 100)}
 			onpointerdown={onScrollDown}
 			onpointermove={onScrollMove}
 			onpointerup={onScrollUp}
+			onkeydown={onScrollKeyDown}
 		>
 			<div
 				class="scroll-thumb"
@@ -657,8 +718,11 @@
 		-webkit-user-select: none;
 	}
 	.scroll-track {
-		height: 5px;
+		box-sizing: content-box;
+		height: 6px;
+		padding: 6px 0;
 		background: rgba(128, 128, 128, 0.2);
+		background-clip: content-box;
 		border-radius: 3px;
 		position: relative;
 		cursor: pointer;
@@ -668,8 +732,8 @@
 	}
 	.scroll-thumb {
 		position: absolute;
-		top: 0;
-		height: 100%;
+		top: 6px;
+		bottom: 6px;
 		background: var(--fg);
 		border-radius: 3px;
 		opacity: 0.55;
