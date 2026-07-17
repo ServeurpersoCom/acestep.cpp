@@ -272,24 +272,25 @@ static bool dit_ggml_load(DiTGGML *    m,
     }
 
     // config from GGUF metadata (all keys required)
-    DiTGGMLConfig & cfg   = m->cfg;
-    cfg.n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
-    cfg.hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
-    cfg.intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
-    cfg.n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
-    cfg.n_kv_heads        = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
-    cfg.head_dim          = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
-    cfg.in_channels       = (int) gf_get_u32(gf, "acestep.in_channels");
-    cfg.out_channels      = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
-    cfg.patch_size        = (int) gf_get_u32(gf, "acestep.patch_size");
-    cfg.sliding_window    = (int) gf_get_u32(gf, "acestep.sliding_window");
-    cfg.rope_theta        = gf_get_f32(gf, "acestep-dit.rope.freq_base");
-    cfg.rms_norm_eps      = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
+    DiTGGMLConfig & cfg         = m->cfg;
+    uint32_t        block_count = gf_get_u32(gf, "acestep-dit.block_count");
+    cfg.n_layers                = (int) block_count;
+    cfg.hidden_size             = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
+    cfg.intermediate_size       = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
+    cfg.n_heads                 = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
+    cfg.n_kv_heads              = (int) gf_get_u32(gf, "acestep-dit.attention.head_count_kv");
+    cfg.head_dim                = (int) gf_get_u32(gf, "acestep-dit.attention.key_length");
+    cfg.in_channels             = (int) gf_get_u32(gf, "acestep.in_channels");
+    cfg.out_channels            = (int) gf_get_u32(gf, "acestep.audio_acoustic_hidden_dim");
+    cfg.patch_size              = (int) gf_get_u32(gf, "acestep.patch_size");
+    cfg.sliding_window          = (int) gf_get_u32(gf, "acestep.sliding_window");
+    cfg.rope_theta              = gf_get_f32(gf, "acestep-dit.rope.freq_base");
+    cfg.rms_norm_eps            = gf_get_f32(gf, "acestep-dit.attention.layer_norm_rms_epsilon");
 
     if (!cfg.n_layers || !cfg.hidden_size || !cfg.intermediate_size || !cfg.n_heads || !cfg.n_kv_heads ||
         !cfg.head_dim || !cfg.in_channels || !cfg.out_channels || !cfg.patch_size || !cfg.sliding_window ||
-        cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f) {
-        fprintf(stderr, "[Load] FATAL: incomplete DiT config in GGUF\n");
+        cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f || block_count > (uint32_t) DIT_GGML_MAX_LAYERS) {
+        fprintf(stderr, "[Load] FATAL: invalid DiT config in GGUF\n");
         gf_close(&gf);
         return false;
     }
@@ -459,7 +460,8 @@ static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * gguf_path) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
-    cfg->n_layers          = (int) gf_get_u32(gf, "acestep-dit.block_count");
+    uint32_t block_count   = gf_get_u32(gf, "acestep-dit.block_count");
+    cfg->n_layers          = (int) block_count;
     cfg->hidden_size       = (int) gf_get_u32(gf, "acestep-dit.embedding_length");
     cfg->intermediate_size = (int) gf_get_u32(gf, "acestep-dit.feed_forward_length");
     cfg->n_heads           = (int) gf_get_u32(gf, "acestep-dit.attention.head_count");
@@ -475,8 +477,8 @@ static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * gguf_path) {
 
     if (!cfg->n_layers || !cfg->hidden_size || !cfg->intermediate_size || !cfg->n_heads || !cfg->n_kv_heads ||
         !cfg->head_dim || !cfg->in_channels || !cfg->out_channels || !cfg->patch_size || !cfg->sliding_window ||
-        cfg->rope_theta <= 0.0f || cfg->rms_norm_eps <= 0.0f) {
-        fprintf(stderr, "[Load] FATAL: incomplete DiT config in %s\n", gguf_path);
+        cfg->rope_theta <= 0.0f || cfg->rms_norm_eps <= 0.0f || block_count > (uint32_t) DIT_GGML_MAX_LAYERS) {
+        fprintf(stderr, "[Load] FATAL: invalid DiT config in %s\n", gguf_path);
         return false;
     }
     return true;
