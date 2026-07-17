@@ -288,7 +288,8 @@ static bool dit_ggml_load(DiTGGML *    m,
 
     if (!cfg.n_layers || !cfg.hidden_size || !cfg.intermediate_size || !cfg.n_heads || !cfg.n_kv_heads ||
         !cfg.head_dim || !cfg.in_channels || !cfg.out_channels || !cfg.patch_size || !cfg.sliding_window ||
-        cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f) {
+        cfg.rope_theta <= 0.0f || cfg.rms_norm_eps <= 0.0f ||
+        cfg.n_layers > DIT_GGML_MAX_LAYERS) {
         fprintf(stderr, "[Load] FATAL: incomplete DiT config in GGUF\n");
         gf_close(&gf);
         return false;
@@ -475,7 +476,8 @@ static bool dit_ggml_load_config(DiTGGMLConfig * cfg, const char * gguf_path) {
 
     if (!cfg->n_layers || !cfg->hidden_size || !cfg->intermediate_size || !cfg->n_heads || !cfg->n_kv_heads ||
         !cfg->head_dim || !cfg->in_channels || !cfg->out_channels || !cfg->patch_size || !cfg->sliding_window ||
-        cfg->rope_theta <= 0.0f || cfg->rms_norm_eps <= 0.0f) {
+        cfg->rope_theta <= 0.0f || cfg->rms_norm_eps <= 0.0f ||
+        cfg->n_layers > DIT_GGML_MAX_LAYERS) {
         fprintf(stderr, "[Load] FATAL: incomplete DiT config in %s\n", gguf_path);
         return false;
     }
