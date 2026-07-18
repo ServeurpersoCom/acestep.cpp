@@ -10,7 +10,9 @@
 		ChevronDown,
 		Heart,
 		Type,
-		TriangleAlert
+		TriangleAlert,
+		ZoomOut,
+		Maximize2
 	} from '@lucide/svelte';
 	import { app, setRequest, toast } from '../lib/state.svelte.js';
 	import { deleteSong } from '../lib/db.js';
@@ -36,12 +38,40 @@
 	let rangeStart = $state(0);
 	let rangeEnd = $state(0);
 
+	let zoomStack: Array<{ start: number; end: number }> = $state([]);
+	let viewStart = $state(0);
+	let viewEnd = $state(1);
+
 	let isRef = $derived(app.refSongId === song.id);
 	let isSrc = $derived(app.srcSongId === song.id);
 
 	// "(variant task)" suffix rebuilt from the request, used for the card
 	// title and download filenames. Song.name itself stays the base name.
 	let displayName = $derived(displaySongName(song));
+
+	function zoomOut() {
+		const prev = zoomStack[zoomStack.length - 1];
+		zoomStack = zoomStack.slice(0, -1);
+		if (prev) {
+			viewStart = prev.start;
+			viewEnd = prev.end;
+		} else {
+			viewStart = 0;
+			viewEnd = 1;
+		}
+	}
+
+	function zoomReset() {
+		zoomStack = [];
+		viewStart = 0;
+		viewEnd = 1;
+	}
+
+	function onZoomSelect(start: number, end: number) {
+		zoomStack = [...zoomStack, { start: viewStart, end: viewEnd }];
+		viewStart = Math.max(0, start);
+		viewEnd = Math.min(1, end);
+	}
 
 	function toggleRef() {
 		if (isRef) {
@@ -321,6 +351,9 @@
 		selectable={isSrc}
 		bind:rangeStart
 		bind:rangeEnd
+		bind:viewStart
+		bind:viewEnd
+		{onZoomSelect}
 	/>
 	<div class="card-footer">
 		<span class="format-badge">{song.format.toUpperCase()}</span>
@@ -328,6 +361,22 @@
 			<span class="format-badge">VAE</span>
 		{/if}
 		<span class="timecode">{fmtPos(time)} / {fmtDur(dur)}</span>
+		<button
+			class="icon-btn zoom-btn"
+			onclick={zoomOut}
+			title="Zoom out"
+			disabled={zoomStack.length === 0}
+		>
+			<ZoomOut size={12} />
+		</button>
+		<button
+			class="icon-btn zoom-btn"
+			onclick={zoomReset}
+			title="Reset zoom"
+			disabled={viewStart === 0 && viewEnd === 1}
+		>
+			<Maximize2 size={12} />
+		</button>
 		<div class="card-actions">
 			<label class="icon-btn"
 				><input
@@ -406,7 +455,7 @@
 		font-family: monospace;
 		color: var(--fg);
 		white-space: nowrap;
-		flex: 1;
+		margin-right: 0.75rem;
 	}
 	.card-actions {
 		display: flex;
@@ -414,6 +463,7 @@
 		gap: 0.2rem;
 		flex-shrink: 0;
 		font-size: 0.8rem;
+		margin-left: auto;
 	}
 	.icon-btn {
 		background: none;
@@ -428,6 +478,13 @@
 	}
 	.icon-btn:hover {
 		color: var(--focus);
+	}
+	.zoom-btn:disabled {
+		opacity: 0.3;
+		cursor: default;
+	}
+	.zoom-btn:disabled:hover {
+		color: var(--fg);
 	}
 	.ref-check {
 		cursor: pointer;
