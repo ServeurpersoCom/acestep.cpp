@@ -14,14 +14,118 @@
 
 #include "gguf-weights.h"
 #include "timer.h"
+#include "yyjson.h"
 
 #include <cassert>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+/// Populate the official lyric-alignment layer/head defaults for supported
+/// 2B and XL DiT architectures when model metadata does not provide them.
+static void dit_meta_set_default_alignment_config(DiTMeta * meta) {
+    if (meta->cfg.n_layers == 24 && meta->cfg.n_heads == 16) {
+        static const DiTScoreHeadConfig defaults[] = {
+            { 2, 6  },
+            { 3, 10 },
+            { 3, 11 },
+            { 4, 3  },
+            { 5, 8  },
+            { 5, 9  },
+            { 6, 8  },
+        };
+        meta->lyric_alignment_heads.assign(defaults, defaults + sizeof(defaults) / sizeof(defaults[0]));
+        return;
+    }
+    if (meta->cfg.n_layers == 32 && meta->cfg.n_heads == 32) {
+        static const DiTScoreHeadConfig defaults[] = {
+            { 3, 18 },
+            { 3, 27 },
+            { 4, 22 },
+            { 5, 5  },
+            { 5, 6  },
+            { 5, 7  },
+            { 6, 2  },
+            { 6, 12 },
+            { 6, 13 },
+            { 7, 20 },
+            { 7, 21 },
+        };
+        meta->lyric_alignment_heads.assign(defaults, defaults + sizeof(defaults) / sizeof(defaults[0]));
+    }
+}
+
+/// Load and validate lyric-alignment heads from the DiT GGUF config JSON,
+/// falling back to architecture defaults only when the metadata key is absent.
+static void dit_meta_load_alignment_config(DiTMeta * meta, const GGUFModel & gf) {
+    const char * config_json = gf_get_str(gf, "acestep.config_json");
+    bool         invalid     = false;
+    bool         has_config  = false;
+
+    if (config_json && config_json[0]) {
+        yyjson_doc * doc    = yyjson_read(config_json, strlen(config_json), 0);
+        yyjson_val * root   = doc ? yyjson_doc_get_root(doc) : nullptr;
+        yyjson_val * config = nullptr;
+        if (!doc || !yyjson_is_obj(root)) {
+            invalid = true;
+        } else {
+            config     = yyjson_obj_get(root, "lyric_alignment_layers_config");
+            has_config = config != nullptr;
+            if (has_config && !yyjson_is_obj(config)) {
+                invalid = true;
+            }
+        }
+        if (!invalid && has_config) {
+            size_t       idx, max;
+            yyjson_val * key;
+            yyjson_val * heads;
+            yyjson_obj_foreach(config, idx, max, key, heads) {
+                const char * layer_text = yyjson_get_str(key);
+                char *       end        = nullptr;
+                long         layer      = layer_text ? strtol(layer_text, &end, 10) : -1;
+                if (!layer_text || !end || *end != '\0' || layer < 0 || layer >= meta->cfg.n_layers ||
+                    !yyjson_is_arr(heads)) {
+                    invalid = true;
+                    break;
+                }
+
+                size_t       head_idx, head_max;
+                yyjson_val * head_val;
+                yyjson_arr_foreach(heads, head_idx, head_max, head_val) {
+                    int head = yyjson_is_int(head_val) ? (int) yyjson_get_int(head_val) : -1;
+                    if (head < 0 || head >= meta->cfg.n_heads) {
+                        invalid = true;
+                        break;
+                    }
+                    meta->lyric_alignment_heads.push_back({ (int) layer, head });
+                }
+                if (invalid) {
+                    break;
+                }
+            }
+        }
+        if (doc) {
+            yyjson_doc_free(doc);
+        }
+    }
+
+    if (invalid) {
+        fprintf(stderr, "[Store] WARNING: invalid lyric_alignment_layers_config; ignoring scoring heads\n");
+        meta->lyric_alignment_heads.clear();
+    } else if (!has_config && meta->lyric_alignment_heads.empty()) {
+        dit_meta_set_default_alignment_config(meta);
+    }
+    if (meta->lyric_alignment_heads.empty()) {
+        fprintf(stderr, "[Store] WARNING: no lyric alignment head config for %dL/%dH DiT\n", meta->cfg.n_layers,
+                meta->cfg.n_heads);
+    } else {
+        fprintf(stderr, "[Store] Lyric alignment: %zu configured heads\n", meta->lyric_alignment_heads.size());
+    }
+}
 
 namespace {
 
@@ -524,6 +628,7 @@ MetadataFSM * store_fsm(ModelStore * s, const char * lm_path, int vocab_size) {
     return fsm;
 }
 
+/// Load and cache the CPU-resident DiT configuration and scoring metadata.
 const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path) {
     std::lock_guard<std::mutex> lock(s->mtx);
     std::string                 key = dit_path ? dit_path : "";
@@ -544,6 +649,7 @@ const DiTMeta * store_dit_meta(ModelStore * s, const char * dit_path) {
         return nullptr;
     }
     meta->is_turbo = gf_get_bool(gf, "acestep.is_turbo");
+    dit_meta_load_alignment_config(meta, gf);
 
     // silence_latent: [15000, 64] f32, also accessible via store_silence for
     // callers that only need the pointer. Cached here too so DiTMeta is

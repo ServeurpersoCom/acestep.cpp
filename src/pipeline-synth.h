@@ -8,9 +8,11 @@
 // caches everything across calls. DiT weight swap between phases is an
 // invisible consequence of the store, not an orchestration concern anymore.
 
+#include "dtw-score.h"
 #include "request.h"
 
 #include <cstdlib>
+#include <vector>
 
 struct AceSynth;
 struct AceSynthJob;
@@ -19,7 +21,7 @@ struct ModelStore;
 struct AceSynthParams {
     const char * text_encoder_path;  // Qwen3 text encoder GGUF (required)
     const char * dit_path;           // DiT GGUF (required)
-    const char * vae_path;           // VAE GGUF (required)
+    const char * vae_path;           // VAE GGUF (required except for score-only contexts)
     const char * adapter_path;       // adapter safetensors or directory (NULL to disable)
     float        adapter_scale;      // user scale multiplier
     bool         use_fa;             // flash attention
@@ -44,6 +46,9 @@ void ace_synth_default_params(AceSynthParams * p);
 // and T resolution can run before the DiT itself is ever loaded. All GPU
 // modules are acquired per op, never owned by the context. NULL on failure.
 AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params);
+
+// Score-only variant: text encoder and DiT are required, but VAE is not.
+AceSynth * ace_synth_load_score(ModelStore * store, const AceSynthParams * params);
 
 // Phase 1: encode sources, build context, run all DiT denoising steps.
 // Modules are acquired as needed: VAE encoder for source and timbre, FSQ
@@ -99,3 +104,21 @@ void ace_synth_job_free(AceSynthJob * job);
 void ace_audio_free(AceAudio * audio);
 
 void ace_synth_free(AceSynth * ctx);
+
+// Lyric scoring against generated DiT latents. Runs the Python reference's
+// pure-noise and regressed-latent attention passes, then computes LM and DiT
+// alignment metrics on the pure lyric token range.
+//
+// pred_latents: [batch_n, pred_T_latent, 64] generated latent tensor.
+// Each request seed must be resolved (non-negative) before calling.
+// Returns one LyricScoreComparison per batch item in out_scores.
+// cancel/cancel_data: abort callback, polled before and between DiT forwards.
+// Returns 0 on success, -1 on error or cancellation.
+int ace_synth_score(AceSynth *                          ctx,
+                    const AceRequest *                  reqs,
+                    int                                 batch_n,
+                    const float *                       pred_latents,
+                    int                                 pred_T_latent,
+                    std::vector<LyricScoreComparison> & out_scores,
+                    bool (*cancel)(void *) = nullptr,
+                    void * cancel_data     = nullptr);

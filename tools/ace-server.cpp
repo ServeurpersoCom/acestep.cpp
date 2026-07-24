@@ -27,6 +27,7 @@
 //   /lm         LM
 //   /synth      DiT + Text-Enc + VAE
 //   /understand LM + DiT + VAE
+//   /score      DiT + Text-Enc
 
 #include "audio-io.h"
 #include "model-registry.h"
@@ -250,6 +251,37 @@ static int latent_payload_validate(size_t size, int * http_code_out) {
         return -1;
     }
     int T = (int) (size / (size_t) LATENT_FRAME_BYTES);
+    if (T <= 0) {
+        if (http_code_out) {
+            *http_code_out = 400;
+        }
+        return -1;
+    }
+    if (T > MAX_T_LATENT) {
+        if (http_code_out) {
+            *http_code_out = 413;
+        }
+        return -1;
+    }
+    return T;
+}
+
+// Validate a contiguous batch of [T, 64] f32 latent tensors.
+static int latent_batch_payload_validate(size_t size, int batch_n, int * http_code_out) {
+    if (batch_n <= 0) {
+        if (http_code_out) {
+            *http_code_out = 400;
+        }
+        return -1;
+    }
+    size_t batch_frame_bytes = (size_t) batch_n * LATENT_FRAME_BYTES;
+    if (size == 0 || (size % batch_frame_bytes) != 0) {
+        if (http_code_out) {
+            *http_code_out = 400;
+        }
+        return -1;
+    }
+    int T = (int) (size / batch_frame_bytes);
     if (T <= 0) {
         if (http_code_out) {
             *http_code_out = 400;
@@ -1366,7 +1398,224 @@ static void encode_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * 
     fprintf(stderr, "[Server] Job %s done (encode)\n", job->id.c_str());
 }
 
-// POST /vae
+// Score worker: load DiT + Text-Enc, run lyric-alignment attention scoring
+// against generated latents, and store the JSON result.
+static void score_worker(std::shared_ptr<Job>    job,
+                         std::vector<AceRequest> ace_reqs,
+                         std::vector<float>      pred_latents,
+                         int                     pred_T_latent) {
+    if (job->cancel.load()) {
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+
+    std::string        dit_name = resolve_name(g_registry.dit, ace_reqs[0].synth_model, g_loaded_dit);
+    const ModelEntry * dit      = registry_find(g_registry.dit, dit_name.c_str());
+    if (!dit) {
+        fprintf(stderr, "[Server] DiT not found: %s\n", dit_name.c_str());
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    if (g_registry.text_enc.empty()) {
+        fprintf(stderr, "[Server] Missing Text-Enc in registry\n");
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    AceSynthParams p    = g_synth_params;
+    p.text_encoder_path = g_registry.text_enc[0].path.c_str();
+    p.dit_path          = dit->path.c_str();
+    p.vae_path          = nullptr;
+    p.adapter_path      = nullptr;
+    p.adapter_scale     = 1.0f;
+    if (!ace_reqs[0].adapter.empty()) {
+        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
+        if (!adapter) {
+            fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        p.adapter_path  = adapter->path.c_str();
+        p.adapter_scale = ace_reqs[0].adapter_scale;
+    }
+
+    fprintf(stderr, "[Server] Loading score: DiT=%s%s%s\n", dit_name.c_str(),
+            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str());
+    AceSynth * ctx = ace_synth_load_score(g_store, &p);
+    if (!ctx) {
+        fprintf(stderr, "[Server] FATAL: synth load failed for scoring\n");
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+
+    std::vector<LyricScoreComparison> scores;
+    int rc = ace_synth_score(ctx, ace_reqs.data(), (int) ace_reqs.size(), pred_latents.data(), pred_T_latent, scores,
+                             server_cancel_job, (void *) &job->cancel);
+    ace_synth_free(ctx);
+
+    if (job->cancel.load()) {
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+    if (rc != 0) {
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+
+    // Bare array with one LM/DiT comparison per request.
+    yyjson_mut_doc * doc  = yyjson_mut_doc_new(NULL);
+    yyjson_mut_val * root = yyjson_mut_arr(doc);
+    yyjson_mut_doc_set_root(doc, root);
+    auto build_metrics = [&](const LyricScoreResult & score) {
+        yyjson_mut_val * metrics = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_real(doc, metrics, "coverage", score.coverage);
+        yyjson_mut_obj_add_real(doc, metrics, "monotonicity", score.monotonicity);
+        yyjson_mut_obj_add_real(doc, metrics, "confidence", score.confidence);
+        yyjson_mut_obj_add_real(doc, metrics, "lyrics_score", score.lyrics_score);
+        return metrics;
+    };
+    for (size_t i = 0; i < scores.size(); i++) {
+        yyjson_mut_val * obj = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_real(doc, obj, "lm_score", scores[i].lm.lyrics_score);
+        yyjson_mut_obj_add_real(doc, obj, "dit_score", scores[i].dit.lyrics_score);
+        yyjson_mut_obj_add_val(doc, obj, "lm", build_metrics(scores[i].lm));
+        yyjson_mut_obj_add_val(doc, obj, "dit", build_metrics(scores[i].dit));
+        yyjson_mut_arr_append(root, obj);
+    }
+
+    yyjson_write_err err;
+    size_t           len      = 0;
+    char *           json_str = yyjson_mut_write_opts(doc, 0, NULL, &len, &err);
+    yyjson_mut_doc_free(doc);
+    if (!json_str) {
+        fprintf(stderr, "[Server] FATAL: JSON serialization failed: %s\n", err.msg);
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    if (job->cancel.load()) {
+        free(json_str);
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+
+    job->result_body = std::string(json_str, len);
+    job->result_mime = "application/json";
+    free(json_str);
+
+    if (g_keep_loaded) {
+        g_loaded_dit           = dit_name;
+        g_loaded_adapter       = ace_reqs[0].adapter;
+        g_loaded_adapter_scale = ace_reqs[0].adapter_scale;
+    } else {
+        g_loaded_dit.clear();
+        g_loaded_adapter.clear();
+        g_loaded_adapter_scale = 1.0f;
+    }
+
+    if (job->cancel.load()) {
+        job->result_body.clear();
+        job->result_mime.clear();
+        job->status.store(JobStatus::CANCELLED);
+        return;
+    }
+    fprintf(stderr, "[Server] Job %s done (score)\n", job->id.c_str());
+    job->status.store(JobStatus::DONE);
+}
+
+// POST /score
+// multipart/form-data:
+//   part "request":      JSON object or array with caption/lyrics/generation params
+//   part "pred_latents": generated raw f32 latents [batch, T, 64]
+//                         ("latent" is accepted as an alias)
+// Returns a job ID immediately. The result is a bare JSON array containing
+// LM and DiT score metrics for each request.
+static void handle_score(const httplib::Request & req, httplib::Response & res) {
+    if (g_registry.dit.empty() || g_registry.text_enc.empty()) {
+        json_error(res, 501, "No score models in registry (need dit + text-encoder)");
+        return;
+    }
+    if (!req.is_multipart_form_data()) {
+        json_error(res, 400, "Score endpoint requires multipart/form-data with request and pred_latents parts");
+        return;
+    }
+
+    std::string json_body;
+    if (req.form.has_file("request")) {
+        json_body = req.form.get_file("request").content;
+    } else if (req.form.has_field("request")) {
+        json_body = req.form.get_field("request");
+    } else {
+        json_error(res, 400, "Multipart: missing 'request' part");
+        return;
+    }
+
+    std::vector<AceRequest> ace_reqs;
+    if (!request_parse_json_array(json_body.c_str(), &ace_reqs)) {
+        json_error(res, 400, "Multipart: invalid JSON object or array in 'request' part");
+        return;
+    }
+    if (ace_reqs.size() > 9) {
+        json_error(res, 400, "Score batch size exceeds maximum of 9");
+        return;
+    }
+
+    for (size_t i = 0; i < ace_reqs.size(); i++) {
+        AceRequest & current = ace_reqs[i];
+        if (current.caption.empty()) {
+            json_error(res, 400, "Caption is required for every score request");
+            return;
+        }
+        if (current.lyrics.empty() || current.lyrics == "[Instrumental]") {
+            json_error(res, 400, "Non-instrumental lyrics are required for scoring");
+            return;
+        }
+        if (current.task_type != TASK_TEXT2MUSIC) {
+            json_error(res, 400, "Scoring only supports task_type 'text2music'");
+            return;
+        }
+        if (i > 0 &&
+            (current.duration != ace_reqs[0].duration || current.inference_steps != ace_reqs[0].inference_steps ||
+             current.custom_timesteps != ace_reqs[0].custom_timesteps ||
+             current.synth_model != ace_reqs[0].synth_model || current.adapter != ace_reqs[0].adapter ||
+             current.adapter_scale != ace_reqs[0].adapter_scale)) {
+            json_error(res, 400, "Batched score requests must share duration, steps, model, and adapter");
+            return;
+        }
+        request_resolve_seed(&current);
+    }
+
+    std::string latent_content;
+    if (req.form.has_file("pred_latents")) {
+        latent_content = req.form.get_file("pred_latents").content;
+    } else if (req.form.has_file("latent")) {
+        latent_content = req.form.get_file("latent").content;
+    } else {
+        json_error(res, 400, "Multipart: missing 'pred_latents' part");
+        return;
+    }
+
+    int http_code     = 0;
+    int pred_T_latent = latent_batch_payload_validate(latent_content.size(), (int) ace_reqs.size(), &http_code);
+    if (pred_T_latent < 0) {
+        json_error(
+            res, http_code,
+            http_code == 413 ? "pred_latents exceeds max frames" : "pred_latents size must be batch*T*64*4 bytes");
+        return;
+    }
+    std::vector<float> pred_latents(latent_content.size() / sizeof(float));
+    memcpy(pred_latents.data(), latent_content.data(), latent_content.size());
+
+    auto job = job_create();
+    fprintf(stderr, "[Server] Job %s created (score, %d requests, %d latent frames)\n", job->id.c_str(),
+            (int) ace_reqs.size(), pred_T_latent);
+
+    work_push([job, reqs = std::move(ace_reqs), latents = std::move(pred_latents), pred_T_latent]() mutable {
+        score_worker(job, std::move(reqs), std::move(latents), pred_T_latent);
+    });
+
+    std::string body = "{\"id\":\"" + job->id + "\"}";
+    res.set_content(body, "application/json");
+}
+
 // multipart/form-data: single VAE entrypoint, dispatches on which side is
 // supplied in the request body. Symmetric with /synth and /understand on
 // the 'audio or src_latents' input contract, except here they are mutually
@@ -1598,6 +1847,7 @@ static void usage(const char * prog) {
             prog, synth_d.vae_chunk, synth_d.vae_overlap, g_max_batch, lm_d.max_seq);
 }
 
+/// Parse server options, register HTTP routes, and run the worker-backed API server.
 int main(int argc, char ** argv) {
     ace_lm_default_params(&g_lm_params);
     ace_synth_default_params(&g_synth_params);
@@ -1764,6 +2014,7 @@ int main(int argc, char ** argv) {
     svr.Post("/synth", handle_synth);
     svr.Post("/understand", handle_understand);
     svr.Post("/vae", handle_vae);
+    svr.Post("/score", handle_score);
     svr.Get("/health", [](const httplib::Request &, httplib::Response & res) {
         res.set_content("{\"status\":\"ok\"}", "application/json");
     });

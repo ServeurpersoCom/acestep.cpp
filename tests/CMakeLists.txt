@@ -15,3 +15,13 @@ link_ggml_backends(test-model-store)
 add_executable(test-lm-prompt test-lm-prompt.cpp)
 target_link_libraries(test-lm-prompt PRIVATE acestep-core)
 link_ggml_backends(test-lm-prompt)
+
+# test-dtw-score: DTW pathfinding + lyric alignment scoring (pure C++, no ggml).
+add_executable(test-dtw-score test-dtw-score.cpp)
+target_include_directories(test-dtw-score PRIVATE ${CMAKE_SOURCE_DIR}/src)
+if(NOT MSVC)
+    target_link_libraries(test-dtw-score PRIVATE m)
+endif()
+if(BUILD_TESTING)
+    add_test(NAME dtw-score COMMAND test-dtw-score)
+endif()

@@ -1,0 +1,81 @@
+# Check if the upstream Python scoring reference has drifted from the
+# commit pinned in src/dtw-score.h. The C++ port is a snapshot of:
+#   ace-step/ACE-Step-1.5@82252c24
+#   acestep/core/scoring/_dtw.py
+#   acestep/core/scoring/dit_score.py
+#   acestep/core/generation/handler/lyric_score.py
+#   acestep/core/generation/handler/lyric_alignment_common.py
+#
+# If the upstream files change, this workflow fails and the C++ port
+# needs re-evaluation. The expected SHA256 hashes are embedded below
+# so there's no separate file to maintain — update all four hashes and
+# the pin comment in dtw-score.h when re-syncing.
+name: Scoring Drift Check
+
+on:
+  schedule:
+    - cron: '0 8 * * 1'  # weekly: Monday 08:00 UTC
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch upstream Python scoring files
+        run: |
+          BASE="https://raw.githubusercontent.com/ace-step/ACE-Step-1.5/main"
+          CURL=(curl -fsSL --max-time 30 --retry 2 --retry-max-time 60)
+          "${CURL[@]}" "$BASE/acestep/core/scoring/_dtw.py" -o _dtw.py
+          "${CURL[@]}" "$BASE/acestep/core/scoring/dit_score.py" -o dit_score.py
+          "${CURL[@]}" "$BASE/acestep/core/generation/handler/lyric_score.py" -o lyric_score.py
+          "${CURL[@]}" "$BASE/acestep/core/generation/handler/lyric_alignment_common.py" -o lyric_alignment_common.py
+
+      - name: Verify hashes match pinned snapshot
+        run: |
+          # Expected SHA256 of the Python files at commit 82252c24.
+          # Update these (and the pin comment in src/dtw-score.h) when
+          # re-syncing the C++ port after an upstream algorithm change.
+          EXPECTED_DTW="2d2252e7108f296cd26722c7b622e1c1a1ed47c71459a8ff873164c4c1ada962"
+          EXPECTED_SCORE="73700ff976549339dad3d6c500f8cbe9a8cce08d1979bbb85e3e3ed53e0605a1"
+          EXPECTED_HANDLER="92ccffbe079482b9e0e7a7fc6304a408fa7d996a7f9e88c7b3f819ee5d463510"
+          EXPECTED_COMMON="ec35e392a2354696e9def4f98db27c415f09763e839609dd368532971ec0eb08"
+
+          ACTUAL_DTW=$(sha256sum _dtw.py | cut -d' ' -f1)
+          ACTUAL_SCORE=$(sha256sum dit_score.py | cut -d' ' -f1)
+          ACTUAL_HANDLER=$(sha256sum lyric_score.py | cut -d' ' -f1)
+          ACTUAL_COMMON=$(sha256sum lyric_alignment_common.py | cut -d' ' -f1)
+
+          echo "_dtw.py:      expected=$EXPECTED_DTW actual=$ACTUAL_DTW"
+          echo "dit_score.py: expected=$EXPECTED_SCORE actual=$ACTUAL_SCORE"
+          echo "lyric_score.py: expected=$EXPECTED_HANDLER actual=$ACTUAL_HANDLER"
+          echo "lyric_alignment_common.py: expected=$EXPECTED_COMMON actual=$ACTUAL_COMMON"
+
+          if [ "$ACTUAL_DTW" != "$EXPECTED_DTW" ]; then
+            echo "::error::_dtw.py has drifted from the pinned commit (82252c24)."
+            echo "::error::The C++ port in src/dtw-score.h may need updating."
+            exit 1
+          fi
+
+          if [ "$ACTUAL_SCORE" != "$EXPECTED_SCORE" ]; then
+            echo "::error::dit_score.py has drifted from the pinned commit (82252c24)."
+            echo "::error::The C++ port in src/dtw-score.h may need updating."
+            exit 1
+          fi
+
+          if [ "$ACTUAL_HANDLER" != "$EXPECTED_HANDLER" ]; then
+            echo "::error::lyric_score.py has drifted from the pinned commit (82252c24)."
+            echo "::error::The C++ scoring forward path may need updating."
+            exit 1
+          fi
+
+          if [ "$ACTUAL_COMMON" != "$EXPECTED_COMMON" ]; then
+            echo "::error::lyric_alignment_common.py has drifted from the pinned commit (82252c24)."
+            echo "::error::Lyric slicing or model-specific head configuration may need updating."
+            exit 1
+          fi
+
+          echo "No upstream source drift detected against the pinned snapshot."
+          echo "The C++ implementation may contain documented correctness fixes."
