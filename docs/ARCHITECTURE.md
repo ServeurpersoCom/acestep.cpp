@@ -900,7 +900,7 @@ Examples:
 
 ```
 POST /lm                        Submit LM generation, returns job ID
-  body: application/json AceRequest
+  body: application/json AceRequest or [AceRequest, ...]
   response: {"id":"1"}
 
 POST /synth                     Submit synth generation, returns job ID
@@ -956,6 +956,13 @@ encoder for `/synth` (`"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`).
 `synth_batch_size` duplicates a request for multiple DiT variations
 (clamped to 9). Error responses are JSON: `{"error":"message"}` with 400,
 500, 501, or 503 status.
+
+`POST /lm` accepts an array of independent requests for heterogeneous
+batching. Items may use different captions, lyrics, metadata, durations and
+seeds, but must share the LM model, mode, sampling configuration and phase
+shape. Every array item must set `lm_batch_size=1`; array length is limited by
+`--max-batch`. Independent prompts receive separate KV-cache sets and decode
+together in one GPU batch.
 
 **GET /props** returns available models, server configuration, and the
 default AceRequest (source of truth for webui dropdowns and placeholders):

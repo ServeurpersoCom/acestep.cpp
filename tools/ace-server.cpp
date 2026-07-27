@@ -547,14 +547,19 @@ static std::string resolve_name(const std::vector<ModelEntry> & bucket,
 }
 
 // LM worker: generates metadata + lyrics + codes, stores JSON result in job.
-static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch_size, int mode) {
+static void lm_worker(std::shared_ptr<Job>    job,
+                      std::vector<AceRequest> ace_reqs,
+                      int                     result_count,
+                      bool                    heterogeneous,
+                      int                     mode) {
     if (job->cancel.load()) {
         job->status.store(JobStatus::CANCELLED);
         return;
     }
 
     // Resolve model name and build per-request params from the template.
-    std::string        lm_name = resolve_name(g_registry.lm, ace_req.lm_model, g_loaded_lm);
+    const AceRequest & first   = ace_reqs[0];
+    std::string        lm_name = resolve_name(g_registry.lm, first.lm_model, g_loaded_lm);
     const ModelEntry * entry   = registry_find(g_registry.lm, lm_name.c_str());
     if (!entry) {
         fprintf(stderr, "[Server] LM not found: %s\n", lm_name.c_str());
@@ -576,9 +581,11 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch
 
     // Execute and always free the ctx, success or failure: the store decides
     // whether the underlying GPU module stays resident.
-    std::vector<AceRequest> out(lm_batch_size);
-    int rc = ace_lm_generate(ctx, &ace_req, lm_batch_size, out.data(), NULL, NULL, server_cancel_job,
-                             (void *) &job->cancel, mode);
+    std::vector<AceRequest> out(result_count);
+    int rc = heterogeneous ? ace_lm_generate_batch(ctx, ace_reqs.data(), result_count, out.data(), server_cancel_job,
+                                                   (void *) &job->cancel, mode) :
+                             ace_lm_generate(ctx, &first, result_count, out.data(), NULL, NULL, server_cancel_job,
+                                             (void *) &job->cancel, mode);
     ace_lm_free(ctx);
 
     if (rc != 0) {
@@ -596,7 +603,7 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch
 
     // serialize output as a JSON array
     std::string body = "[";
-    for (int i = 0; i < lm_batch_size; i++) {
+    for (int i = 0; i < result_count; i++) {
         if (i > 0) {
             body += ",";
         }
@@ -607,11 +614,12 @@ static void lm_worker(std::shared_ptr<Job> job, AceRequest ace_req, int lm_batch
     job->result_body = std::move(body);
     job->result_mime = "application/json";
     job->status.store(JobStatus::DONE);
-    fprintf(stderr, "[Server] Job %s done (LM, %d results)\n", job->id.c_str(), lm_batch_size);
+    fprintf(stderr, "[Server] Job %s done (LM, %d results, heterogeneous=%s)\n", job->id.c_str(), result_count,
+            heterogeneous ? "yes" : "no");
 }
 
 // POST /lm
-// accepts: AceRequest JSON (lm_mode in the body selects the generation mode).
+// accepts: AceRequest JSON or AceRequest[] (lm_mode selects generation mode).
 // returns: JSON {"id":"N"} immediately. result is a JSON array of enriched
 // AceRequests (lm_batch_size controls count).
 // modes (AceRequest.lm_mode):
@@ -624,24 +632,40 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
         return;
     }
 
-    // parse request
-    AceRequest ace_req;
-    if (!request_parse_json(&ace_req, req.body.c_str())) {
+    size_t                  first_non_space = req.body.find_first_not_of(" \t\r\n");
+    bool                    heterogeneous   = first_non_space != std::string::npos && req.body[first_non_space] == '[';
+    std::vector<AceRequest> ace_reqs;
+    if (!request_parse_json_array(req.body.c_str(), &ace_reqs)) {
         json_error(res, 400, "Invalid JSON");
         return;
     }
-    if (ace_req.caption.empty()) {
-        json_error(res, 400, "Caption is required");
+    if (heterogeneous && (int) ace_reqs.size() > g_max_batch) {
+        json_error(res, 400, "LM request array exceeds max_batch");
         return;
     }
+    for (size_t i = 0; i < ace_reqs.size(); i++) {
+        if (ace_reqs[i].caption.empty()) {
+            json_error(res, 400, "Caption is required for every LM batch item");
+            return;
+        }
+        if (heterogeneous && ace_reqs[i].lm_batch_size != 1) {
+            json_error(res, 400, "lm_batch_size must be 1 inside an LM request array");
+            return;
+        }
+        if (i > 0 && (ace_reqs[i].lm_mode != ace_reqs[0].lm_mode || ace_reqs[i].lm_model != ace_reqs[0].lm_model)) {
+            json_error(res, 400, "LM request array must use one lm_mode and one lm_model");
+            return;
+        }
+    }
+    AceRequest & first = ace_reqs[0];
 
     // Resolve lm_mode string to integer mode used by ace_lm_generate.
     int mode;
-    if (ace_req.lm_mode == LM_MODE_NAME_GENERATE) {
+    if (first.lm_mode == LM_MODE_NAME_GENERATE) {
         mode = LM_MODE_GENERATE;
-    } else if (ace_req.lm_mode == LM_MODE_NAME_INSPIRE) {
+    } else if (first.lm_mode == LM_MODE_NAME_INSPIRE) {
         mode = LM_MODE_INSPIRE;
-    } else if (ace_req.lm_mode == LM_MODE_NAME_FORMAT) {
+    } else if (first.lm_mode == LM_MODE_NAME_FORMAT) {
         mode = LM_MODE_FORMAT;
     } else {
         json_error(res, 400, "Invalid lm_mode (use: generate, inspire, format)");
@@ -649,20 +673,25 @@ static void handle_lm(const httplib::Request & req, httplib::Response & res) {
     }
 
     // clamp lm_batch_size to [1, max_batch]
-    int lm_batch_size = ace_req.lm_batch_size;
-    if (lm_batch_size < 1) {
-        lm_batch_size = 1;
+    int result_count = heterogeneous ? (int) ace_reqs.size() : first.lm_batch_size;
+    if (result_count < 1) {
+        result_count = 1;
     }
-    if (lm_batch_size > g_max_batch) {
-        lm_batch_size = g_max_batch;
+    if (result_count > g_max_batch) {
+        result_count = g_max_batch;
     }
 
     auto job = job_create();
-    fprintf(stderr, "[Server] Job %s created (LM, mode=%d)\n", job->id.c_str(), mode);
+    fprintf(stderr, "[Server] Job %s created (LM, mode=%d, results=%d, heterogeneous=%s)\n", job->id.c_str(), mode,
+            result_count, heterogeneous ? "yes" : "no");
 
-    request_resolve_lm_seed(&ace_req);
+    for (auto & ace_req : ace_reqs) {
+        request_resolve_lm_seed(&ace_req);
+    }
 
-    work_push([job, ace_req, lm_batch_size, mode]() { lm_worker(job, ace_req, lm_batch_size, mode); });
+    work_push([job, reqs = std::move(ace_reqs), result_count, heterogeneous, mode]() mutable {
+        lm_worker(job, std::move(reqs), result_count, heterogeneous, mode);
+    });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";
     res.set_content(body, "application/json");

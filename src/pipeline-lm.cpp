@@ -28,27 +28,32 @@ struct AceLm {
     ModelKey     lm_key;
 };
 
-// Batched Phase 1: N text generations with shared prompt, different seeds.
-// No CFG. Each element gets its own FSM state and RNG.
+// Batched Phase 1: N text generations. Prompts may either be shared (native
+// variants from one request) or independent (heterogeneous HTTP batch).
+// Each element gets its own KV set, FSM state and RNG.
 // Returns N generated text strings.
-static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m,
-                                                      BPETokenizer *           bpe,
-                                                      const std::vector<int> & prompt_tokens,
-                                                      int                      max_new_tokens,
-                                                      float                    temperature,
-                                                      float                    top_p,
-                                                      int                      top_k,
-                                                      uint32_t                 base_seed,
-                                                      int                      N,
-                                                      MetadataFSM *            fsm_template,
-                                                      bool                     lyrics_mode,
-                                                      float                    cfg_scale         = 1.0f,
-                                                      const std::vector<int> * uncond_tokens     = nullptr,
-                                                      bool                     stop_at_reasoning = false,
-                                                      bool (*cancel)(void *)                     = nullptr,
-                                                      void * cancel_data                         = nullptr) {
+static std::vector<std::string> generate_phase1_batch(Qwen3LM *                             m,
+                                                      BPETokenizer *                        bpe,
+                                                      const std::vector<std::vector<int>> & prompt_tokens,
+                                                      int                                   max_new_tokens,
+                                                      float                                 temperature,
+                                                      float                                 top_p,
+                                                      int                                   top_k,
+                                                      const std::vector<uint32_t> &         seeds,
+                                                      const std::vector<MetadataFSM> *      fsm_templates,
+                                                      bool                                  lyrics_mode,
+                                                      float                                 cfg_scale         = 1.0f,
+                                                      const std::vector<std::vector<int>> * uncond_tokens     = nullptr,
+                                                      bool                                  stop_at_reasoning = false,
+                                                      bool                                  shared_prompt     = false,
+                                                      bool (*cancel)(void *)                                  = nullptr,
+                                                      void * cancel_data = nullptr) {
+    int N = (int) prompt_tokens.size();
+    if (N < 1 || (int) seeds.size() != N || (fsm_templates && (int) fsm_templates->size() != N)) {
+        return {};
+    }
     int  V       = m->cfg.vocab_size;
-    bool use_cfg = cfg_scale > 1.0f && uncond_tokens && !uncond_tokens->empty();
+    bool use_cfg = cfg_scale > 1.0f && uncond_tokens && (int) uncond_tokens->size() == N;
 
     // KV sets: cond [0..N-1], uncond [N..2N-1] if CFG
     for (int i = 0; i < N; i++) {
@@ -60,25 +65,35 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
         }
     }
 
-    // Prefill cond once, set 0, copy to 1..N-1
-    Timer              t_prefill;
-    std::vector<float> prefill_logits(V);
-    qw3lm_forward(m, prompt_tokens.data(), (int) prompt_tokens.size(), 0, prefill_logits.data());
+    Timer                           t_prefill;
+    std::vector<std::vector<float>> prefill_logits(N, std::vector<float>(V));
+    qw3lm_forward(m, prompt_tokens[0].data(), (int) prompt_tokens[0].size(), 0, prefill_logits[0].data());
     for (int i = 1; i < N; i++) {
-        qw3lm_copy_kv(m, 0, i);
-    }
-
-    // Prefill uncond once, set N, copy to N+1..2N-1
-    std::vector<float> prefill_logits_uncond(V);
-    if (use_cfg) {
-        qw3lm_forward(m, uncond_tokens->data(), (int) uncond_tokens->size(), N, prefill_logits_uncond.data());
-        for (int i = 1; i < N; i++) {
-            qw3lm_copy_kv(m, N, N + i);
+        if (shared_prompt) {
+            qw3lm_copy_kv(m, 0, i);
+            prefill_logits[i] = prefill_logits[0];
+        } else {
+            qw3lm_forward(m, prompt_tokens[i].data(), (int) prompt_tokens[i].size(), i, prefill_logits[i].data());
         }
     }
 
-    fprintf(stderr, "[LM-Phase1] Prefill %.0fms, %zu tokens, N=%d, CFG=%.2f\n", t_prefill.ms(), prompt_tokens.size(), N,
-            cfg_scale);
+    std::vector<std::vector<float>> prefill_logits_uncond(N, std::vector<float>(V));
+    if (use_cfg) {
+        const auto & first_uncond = (*uncond_tokens)[0];
+        qw3lm_forward(m, first_uncond.data(), (int) first_uncond.size(), N, prefill_logits_uncond[0].data());
+        for (int i = 1; i < N; i++) {
+            if (shared_prompt) {
+                qw3lm_copy_kv(m, N, N + i);
+                prefill_logits_uncond[i] = prefill_logits_uncond[0];
+            } else {
+                const auto & uncond = (*uncond_tokens)[i];
+                qw3lm_forward(m, uncond.data(), (int) uncond.size(), N + i, prefill_logits_uncond[i].data());
+            }
+        }
+    }
+
+    fprintf(stderr, "[LM-Phase1] Prefill %.0fms, N=%d, CFG=%.2f, prompts=%s\n", t_prefill.ms(), N, cfg_scale,
+            shared_prompt ? "shared" : "independent");
 
     // Per-element state
     struct P1Seq {
@@ -94,20 +109,20 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
 
     // Sample first token from shared prefill logits
     for (int i = 0; i < N; i++) {
-        seqs[i].rng.seed(base_seed + i);
-        if (fsm_template) {
-            seqs[i].fsm = *fsm_template;
+        seqs[i].rng.seed(seeds[i]);
+        if (fsm_templates) {
+            seqs[i].fsm = (*fsm_templates)[i];
         }
         seqs[i].codes_phase = false;
         seqs[i].done        = false;
 
-        std::vector<float> lg(prefill_logits);
+        std::vector<float> lg(prefill_logits[i]);
         if (use_cfg) {
             for (int v = 0; v < V; v++) {
-                lg[v] = prefill_logits_uncond[v] + cfg_scale * (lg[v] - prefill_logits_uncond[v]);
+                lg[v] = prefill_logits_uncond[i][v] + cfg_scale * (lg[v] - prefill_logits_uncond[i][v]);
             }
         }
-        if (fsm_template && fsm_template->enabled) {
+        if (fsm_templates && seqs[i].fsm.enabled) {
             seqs[i].fsm.apply_mask(lg.data());
         }
 
@@ -116,7 +131,7 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
         if (tok == TOKEN_IM_END) {
             seqs[i].done = true;
         } else {
-            if (fsm_template && fsm_template->enabled) {
+            if (fsm_templates && seqs[i].fsm.enabled) {
                 seqs[i].fsm.update(tok);
             }
             if (tok == TOKEN_THINK_END) {
@@ -199,7 +214,7 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
             }
 
             // FSM mask (before </think>)
-            if (fsm_template && seqs[i].fsm.enabled && !seqs[i].codes_phase) {
+            if (fsm_templates && seqs[i].fsm.enabled && !seqs[i].codes_phase) {
                 seqs[i].fsm.apply_mask(lc);
             }
 
@@ -253,7 +268,7 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
     std::vector<std::string> results(N);
     for (int i = 0; i < N; i++) {
         results[i] = bpe_decode(*bpe, seqs[i].gen_tokens);
-        fprintf(stderr, "[LM-Phase1 Batch%d] seed=%u, %zu tokens\n", i, base_seed + i, seqs[i].gen_tokens.size());
+        fprintf(stderr, "[LM-Phase1 Batch%d] seed=%u, %zu tokens\n", i, seeds[i], seqs[i].gen_tokens.size());
     }
     return results;
 }
@@ -261,23 +276,26 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                m
 // Batched Phase 2: N sequences with potentially different prompts.
 // aces.size() == N: each element gets its own lyrics/metadata.
 // aces.size() == 1: single prompt replicated for all N (prefill once, copy KV).
-// Returns N code strings. Seeds = base_seed + 0, 1, ..., N-1.
+// Returns N code strings. Each sequence uses the corresponding explicit seed.
 static std::vector<std::string> run_phase2_batch(Qwen3LM *                      m,
                                                  BPETokenizer &                 bpe,
                                                  const std::vector<AcePrompt> & aces,
                                                  float                          temperature,
                                                  float                          top_p,
                                                  int                            top_k,
-                                                 uint32_t                       base_seed,
-                                                 int                            N,
+                                                 const std::vector<uint32_t> &  seeds,
                                                  float                          cfg_scale,
                                                  const char *                   negative_prompt,
                                                  bool                           use_batch_cfg,
+                                                 bool                           shared_prompt,
                                                  bool (*cancel)(void *),
                                                  void * cancel_data) {
-    int  V             = m->cfg.vocab_size;
-    bool use_cfg       = cfg_scale > 1.0f;
-    bool shared_prompt = ((int) aces.size() == 1);
+    int N = (int) aces.size();
+    if (N < 1 || (int) seeds.size() != N) {
+        return {};
+    }
+    int  V       = m->cfg.vocab_size;
+    bool use_cfg = cfg_scale > 1.0f;
 
     // Build per-element prompts
     std::vector<std::vector<int>> prompts(N), unconds(N);
@@ -297,8 +315,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             max_tokens = mt;
         }
     }
-    fprintf(stderr, "[LM-Phase2] max_tokens: %d, CFG: %.2f, seeds: %u..%u\n", max_tokens, cfg_scale, base_seed,
-            base_seed + N - 1);
+    fprintf(stderr, "[LM-Phase2] max_tokens: %d, CFG: %.2f, N=%d\n", max_tokens, cfg_scale, N);
 
     // Reset all KV sets: cond [0..N-1], uncond [N..2N-1]
     for (int i = 0; i < N; i++) {
@@ -359,7 +376,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
 
     // Sample first token from per-element prefill logits (N different seeds)
     for (int i = 0; i < N; i++) {
-        seqs[i].rng.seed(base_seed + i);
+        seqs[i].rng.seed(seeds[i]);
         seqs[i].done = false;
 
         std::vector<float> lg(prefill_logits_vec[i]);  // copy
@@ -533,7 +550,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
     std::vector<std::string> results(N);
     for (int i = 0; i < N; i++) {
         results[i] = codes_to_string(seqs[i].audio_codes);
-        fprintf(stderr, "[LM-Phase2 Batch%d] seed=%u, %zu codes\n", i, base_seed + i, seqs[i].audio_codes.size());
+        fprintf(stderr, "[LM-Phase2 Batch%d] seed=%u, %zu codes\n", i, seeds[i], seqs[i].audio_codes.size());
     }
     return results;
 }
@@ -580,56 +597,79 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
     return ctx;
 }
 
-int ace_lm_generate(AceLm *            ctx,
-                    const AceRequest * req,
-                    int                lm_batch_size,
-                    AceRequest *       out,
-                    const char *       dump_logits,
-                    const char *       dump_tokens,
-                    bool (*cancel)(void *),
-                    void * cancel_data,
-                    int    mode) {
-    if (!ctx || !req || !out || lm_batch_size < 1) {
+static AcePrompt request_to_prompt(const AceRequest & req) {
+    AcePrompt ace      = {};
+    ace.caption        = req.caption;
+    ace.lyrics         = req.lyrics;
+    ace.duration       = req.duration;
+    ace.bpm            = req.bpm;
+    ace.keyscale       = req.keyscale;
+    ace.timesignature  = req.timesignature;
+    ace.vocal_language = req.vocal_language;
+    return ace;
+}
+
+static bool same_lm_batch_shape(const AceRequest & first, const AceRequest & req, int mode) {
+    AcePrompt a                 = request_to_prompt(first);
+    AcePrompt b                 = request_to_prompt(req);
+    bool      first_has_codes   = !first.audio_codes.empty();
+    bool      req_has_codes     = !req.audio_codes.empty();
+    bool      first_need_lyrics = a.lyrics.empty();
+    bool      req_need_lyrics   = b.lyrics.empty();
+    bool      first_all_meta    = a.bpm > 0 && a.duration > 0 && !a.keyscale.empty() && !a.timesignature.empty();
+    bool      req_all_meta      = b.bpm > 0 && b.duration > 0 && !b.keyscale.empty() && !b.timesignature.empty();
+
+    return first.lm_model == req.lm_model && first.lm_temperature == req.lm_temperature &&
+           first.lm_top_p == req.lm_top_p && first.lm_top_k == req.lm_top_k && first.lm_cfg_scale == req.lm_cfg_scale &&
+           first.lm_negative_prompt == req.lm_negative_prompt && first.use_cot_caption == req.use_cot_caption &&
+           first_has_codes == req_has_codes && first_need_lyrics == req_need_lyrics &&
+           (first_need_lyrics || !first_all_meta) == (req_need_lyrics || !req_all_meta) &&
+           (mode == LM_MODE_INSPIRE || mode == LM_MODE_FORMAT || first.lm_mode == req.lm_mode);
+}
+
+static int ace_lm_generate_impl(AceLm *                         ctx,
+                                const std::vector<AceRequest> & requests,
+                                AceRequest *                    out,
+                                const char *                    dump_logits,
+                                const char *                    dump_tokens,
+                                bool                            shared_input,
+                                bool (*cancel)(void *),
+                                void * cancel_data,
+                                int    mode) {
+    int N = (int) requests.size();
+    if (!ctx || !out || N < 1 || N > ctx->params.max_batch) {
         return -1;
     }
-    if (lm_batch_size > ctx->params.max_batch) {
-        fprintf(stderr, "[Ace-LM] ERROR: lm_batch_size %d > max_batch %d\n", lm_batch_size, ctx->params.max_batch);
-        return -1;
-    }
-    if (req->caption.empty()) {
-        fprintf(stderr, "[Ace-LM] ERROR: caption is empty\n");
-        return -1;
+    for (int i = 0; i < N; i++) {
+        if (requests[i].caption.empty()) {
+            fprintf(stderr, "[Ace-LM] ERROR: caption is empty at batch index %d\n", i);
+            return -1;
+        }
+        if (!same_lm_batch_shape(requests[0], requests[i], mode)) {
+            fprintf(stderr, "[Ace-LM] ERROR: incompatible LM batch item at index %d\n", i);
+            return -1;
+        }
     }
 
-    // Acquire GPU LM from the store. RAII releases it on scope exit.
     Qwen3LM * model = store_require_lm(ctx->store, ctx->lm_key);
     if (!model) {
         fprintf(stderr, "[Ace-LM] ERROR: store_require_lm failed\n");
         return -1;
     }
     ModelHandle lm_guard(ctx->store, model);
-
-    // Runtime flags: safe to set on every require (cache-hit or fresh load).
     if (!ctx->params.use_fa) {
         model->use_flash_attn = false;
     }
     model->clamp_fp16 = ctx->params.clamp_fp16;
-
-    // Fresh load only: allocate the partial LM head for phase2 audio codes.
-    // Contiguous GPU tensor instead of ggml_view_2d on quantized weights.
-    // Cached on the model itself, freed by qw3lm_free when the store evicts.
     if (!model->lm_head_buf) {
         qw3lm_build_partial_head(model, TOKEN_IM_END);
     }
 
-    // CPU-resident tokenizer and FSM template. Owned by the store, never
-    // evicted. FSM must be copied before mutation since the template is shared.
     BPETokenizer * bpe = store_bpe(ctx->store, ctx->params.model_path);
     if (!bpe) {
         fprintf(stderr, "[Ace-LM] ERROR: store_bpe failed\n");
         return -1;
     }
-
     MetadataFSM * fsm_template = nullptr;
     if (ctx->params.use_fsm) {
         fsm_template = store_fsm(ctx->store, ctx->params.model_path, model->cfg.vocab_size);
@@ -639,169 +679,116 @@ int ace_lm_generate(AceLm *            ctx,
         }
     }
 
-    // Local mutable FSM for this call. A copy is mandatory: force_field and
-    // apply_mask mutate state that must not bleed across requests.
-    MetadataFSM local_fsm;
-    if (fsm_template) {
-        local_fsm = *fsm_template;
+    Timer              t_total;
+    const AceRequest & first       = requests[0];
+    float              temperature = first.lm_temperature;
+    float              top_p       = first.lm_top_p;
+    int                top_k       = first.lm_top_k;
+    float              cfg_scale   = first.lm_cfg_scale;
+    const char *       neg_prompt  = first.lm_negative_prompt.c_str();
+
+    std::vector<uint32_t>  lm_seeds(N);
+    std::vector<AcePrompt> base_aces(N);
+    for (int i = 0; i < N; i++) {
+        lm_seeds[i]  = (uint32_t) requests[i].lm_seed;
+        base_aces[i] = request_to_prompt(requests[i]);
     }
 
-    Timer t_total;
-
-    // mt19937 consumes the low 32 bits of lm_seed (resolved by caller).
-    uint32_t seed = (uint32_t) req->lm_seed;
-
-    // Resolve DiT seed (pass through to output for synth pipeline)
-    long long dit_seed = req->seed;
-    if (dit_seed < 0) {
-        std::random_device rd;
-        dit_seed = (int64_t) rd();
-    }
-
-    // Generation params from request
-    float        temperature = req->lm_temperature;
-    float        top_p       = req->lm_top_p;
-    int          top_k       = req->lm_top_k;
-    float        cfg_scale   = req->lm_cfg_scale;
-    const char * neg_prompt  = req->lm_negative_prompt.c_str();
-
-    // Copy request -> AcePrompt (internal LLM struct)
-    AcePrompt ace      = {};
-    ace.caption        = req->caption;
-    ace.lyrics         = req->lyrics;
-    ace.duration       = req->duration;
-    ace.bpm            = req->bpm;
-    ace.keyscale       = req->keyscale;
-    ace.timesignature  = req->timesignature;
-    ace.vocal_language = req->vocal_language;
-
-    bool user_has_codes = !req->audio_codes.empty();
-    bool need_lyrics    = ace.lyrics.empty();
-    bool has_all_metas  = (ace.bpm > 0 && ace.duration > 0 && !ace.keyscale.empty() && !ace.timesignature.empty());
+    bool user_has_codes = !first.audio_codes.empty();
+    bool need_lyrics    = base_aces[0].lyrics.empty();
+    bool has_all_metas  = base_aces[0].bpm > 0 && base_aces[0].duration > 0 && !base_aces[0].keyscale.empty() &&
+                          !base_aces[0].timesignature.empty();
     bool need_fill      = need_lyrics || !has_all_metas;
-    bool skip_codes     = (mode == LM_MODE_INSPIRE || mode == LM_MODE_FORMAT);
-
-    std::vector<int>       prompt;
+    bool skip_codes     = mode == LM_MODE_INSPIRE || mode == LM_MODE_FORMAT;
     std::vector<AcePrompt> aces;
 
-    // ONE path: fill what's missing, then generate codes.
-    // JSON is the instruction. Empty field = "fill it". Filled = "don't touch".
     if (user_has_codes && !skip_codes) {
         fprintf(stderr, "[LM-Generate] audio_codes present, skip LM\n");
+        aces = base_aces;
     } else if (skip_codes || need_fill) {
-        // inspire/format modes always run Phase 1 with their own instruction.
-        // generate mode uses the inspire instruction when lyrics are empty.
-        if (mode == LM_MODE_INSPIRE || (mode == LM_MODE_GENERATE && need_lyrics)) {
-            std::string sys      = std::string("# Instruction\n") + LM_INSPIRE_INSTRUCTION + "\n";
-            std::string user_msg = ace.caption;
-            if (ace.lyrics == "[Instrumental]") {
-                user_msg += "\n\ninstrumental: true";
-            }
-            prompt = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
-        } else if (mode == LM_MODE_FORMAT) {
-            std::string sys      = std::string("# Instruction\n") + LM_FORMAT_INSTRUCTION + "\n";
-            std::string user_msg = "# Caption\n" + ace.caption + "\n\n# Lyric\n" + ace.lyrics;
-            prompt               = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
-        } else {
-            prompt = build_lm_prompt(*bpe, ace);
-        }
-        std::vector<int> uncond;
-
-        // inspire/format always generate lyrics. generate mode: only when lyrics are empty.
-        bool gen_lyrics = need_lyrics || skip_codes;
-
-        // Disable CFG for ANY textual expansion (lyrics OR CoT reasoning),
-        // as CFG distorts text logits and forces premature newlines.
-        float fill_cfg   = (gen_lyrics || req->use_cot_caption) ? 1.0f : cfg_scale;
-        float fill_top_p = top_p;
-        int   fill_top_k = top_k;
-
+        std::vector<std::vector<int>> prompts(N), unconds;
+        bool                          gen_lyrics = need_lyrics || skip_codes;
+        float                         fill_cfg   = (gen_lyrics || first.use_cot_caption) ? 1.0f : cfg_scale;
         if (fill_cfg > 1.0f) {
-            uncond = build_lm_prompt_uncond(*bpe, ace, neg_prompt);
+            unconds.resize(N);
+        }
+        std::vector<MetadataFSM> fsms;
+        if (fsm_template) {
+            fsms.resize(N);
         }
 
-        local_fsm.reset();
-        MetadataFSM * active_fsm = nullptr;
-
-        if (ctx->params.use_fsm) {
-            // FSM constrains CoT metadata (bpm/dur/key/lang/tsig).
-            // CAPTION_VALUE is free-form (only blocks audio codes).
-            // Lyrics after </think> are unconstrained.
-            // Force user-provided values into the KV cache so the LM
-            // generates lyrics and codes conditioned on the right metadata.
-
-            // Caption lock (use_cot_caption=false): skip the caption zone
-            // in CoT, the user-provided caption stays untouched and the LM
-            // sees it via the user prompt block.
-            // Inspire mode regenerates the caption from scratch, so the
-            // lock is ignored there.
-            local_fsm.skip_caption = !req->use_cot_caption && (mode != LM_MODE_INSPIRE);
-
-            if (ace.bpm > 0) {
-                local_fsm.force_field(*bpe, MetadataFSM::BPM_VALUE, std::to_string(ace.bpm));
+        for (int i = 0; i < N; i++) {
+            const AceRequest & req = requests[i];
+            const AcePrompt &  ace = base_aces[i];
+            if (mode == LM_MODE_INSPIRE || (mode == LM_MODE_GENERATE && need_lyrics)) {
+                std::string sys      = std::string("# Instruction\n") + LM_INSPIRE_INSTRUCTION + "\n";
+                std::string user_msg = ace.caption;
+                if (ace.lyrics == "[Instrumental]") {
+                    user_msg += "\n\ninstrumental: true";
+                }
+                prompts[i] = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
+            } else if (mode == LM_MODE_FORMAT) {
+                std::string sys      = std::string("# Instruction\n") + LM_FORMAT_INSTRUCTION + "\n";
+                std::string user_msg = "# Caption\n" + ace.caption + "\n\n# Lyric\n" + ace.lyrics;
+                prompts[i]           = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
+            } else {
+                prompts[i] = build_lm_prompt(*bpe, ace);
             }
-            if (ace.duration > 0) {
-                local_fsm.force_field(*bpe, MetadataFSM::DURATION_VALUE, std::to_string((int) ace.duration));
+            if (fill_cfg > 1.0f) {
+                unconds[i] = build_lm_prompt_uncond(*bpe, ace, neg_prompt);
             }
-            if (!ace.keyscale.empty()) {
-                local_fsm.force_field(*bpe, MetadataFSM::KEYSCALE_VALUE, ace.keyscale);
-            }
-            if (!ace.vocal_language.empty() && ace.vocal_language != "unknown") {
-                local_fsm.force_field(*bpe, MetadataFSM::LANGUAGE_VALUE, ace.vocal_language);
-            }
-            if (!ace.timesignature.empty()) {
-                local_fsm.force_field(*bpe, MetadataFSM::TIMESIG_VALUE, ace.timesignature);
-            }
-            active_fsm = &local_fsm;
-        }
-
-        const char * mode_name = skip_codes ? (mode == LM_MODE_INSPIRE ? "inspire" : "format") : "fill";
-        fprintf(stderr, "[LM-Generate] mode=%s lyrics=%s metas=%s | %zu tokens, CFG: %.2f, N=%d\n", mode_name,
-                gen_lyrics ? "generate" : "keep", has_all_metas ? "complete" : "fill gaps", prompt.size(), fill_cfg,
-                lm_batch_size);
-
-        auto phase1_texts = generate_phase1_batch(model, bpe, prompt, 2048, temperature, fill_top_p, fill_top_k, seed,
-                                                  lm_batch_size, active_fsm, gen_lyrics, fill_cfg,
-                                                  uncond.empty() ? nullptr : &uncond, !gen_lyrics, cancel, cancel_data);
-        if (phase1_texts.empty()) {
-            return -1;
-        }
-
-        // inspire mode: empty base so the LM output overwrites everything.
-        // format/generate: gap fill, user metadata preserved.
-        AcePrompt parse_base = (mode == LM_MODE_INSPIRE) ? AcePrompt{} : ace;
-
-        // Inspire ignores the caption lock end to end: sampling regenerates
-        // and parsing accepts. Other modes honor the user flag.
-        bool parse_use_cot_caption = (mode == LM_MODE_INSPIRE) ? true : req->use_cot_caption;
-        parse_phase1_into_aces(phase1_texts, parse_base, aces, seed, mode_name, gen_lyrics, parse_use_cot_caption);
-
-        // Caption preservation: the LM may enrich the user caption, but
-        // never silently delete it. If the merge ended up with an empty
-        // caption while the request had one, restore the request value.
-        if (!ace.caption.empty()) {
-            for (auto & a : aces) {
-                if (a.caption.empty()) {
-                    a.caption = ace.caption;
+            if (fsm_template) {
+                fsms[i] = *fsm_template;
+                fsms[i].reset();
+                fsms[i].skip_caption = !req.use_cot_caption && mode != LM_MODE_INSPIRE;
+                if (ace.bpm > 0) {
+                    fsms[i].force_field(*bpe, MetadataFSM::BPM_VALUE, std::to_string(ace.bpm));
+                }
+                if (ace.duration > 0) {
+                    fsms[i].force_field(*bpe, MetadataFSM::DURATION_VALUE, std::to_string((int) ace.duration));
+                }
+                if (!ace.keyscale.empty()) {
+                    fsms[i].force_field(*bpe, MetadataFSM::KEYSCALE_VALUE, ace.keyscale);
+                }
+                if (!ace.vocal_language.empty() && ace.vocal_language != "unknown") {
+                    fsms[i].force_field(*bpe, MetadataFSM::LANGUAGE_VALUE, ace.vocal_language);
+                }
+                if (!ace.timesignature.empty()) {
+                    fsms[i].force_field(*bpe, MetadataFSM::TIMESIG_VALUE, ace.timesignature);
                 }
             }
         }
 
-        int n_kv_reset = (fill_cfg > 1.0f) ? 2 * lm_batch_size : lm_batch_size;
+        const char * mode_name    = skip_codes ? (mode == LM_MODE_INSPIRE ? "inspire" : "format") : "fill";
+        auto         phase1_texts = generate_phase1_batch(
+            model, bpe, prompts, 2048, temperature, top_p, top_k, lm_seeds, fsm_template ? &fsms : nullptr, gen_lyrics,
+            fill_cfg, unconds.empty() ? nullptr : &unconds, !gen_lyrics, shared_input, cancel, cancel_data);
+        if ((int) phase1_texts.size() != N) {
+            return -1;
+        }
+        aces.resize(N);
+        for (int i = 0; i < N; i++) {
+            AcePrompt                parse_base = mode == LM_MODE_INSPIRE ? AcePrompt{} : base_aces[i];
+            std::vector<std::string> one_text{ phase1_texts[i] };
+            std::vector<AcePrompt>   one_ace;
+            bool                     parse_cot = mode == LM_MODE_INSPIRE ? true : requests[i].use_cot_caption;
+            parse_phase1_into_aces(one_text, parse_base, one_ace, lm_seeds[i], mode_name, gen_lyrics, parse_cot);
+            aces[i] = one_ace[0];
+            if (aces[i].caption.empty()) {
+                aces[i].caption = base_aces[i].caption;
+            }
+        }
+        int n_kv_reset = fill_cfg > 1.0f ? 2 * N : N;
         for (int i = 0; i < n_kv_reset; i++) {
             qw3lm_reset_kv(model, i);
         }
+    } else {
+        aces = base_aces;
     }
 
-    if (aces.empty()) {
-        aces = { ace };
-    }
-
-    // Debug: dump tokens/logits
     if (!user_has_codes && (dump_logits || dump_tokens)) {
         std::string cot        = build_cot_yaml(aces[0]);
         auto        dbg_prompt = build_lm_prompt_with_cot(*bpe, aces[0], cot);
-
         if (dump_tokens) {
             FILE * f = fopen(dump_tokens, "w");
             if (f) {
@@ -810,7 +797,6 @@ int ace_lm_generate(AceLm *            ctx,
                 }
                 fprintf(f, "\n");
                 fclose(f);
-                fprintf(stderr, "[LM-Debug] Tokens -> %s (%zu)\n", dump_tokens, dbg_prompt.size());
             }
         }
         if (dump_logits) {
@@ -820,57 +806,84 @@ int ace_lm_generate(AceLm *            ctx,
             if (f) {
                 fwrite(dbg_logits.data(), sizeof(float), model->cfg.vocab_size, f);
                 fclose(f);
-                fprintf(stderr, "[LM-Debug] Logits -> %s (%d floats, argmax=%d)\n", dump_logits, model->cfg.vocab_size,
-                        (int) (std::max_element(dbg_logits.begin(), dbg_logits.end()) - dbg_logits.begin()));
             }
             qw3lm_reset_kv(model, 0);
         }
     }
 
-    // Phase 2: generate audio codes (skip for inspire/format modes)
-    std::vector<std::string> batch_codes(lm_batch_size);
+    std::vector<std::string> batch_codes(N);
     if (skip_codes) {
         fprintf(stderr, "[LM-Generate] %s mode, no audio code generation\n",
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
-        batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seed, lm_batch_size, cfg_scale,
-                                       neg_prompt, ctx->params.use_batch_cfg, cancel, cancel_data);
-        if (batch_codes.empty()) {
+        batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, lm_seeds, cfg_scale, neg_prompt,
+                                       ctx->params.use_batch_cfg, shared_input && !need_fill, cancel, cancel_data);
+        if ((int) batch_codes.size() != N) {
             return -1;
         }
-    } else {
-        fprintf(stderr, "[LM-Generate] User audio_codes present, no code generation\n");
     }
 
-    // Write N output requests
-    for (int b = 0; b < lm_batch_size; b++) {
-        out[b]                = *req;
-        const AcePrompt & a   = aces[b < (int) aces.size() ? b : 0];
-        out[b].caption        = a.caption;
-        out[b].lyrics         = a.lyrics;
-        out[b].bpm            = a.bpm;
-        out[b].duration       = a.duration;
-        out[b].keyscale       = a.keyscale;
-        out[b].timesignature  = a.timesignature;
-        out[b].vocal_language = a.vocal_language;
-        if (!batch_codes[b].empty()) {
-            out[b].audio_codes = batch_codes[b];
+    for (int i = 0; i < N; i++) {
+        out[i]                = requests[i];
+        out[i].caption        = aces[i].caption;
+        out[i].lyrics         = aces[i].lyrics;
+        out[i].bpm            = aces[i].bpm;
+        out[i].duration       = aces[i].duration;
+        out[i].keyscale       = aces[i].keyscale;
+        out[i].timesignature  = aces[i].timesignature;
+        out[i].vocal_language = aces[i].vocal_language;
+        if (!batch_codes[i].empty()) {
+            out[i].audio_codes = batch_codes[i];
         }
-        out[b].seed          = dit_seed + b;
-        out[b].lm_seed       = req->lm_seed + b;
-        out[b].lm_batch_size = 1;  // each output is a standalone enriched request
-
-        // Backend-driven flag: report what was actually applied. Inspire
-        // always regenerates the caption regardless of the input lock,
-        // so the response reflects the effective state and the UI toggle
-        // updates itself to match reality.
+        out[i].lm_batch_size = 1;
         if (mode == LM_MODE_INSPIRE) {
-            out[b].use_cot_caption = true;
+            out[i].use_cot_caption = true;
         }
     }
-
-    fprintf(stderr, "[Ace-LM] Total %.0fms | seed=%lld\n", t_total.ms(), dit_seed);
+    fprintf(stderr, "[Ace-LM] Total %.0fms | heterogeneous=%s N=%d\n", t_total.ms(), shared_input ? "no" : "yes", N);
     return 0;
+}
+
+int ace_lm_generate(AceLm *            ctx,
+                    const AceRequest * req,
+                    int                lm_batch_size,
+                    AceRequest *       out,
+                    const char *       dump_logits,
+                    const char *       dump_tokens,
+                    bool (*cancel)(void *),
+                    void * cancel_data,
+                    int    mode) {
+    if (!req || lm_batch_size < 1) {
+        return -1;
+    }
+    AceRequest base = *req;
+    request_resolve_lm_seed(&base);
+    request_resolve_seed(&base);
+    std::vector<AceRequest> expanded(lm_batch_size, base);
+    for (int i = 0; i < lm_batch_size; i++) {
+        expanded[i].lm_seed = base.lm_seed + i;
+        expanded[i].seed    = base.seed + i;
+    }
+    return ace_lm_generate_impl(ctx, expanded, out, dump_logits, dump_tokens, true, cancel, cancel_data, mode);
+}
+
+int ace_lm_generate_batch(AceLm *            ctx,
+                          const AceRequest * requests,
+                          int                request_count,
+                          AceRequest *       out,
+                          bool (*cancel)(void *),
+                          void * cancel_data,
+                          int    mode) {
+    if (!requests || request_count < 1) {
+        return -1;
+    }
+    std::vector<AceRequest> batch(requests, requests + request_count);
+    for (auto & req : batch) {
+        request_resolve_lm_seed(&req);
+        request_resolve_seed(&req);
+        req.lm_batch_size = 1;
+    }
+    return ace_lm_generate_impl(ctx, batch, out, NULL, NULL, false, cancel, cancel_data, mode);
 }
 
 void ace_lm_free(AceLm * ctx) {

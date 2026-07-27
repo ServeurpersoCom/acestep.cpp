@@ -43,6 +43,18 @@ int ace_lm_generate(AceLm *            ctx,
                     void * cancel_data     = nullptr,
                     int    mode            = LM_MODE_GENERATE);
 
+// Enrich N independent requests in one LM batch. Unlike lm_batch_size on
+// ace_lm_generate(), each input may carry a different caption, lyrics,
+// metadata, duration and seed. Model and sampling configuration must be
+// compatible across the batch. out[request_count] is allocated by caller.
+int ace_lm_generate_batch(AceLm *            ctx,
+                          const AceRequest * requests,
+                          int                request_count,
+                          AceRequest *       out,
+                          bool (*cancel)(void *) = nullptr,
+                          void * cancel_data     = nullptr,
+                          int    mode            = LM_MODE_GENERATE);
+
 void ace_lm_free(AceLm * ctx);
 
 // Read the LM ModelKey the context builds for store_require_lm. Used by
