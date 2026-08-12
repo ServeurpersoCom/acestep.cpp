@@ -821,10 +821,10 @@ in one GPU pass.
 HTTP server exposing the same pipelines as `ace-lm`, `ace-synth`, and
 `ace-understand`. One binary, one port.
 
-POST /lm, POST /synth, POST /understand and POST /vae are all **asynchronous**: they
-return a job ID immediately, push the request to a FIFO queue, and the single
-worker thread processes jobs in order. Clients poll GET /job?id=N for status
-and fetch results with GET /job?id=N&result=1.
+POST /lm, POST /synth, POST /understand, POST /score and POST /vae are all
+**asynchronous**: they return a job ID immediately, push the request to a FIFO
+queue, and the single worker thread processes jobs in order. Clients poll
+GET /job?id=N for status and fetch results with GET /job?id=N&result=1.
 Cancel: POST /job?id=N&cancel=1 stops a specific job.
 
 `--models` scans a directory for GGUF files and classifies each by its
@@ -846,6 +846,7 @@ quantisation raise both columns.
 | LM | Qwen3 LM + KV cache | ~2-3 GB | ~2-3 GB |
 | Synth | Qwen3 text-enc, cond-enc, DiT, VAE enc, VAE dec, FSQ tok/detok | ~2-3 GB (DiT or VAE tiles) | ~3-4 GB + tiles |
 | Understand | Qwen3 LM, VAE enc, FSQ tok | ~2-3 GB (LM or VAE tiles) | ~2-3 GB + tiles |
+| Score | Qwen3 text-enc, cond-enc, DiT | ~2-3 GB (DiT) | ~2-3 GB |
 
 VAE tile activations scale with `--vae-chunk` and `--vae-overlap`. Bigger
 tiles process audio faster with fewer seams but cost more transient VRAM
@@ -913,11 +914,18 @@ POST /understand                Submit understand, returns job ID
   body: multipart/form-data (audio or src_latents required, optional request JSON)
   response: {"id":"3"}
 
+POST /score                     Submit generated-latent lyric scoring, returns job ID
+  body: multipart/form-data
+        'request': AceRequest or [AceRequest, ...]
+        'pred_latents': raw f32 [batch, T, 64] ('latent' alias accepted)
+  batched requests must share duration, inference steps, model and adapter
+  response: {"id":"4"}
+
 POST /vae                       Submit VAE encode or decode, returns job ID
   body: multipart/form-data (exactly one of 'audio' or 'src_latents')
         'audio' -> encode path (latents out)
         'src_latents' -> decode path (audio out)
-  response: {"id":"4"}
+  response: {"id":"5"}
 
 GET  /job?id=N                  Poll job status
   response: {"status":"running|done|failed|cancelled"}
@@ -926,6 +934,7 @@ GET  /job?id=N&result=1         Fetch job result
   lm:         application/json [AceRequest, ...]
   synth:      multipart/mixed (one audio part + one latent part per track, paired)
   understand: multipart/mixed (one json part + one latent part for the source)
+  score:      application/json [{"lm_score":...,"dit_score":...,"lm":{...},"dit":{...}}, ...]
   vae encode: application/octet-stream (raw .vae bytes, no audio echo: client already has it)
   vae decode: audio/mpeg or audio/wav (raw, no latent echo: client already has it)
 
@@ -944,10 +953,13 @@ GET  /logs                      SSE stream of server stderr
 GET  /                          Embedded WebUI (gzipped HTML)
 ```
 
-Latent payload format (src_latents, ref_latents, synth/understand response latent parts, /vae encode response body):
+Latent payload format (src_latents, ref_latents, pred_latents, synth/understand
+response latent parts, /vae encode response body):
 raw f32 little-endian, flat [T, 64], no header. T = size / 256. Same byte
 layout neural-codec writes as `.vae` files. Hard cap T <= 15000 frames
-(matches the silence_latent buffer baked into the DiT GGUF), 413 over.
+(matches the silence_latent buffer baked into the DiT GGUF), 413 over. For a
+batched score request, concatenate one equal-length `[T, 64]` tensor per JSON
+request in the same order.
 
 `lm_model`, `synth_model`, `adapter`, `adapter_scale` fields in the JSON body
 select which model and adapter to load. `lm_mode` picks the LM instruction

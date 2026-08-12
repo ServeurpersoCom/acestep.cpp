@@ -112,6 +112,12 @@ struct SynthState {
     std::vector<int>                per_enc_S_nc;
     bool                            need_enc_switch;
 
+    // Pure lyric token IDs and their row offset in the packed condition
+    // sequence (per batch). The prompt header and trailing end-of-text tokens
+    // are excluded so /score measures lyrics rather than metadata/caption.
+    std::vector<std::vector<int>> per_lyric_ids;
+    std::vector<int>              per_lyric_start;
+
     // stacked encoder hidden states
     int                max_enc_S;
     std::vector<float> enc_hidden;

@@ -57,6 +57,7 @@
 
 #include <cstddef>
 #include <string>
+#include <vector>
 
 struct ModelStore;
 
@@ -87,13 +88,19 @@ enum EvictPolicy {
     EVICT_NEVER,   // --keep-loaded: never evict, accumulate
 };
 
-// DiT metadata cached on the CPU: needed by text encoding and T resolution
-// before the DiT itself is loaded on the GPU.
+struct DiTScoreHeadConfig {
+    int layer;
+    int head;
+};
+
+// DiT metadata cached on the CPU: needed by text encoding, T resolution, and
+// model-specific lyric scoring before the DiT itself is loaded on the GPU.
 struct DiTMeta {
-    DiTGGMLConfig      cfg;
-    std::vector<float> silence_full;   // [15000, 64] f32, from silence_latent tensor
-    std::vector<float> null_cond_cpu;  // [hidden_size] f32, empty when the model has none
-    bool               is_turbo;
+    DiTGGMLConfig                   cfg;
+    std::vector<float>              silence_full;   // [15000, 64] f32, from silence_latent tensor
+    std::vector<float>              null_cond_cpu;  // [hidden_size] f32, empty when the model has none
+    std::vector<DiTScoreHeadConfig> lyric_alignment_heads;
+    bool                            is_turbo;
 };
 
 ModelStore * store_create(EvictPolicy policy);
