@@ -508,6 +508,7 @@ their own, but without caption the LLM has nothing to work from.
     "output_format":        "mp3",
     "peak_clip":            10,
     "mp3_bitrate":          128,
+    "return_lyric_timing":  false,
     "synth_model":          "",
     "lm_model":             "",
     "adapter":              "",
@@ -527,6 +528,15 @@ property of the request, not of the command line.
 + codes), `"inspire"` (short query to metadata + lyrics, no codes),
 `"format"` (caption + lyrics to metadata + lyrics, no codes). `output_format`
 picks the audio encoder: `"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`.
+
+`return_lyric_timing` asks ace-synth or `/synth` to run one extra DiT
+alignment forward after generation and emit compact lyric timestamps derived
+from cross-attention. It is disabled by default because it adds work and
+requires the manual attention path for the alignment pass. The timing follows
+the model's intended lyric attention; it is not an ASR transcript of the final
+waveform, so skipped or changed lyrics can still differ from what is heard.
+In batched synth responses, each requested track gets its own `lyric_timing`
+part immediately after that track's latent part.
 
 ### Text conditioning (ace-lm + ace-synth)
 
@@ -782,6 +792,9 @@ Debug:
   --no-batch-cfg          Split DiT CFG into two separate forwards
   --clamp-fp16            Clamp hidden states to FP16 range
   --dump <dir>            Dump intermediate tensors
+
+Request JSON:
+  return_lyric_timing     Write <output>.lyric-timing.json sidecar when true
 ```
 
 Model selection comes from the first request JSON. `synth_model` picks
@@ -924,7 +937,8 @@ GET  /job?id=N                  Poll job status
 
 GET  /job?id=N&result=1         Fetch job result
   lm:         application/json [AceRequest, ...]
-  synth:      multipart/mixed (one audio part + one latent part per track, paired)
+  synth:      multipart/mixed (one audio part + one latent part per track, paired;
+               optional lyric_timing JSON part per requested track)
   understand: multipart/mixed (one json part + one latent part for the source)
   vae encode: application/octet-stream (raw .vae bytes, no audio echo: client already has it)
   vae decode: audio/mpeg or audio/wav (raw, no latent echo: client already has it)

@@ -32,6 +32,7 @@ export interface AceRequest {
 	latent_shift?: number;
 	latent_rescale?: number;
 	custom_timesteps?: string;
+	return_lyric_timing?: boolean;
 	task_type?: string;
 	track?: string;
 	solver?: string;
@@ -85,6 +86,10 @@ export interface Song {
 	// present, the client uploads them instead of audio on subsequent jobs
 	// that reuse this song as src or ref, skipping a VAE encode each time.
 	latents?: Blob;
+	// Optional DiT lyric-attention timing JSON emitted by /synth when
+	// return_lyric_timing is enabled. Stored as raw JSON so it can be
+	// downloaded without reformatting and parsed on demand for subtitles.
+	lyric_timing?: string;
 	// 4096 normalized peaks [0..1] cached after the first decode, so F5
 	// and re-mounts skip decodeAudioData entirely. Downsampled at draw
 	// time to whatever canvas width is on screen.

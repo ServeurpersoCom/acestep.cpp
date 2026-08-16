@@ -61,6 +61,7 @@ void request_init(AceRequest * r) {
     r->vae                  = "";
     r->peak_clip            = 10;
     r->mp3_bitrate          = 128;
+    r->return_lyric_timing  = false;
 }
 
 // helper: get yyjson string as std::string
@@ -214,6 +215,14 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
         } else if (yyjson_is_str(v)) {
             const char * s     = yyjson_get_str(v);
             r->use_cot_caption = (strcmp(s, "true") == 0 || strcmp(s, "1") == 0);
+        }
+    }
+    if ((v = yyjson_obj_get(obj, "return_lyric_timing"))) {
+        if (yyjson_is_bool(v)) {
+            r->return_lyric_timing = yyjson_get_bool(v);
+        } else if (yyjson_is_str(v)) {
+            const char * s         = yyjson_get_str(v);
+            r->return_lyric_timing = (strcmp(s, "true") == 0 || strcmp(s, "1") == 0);
         }
     }
 
@@ -453,6 +462,9 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->mp3_bitrate != def.mp3_bitrate) {
         yyjson_mut_obj_add_int(doc, root, "mp3_bitrate", r->mp3_bitrate);
     }
+    if (all || r->return_lyric_timing != def.return_lyric_timing) {
+        yyjson_mut_obj_add_bool(doc, root, "return_lyric_timing", r->return_lyric_timing);
+    }
     if (all || r->synth_model != def.synth_model) {
         yyjson_mut_obj_add_str(doc, root, "synth_model", r->synth_model.c_str());
     }
@@ -542,6 +554,9 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (r->output_format == "mp3" && r->mp3_bitrate != 128) {
         fprintf(f, "[Request] mp3_bitrate: %d kbps\n", r->mp3_bitrate);
+    }
+    if (r->return_lyric_timing) {
+        fprintf(f, "[Request] return_lyric_timing: true\n");
     }
     if (!r->synth_model.empty()) {
         fprintf(f, "[Request] synth_model: %s\n", r->synth_model.c_str());

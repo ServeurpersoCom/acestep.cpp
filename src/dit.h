@@ -116,6 +116,7 @@ struct DiTGGML {
     ggml_backend_t       cpu_backend;
     ggml_backend_sched_t sched;
     bool                 use_flash_attn;
+    bool                 capture_lyric_attn;
 
     // Weight storage
     WeightCtx wctx;
@@ -264,6 +265,7 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->cpu_backend    = bp.cpu_backend;
     m->sched          = backend_sched_new(bp, 8192);
     m->use_flash_attn = bp.has_gpu;
+    m->capture_lyric_attn = false;
 
     GGUFModel gf;
     if (!gf_load(&gf, gguf_path)) {

@@ -64,9 +64,56 @@ static void debug_dump_2d(const DebugDumper * d, const char * name, const float 
     debug_dump(d, name, data, shape, 2);
 }
 
+// Convenience: dump 3D tensor [dim0, dim1, dim2]
+static void debug_dump_3d(const DebugDumper * d, const char * name, const float * data, int dim0, int dim1, int dim2) {
+    int shape[3] = { dim0, dim1, dim2 };
+    debug_dump(d, name, data, shape, 3);
+}
+
 // Convenience: dump 1D tensor [n]
 static void debug_dump_1d(const DebugDumper * d, const char * name, const float * data, int n) {
     debug_dump(d, name, data, &n, 1);
+}
+
+// Dump i32 tensor to binary file.
+// Format: [ndims:i32] [shape:i32 x ndims] [data:i32 x numel]
+static void debug_dump_i32(const DebugDumper * d, const char * name, const int * data, const int * shape, int ndims) {
+    if (!d->enabled) {
+        return;
+    }
+
+    char path[1024];
+    snprintf(path, sizeof(path), "%s/%s.bin", d->dir, name);
+
+    int numel = 1;
+    for (int i = 0; i < ndims; i++) {
+        numel *= shape[i];
+    }
+
+    FILE * f = fopen(path, "wb");
+    if (!f) {
+        fprintf(stderr, "[Debug] Cannot write %s\n", path);
+        return;
+    }
+
+    fwrite(&ndims, sizeof(int32_t), 1, f);
+    fwrite(shape, sizeof(int32_t), ndims, f);
+    fwrite(data, sizeof(int32_t), numel, f);
+    fclose(f);
+
+    fprintf(stderr, "[Debug] %s: [", name);
+    for (int i = 0; i < ndims; i++) {
+        fprintf(stderr, "%s%d", i ? ", " : "", shape[i]);
+    }
+    fprintf(stderr, "] first4:");
+    for (int i = 0; i < 4 && i < numel; i++) {
+        fprintf(stderr, " %d", data[i]);
+    }
+    fprintf(stderr, "\n");
+}
+
+static void debug_dump_i32_1d(const DebugDumper * d, const char * name, const int * data, int n) {
+    debug_dump_i32(d, name, data, &n, 1);
 }
 
 // Load a debug dump, returns data and fills shape/ndims

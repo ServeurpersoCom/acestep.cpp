@@ -121,6 +121,14 @@ static AceSynthJob * alloc_job(AceSynth * ctx, const AceRequest * reqs, int batc
     s.is_lego_region  = false;
     s.have_cover      = false;
     s.T_cover         = 0;
+    s.return_lyric_timing.assign(batch_n, false);
+    s.lyric_token_ids.resize(batch_n);
+    s.lyric_start_idx.assign(batch_n, 0);
+    s.lyric_end_idx.assign(batch_n, 0);
+    s.lyric_timing_heads.resize(batch_n);
+    s.lyric_timing_head_count.assign(batch_n, 0);
+    s.lyric_timing_frame_count.assign(batch_n, 0);
+    s.lyric_timing_json.resize(batch_n);
     debug_init(&s.dbg, ctx->params.dump_dir);
     return job;
 }
@@ -663,6 +671,14 @@ const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, i
     const SynthState & s = job->state;
     *T_out               = s.T;
     return s.output.data() + (size_t) track_idx * s.T * s.Oc;
+}
+
+const char * ace_synth_job_get_lyric_timing_json(const AceSynthJob * job, int track_idx) {
+    if (!job || track_idx < 0 || track_idx >= (int) job->state.lyric_timing_json.size() ||
+        job->state.lyric_timing_json[track_idx].empty()) {
+        return nullptr;
+    }
+    return job->state.lyric_timing_json[track_idx].c_str();
 }
 
 // Phase 2: latent splice (for repaint/lego) + VAE decode for every batch item.
