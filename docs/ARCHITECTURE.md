@@ -526,7 +526,7 @@ property of the request, not of the command line.
 `lm_mode` picks the LM instruction: `"generate"` (full: metadata + lyrics
 + codes), `"inspire"` (short query to metadata + lyrics, no codes),
 `"format"` (caption + lyrics to metadata + lyrics, no codes). `output_format`
-picks the audio encoder: `"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`.
+picks the audio encoder: `"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`, `"flac16"`, `"flac24"`.
 
 ### Text conditioning (ace-lm + ace-synth)
 
@@ -786,7 +786,7 @@ Debug:
 
 Model selection comes from the first request JSON. `synth_model` picks
 the DiT, `adapter` picks an adapter from `--adapters`, `output_format`
-picks the output encoder (mp3, wav16, wav24, wav32). Models are loaded
+picks the output encoder (mp3, wav16, wav24, wav32, flac16, flac24). Models are loaded
 once and reused across all requests.
 
 When `adapter` is set, deltas are merged into the DiT projection weights
@@ -952,7 +952,7 @@ layout neural-codec writes as `.vae` files. Hard cap T <= 15000 frames
 `lm_model`, `synth_model`, `adapter`, `adapter_scale` fields in the JSON body
 select which model and adapter to load. `lm_mode` picks the LM instruction
 (`"generate"`, `"inspire"`, `"format"`); `output_format` picks the audio
-encoder for `/synth` (`"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`).
+encoder for `/synth` (`"mp3"`, `"wav16"`, `"wav24"`, `"wav32"`, `"flac16"`, `"flac24"`).
 `synth_batch_size` duplicates a request for multiple DiT variations
 (clamped to 9). Error responses are JSON: `{"error":"message"}` with 400,
 500, 501, or 503 status.
@@ -1081,9 +1081,9 @@ from output extension).
 Usage: ./mp3-codec -i <input> -o <output> [options]
 
   -i <path>     Input file (WAV or MP3)
-  -o <path>     Output file (WAV or MP3)
+  -o <path>     Output file (WAV, FLAC or MP3)
   -b <kbps>     Bitrate for MP3 encoding (default: 128)
-  --format <fmt>  WAV format: wav16, wav24, wav32 (default: wav16)
+  --format <fmt>  WAV format: wav16, wav24, wav32; FLAC: flac16, flac24 (default: wav16)
 
 Mode is auto-detected from output extension.
 
@@ -1092,6 +1092,7 @@ Examples:
   ./mp3-codec -i song.wav -o song.mp3 -b 192
   ./mp3-codec -i song.mp3 -o song.wav
   ./mp3-codec -i song.mp3 -o song.wav --format wav32
+  ./mp3-codec -i song.wav -o song.flac --format flac24
 ```
 
 ## ace-understand reference

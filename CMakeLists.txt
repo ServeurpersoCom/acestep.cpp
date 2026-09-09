@@ -109,6 +109,39 @@ else()
     target_compile_options(yyjson PRIVATE -w)
 endif()
 
+# libFLAC (BSD, reference FLAC encoder/decoder, vendored from xiph/flac 1.5.0).
+# Intrinsics/assembly (FLAC__NO_ASM) and Ogg support are disabled; the C core
+# is fully portable. win_utf8_io.c is only needed on Windows (compat.h maps
+# flac_fopen & co to UTF-8 aware variants there).
+set(FLAC_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/vendor/flac/src")
+add_library(flac STATIC
+    ${FLAC_SRC_DIR}/bitmath.c
+    ${FLAC_SRC_DIR}/bitreader.c
+    ${FLAC_SRC_DIR}/bitwriter.c
+    ${FLAC_SRC_DIR}/cpu.c
+    ${FLAC_SRC_DIR}/crc.c
+    ${FLAC_SRC_DIR}/fixed.c
+    ${FLAC_SRC_DIR}/float.c
+    ${FLAC_SRC_DIR}/format.c
+    ${FLAC_SRC_DIR}/lpc.c
+    ${FLAC_SRC_DIR}/md5.c
+    ${FLAC_SRC_DIR}/memory.c
+    ${FLAC_SRC_DIR}/metadata_iterators.c
+    ${FLAC_SRC_DIR}/metadata_object.c
+    ${FLAC_SRC_DIR}/stream_decoder.c
+    ${FLAC_SRC_DIR}/stream_encoder.c
+    ${FLAC_SRC_DIR}/stream_encoder_framing.c
+    ${FLAC_SRC_DIR}/window.c
+    $<$<BOOL:${WIN32}>:${FLAC_SRC_DIR}/win_utf8_io.c>
+)
+target_include_directories(flac PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/vendor/flac/include)
+target_compile_definitions(flac PRIVATE FLAC__NO_ASM FLAC__HAS_OGG=0 PACKAGE_VERSION="1.5.0" PUBLIC FLAC__NO_DLL)
+if(MSVC)
+    target_compile_options(flac PRIVATE /W3 /fp:fast)
+else()
+    target_compile_options(flac PRIVATE -w -fPIC)
+endif()
+
 # Core library (shared between binaries)
 add_library(acestep-core STATIC
     src/request.cpp
@@ -118,7 +151,7 @@ add_library(acestep-core STATIC
     src/pipeline-synth-ops.cpp
     src/pipeline-understand.cpp
 )
-target_link_libraries(acestep-core PUBLIC yyjson)
+target_link_libraries(acestep-core PUBLIC yyjson flac)
 link_ggml_backends(acestep-core)
 
 # ace-synth: full pipeline (text-enc + cond + dit + vae + wav)
@@ -161,6 +194,7 @@ link_ggml_backends(quantize)
 # neural-codec: Oobleck VAE neural audio codec (encode/decode WAV <-> latent)
 add_executable(neural-codec tools/neural-codec.cpp)
 link_ggml_backends(neural-codec)
+target_link_libraries(neural-codec PRIVATE flac)
 
 # mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
 # The mp3/ headers are header-only and usable by ace-synth too via #include "mp3/mp3enc.h"
@@ -178,6 +212,6 @@ else()
                           -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
     target_link_libraries(mp3-codec PRIVATE m)
 endif()
-target_link_libraries(mp3-codec PRIVATE Threads::Threads)
+target_link_libraries(mp3-codec PRIVATE Threads::Threads flac)
 
 add_subdirectory(tests)

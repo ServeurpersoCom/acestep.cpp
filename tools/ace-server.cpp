@@ -710,8 +710,9 @@ static void synth_worker(std::shared_ptr<Job>    job,
                          int                     ref_len,
                          std::vector<float>      ref_latents,
                          int                     ref_T_latent,
-                         bool                    output_wav,
+                         AudioFormat             out_fmt,
                          WavFormat               wav_fmt,
+                         int                     flac_bits,
                          int                     peak_clip) {
     // Generate every request in one DiT batch. synth_batch_size expands each
     // request into per-seed variants. Total clamped to DiT max 9.
@@ -864,18 +865,20 @@ static void synth_worker(std::shared_ptr<Job>    job,
     const int total_tracks = total_alloc;
 
     // encode each track (peak normalize + encode)
-    const char * mime = output_wav ? "audio/wav" : "audio/mpeg";
+    const char * mime = out_fmt == FMT_WAV ? "audio/wav" : (out_fmt == FMT_FLAC ? "audio/flac" : "audio/mpeg");
 
     std::vector<std::string> encoded(total_tracks);
     for (int b = 0; b < total_tracks; b++) {
         if (!audio[b].samples) {
             continue;
         }
-        if (!output_wav || wav_fmt != WAV_F32) {
+        if (out_fmt != FMT_WAV || wav_fmt != WAV_F32) {
             audio_normalize(audio[b].samples, audio[b].n_samples * 2, peak_clip);
         }
-        if (output_wav) {
+        if (out_fmt == FMT_WAV) {
             encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000, wav_fmt);
+        } else if (out_fmt == FMT_FLAC) {
+            encoded[b] = audio_encode_flac(audio[b].samples, audio[b].n_samples, 48000, flac_bits);
         } else {
             encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, groups[0][b].mp3_bitrate,
                                           server_cancel_job, (void *) &job->cancel);
@@ -905,7 +908,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
 //     part "ref_audio":   timbre reference audio (WAV or MP3), optional
 //     part "ref_latents": pre-encoded timbre latents (raw f32, [T*64]), wins over "ref_audio"
 // output: multipart/mixed
-//   one audio part (audio/mpeg or audio/wav per request output_format) and
+//   one audio part (audio/mpeg, audio/wav or audio/flac per request output_format) and
 //   one latent part (application/octet-stream, raw f32 [T*64]) per generated
 //   track, paired in wire order. The latent reproduces its track's audio when
 //   fed back to /vae decode.
@@ -1038,16 +1041,15 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     }
 
     // Output format from AceRequest.output_format. Converts the string to
-    // (output_wav, wav_fmt) using the same parser the CLI uses.
-    bool      output_wav = false;
-    WavFormat wav_fmt    = WAV_S16;
+    // (out_fmt, wav_fmt, flac_bits) using the same parser the CLI uses.
+    AudioFormat out_fmt  = FMT_MP3;
+    WavFormat   wav_fmt  = WAV_S16;
+    int         flac_bits = 16;
     {
-        bool is_mp3 = true;
-        if (!audio_parse_format(ace_reqs[0].output_format.c_str(), is_mp3, wav_fmt)) {
-            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32)");
+        if (!audio_parse_format(ace_reqs[0].output_format.c_str(), out_fmt, wav_fmt, flac_bits)) {
+            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32, flac16, flac24)");
             return;
         }
-        output_wav = !is_mp3;
     }
     int peak_clip = ace_reqs[0].peak_clip;
 
@@ -1056,10 +1058,10 @@ static void handle_synth(const httplib::Request & req, httplib::Response & res) 
     fprintf(stderr, "[Server] Job %s created (%d requests)\n", job->id.c_str(), (int) ace_reqs.size());
 
     work_push([job, reqs = std::move(ace_reqs), src_interleaved, src_len, src_lat = std::move(src_latents),
-               src_T_latent, ref_interleaved, ref_len, ref_lat = std::move(ref_latents), ref_T_latent, output_wav,
-               wav_fmt, peak_clip]() mutable {
+               src_T_latent, ref_interleaved, ref_len, ref_lat = std::move(ref_latents), ref_T_latent, out_fmt,
+               wav_fmt, flac_bits, peak_clip]() mutable {
         synth_worker(job, std::move(reqs), src_interleaved, src_len, std::move(src_lat), src_T_latent, ref_interleaved,
-                     ref_len, std::move(ref_lat), ref_T_latent, output_wav, wav_fmt, peak_clip);
+                     ref_len, std::move(ref_lat), ref_T_latent, out_fmt, wav_fmt, flac_bits, peak_clip);
     });
 
     // return job ID immediately
@@ -1247,8 +1249,9 @@ static void decode_worker(std::shared_ptr<Job> job,
                           AceRequest           ace_req,
                           std::vector<float>   src_latents,
                           int                  src_T_latent,
-                          bool                 output_wav,
+                          AudioFormat          out_fmt,
                           WavFormat            wav_fmt,
+                          int                  flac_bits,
                           int                  peak_clip) {
     if (job->cancel.load()) {
         job->status.store(JobStatus::CANCELLED);
@@ -1295,16 +1298,18 @@ static void decode_worker(std::shared_ptr<Job> job,
         g_loaded_vae.clear();
     }
 
-    // Encode the audio (peak normalize then mp3 or wav). vae_ggml_decode_tiled
+    // Encode the audio (peak normalize then mp3, wav or flac). vae_ggml_decode_tiled
     // writes interleaved stereo, audio_normalize and the encoders consume
     // the same layout the synth path uses.
-    if (!output_wav || wav_fmt != WAV_F32) {
+    if (out_fmt != FMT_WAV || wav_fmt != WAV_F32) {
         audio_normalize(audio_buf.data(), T_audio * 2, peak_clip);
     }
     std::string  encoded;
-    const char * mime = output_wav ? "audio/wav" : "audio/mpeg";
-    if (output_wav) {
+    const char * mime = out_fmt == FMT_WAV ? "audio/wav" : (out_fmt == FMT_FLAC ? "audio/flac" : "audio/mpeg");
+    if (out_fmt == FMT_WAV) {
         encoded = audio_encode_wav(audio_buf.data(), T_audio, 48000, wav_fmt);
+    } else if (out_fmt == FMT_FLAC) {
+        encoded = audio_encode_flac(audio_buf.data(), T_audio, 48000, flac_bits);
     } else {
         encoded = audio_encode_mp3(audio_buf.data(), T_audio, 48000, ace_req.mp3_bitrate, server_cancel_job,
                                    (void *) &job->cancel);
@@ -1408,7 +1413,7 @@ static void encode_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * 
 //                       format and peak_clip on the decode path).
 // returns: JSON {"id":"N"} immediately. Result body is either raw .vae
 // bytes (application/octet-stream, f32 [T*64] time-major, no header) when
-// audio was sent, or audio/mpeg|audio/wav when src_latents was sent. No
+// audio was sent, or audio/mpeg|audio/wav|audio/flac when src_latents was sent. No
 // echo of the uploaded side: the client already holds it.
 static void handle_vae(const httplib::Request & req, httplib::Response & res) {
     if (g_registry.vae.empty()) {
@@ -1495,23 +1500,22 @@ static void handle_vae(const httplib::Request & req, httplib::Response & res) {
     std::vector<float> src_latents(reinterpret_cast<const float *>(file.content.data()),
                                    reinterpret_cast<const float *>(file.content.data()) + (size_t) T * LATENT_CHANNELS);
 
-    bool      output_wav = false;
-    WavFormat wav_fmt    = WAV_S16;
+    AudioFormat out_fmt  = FMT_MP3;
+    WavFormat   wav_fmt  = WAV_S16;
+    int         flac_bits = 16;
     {
-        bool is_mp3 = true;
-        if (!audio_parse_format(ace_req.output_format.c_str(), is_mp3, wav_fmt)) {
-            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32)");
+        if (!audio_parse_format(ace_req.output_format.c_str(), out_fmt, wav_fmt, flac_bits)) {
+            json_error(res, 400, "Invalid output_format (use: mp3, wav16, wav24, wav32, flac16, flac24)");
             return;
         }
-        output_wav = !is_mp3;
     }
     int peak_clip = ace_req.peak_clip;
 
     auto job = job_create();
     fprintf(stderr, "[Server] Job %s created (vae decode, %d latent frames)\n", job->id.c_str(), T);
 
-    work_push([job, ace_req, latents = std::move(src_latents), T, output_wav, wav_fmt, peak_clip]() mutable {
-        decode_worker(job, ace_req, std::move(latents), T, output_wav, wav_fmt, peak_clip);
+    work_push([job, ace_req, latents = std::move(src_latents), T, out_fmt, wav_fmt, flac_bits, peak_clip]() mutable {
+        decode_worker(job, ace_req, std::move(latents), T, out_fmt, wav_fmt, flac_bits, peak_clip);
     });
 
     std::string body = "{\"id\":\"" + job->id + "\"}";

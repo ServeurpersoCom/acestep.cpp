@@ -100,7 +100,7 @@ struct AceRequest {
     // "format" (caption + lyrics -> metadata + lyrics, no codes). Default: generate.
     std::string lm_mode;  // "generate"
 
-    // Audio output format: "mp3", "wav16", "wav24", "wav32". Default: mp3.
+    // Audio output format: "mp3", "wav16", "wav24", "wav32", "flac16", "flac24". Default: mp3.
     std::string output_format;  // "mp3"
 
     // model selection. synth_model, lm_model and vae are resolved through
