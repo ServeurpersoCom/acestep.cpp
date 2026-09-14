@@ -19,7 +19,7 @@ function load(): Saved {
 			return {
 				name: parsed.name || '',
 				volume: parsed.volume ?? 0.5,
-				format: ['mp3', 'wav16', 'wav24', 'wav32'].includes(parsed.format) ? parsed.format : 'mp3',
+				format: ['mp3', 'wav16', 'wav24', 'wav32', 'flac16', 'flac24'].includes(parsed.format) ? parsed.format : 'mp3',
 				dark: parsed.dark ?? true,
 				logsOpen: parsed.logsOpen ?? true,
 				request: parsed.request || { caption: '', use_cot_caption: true }
