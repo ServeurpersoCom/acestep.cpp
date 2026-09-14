@@ -1,3 +1,9 @@
+# test-backend-config: explicit thread count + device selection (#19). Includes
+# backend.h, so it links the ggml backends.
+add_executable(test-backend-config test-backend-config.cpp)
+target_link_libraries(test-backend-config PRIVATE acestep-core)
+link_ggml_backends(test-backend-config)
+
 # test-philox: Philox RNG reference dumper.
 add_executable(test-philox test-philox.cpp)
 target_include_directories(test-philox PRIVATE ${CMAKE_SOURCE_DIR}/src)

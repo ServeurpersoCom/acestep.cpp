@@ -5,6 +5,7 @@
 // All functions use planar stereo float: [L: T samples][R: T samples].
 // Part of acestep.cpp. MIT license.
 
+#include "backend-config.h"
 #include "task-types.h"
 
 #include <algorithm>
@@ -608,13 +609,19 @@ static std::string audio_encode_mp3(const float * audio,
     float duration = (float) enc_T / (float) enc_sr;
     fprintf(stderr, "[MP3] Encoding %.1fs @ %d kbps, %d Hz stereo\n", duration, kbps, enc_sr);
 
-    // thread count: all logical cores. MP3 is ALU-bound with small working set,
-    // hyperthreads help (unlike GGML GEMM which shares SIMD units).
-    // minimum ~2s per chunk so filter warmup at boundaries is negligible.
-    int n_threads = (int) std::thread::hardware_concurrency();
-    if (n_threads < 1) {
-        n_threads = 1;
-    }
+    // thread count: an explicit ace_backend_configure() cap wins -- an embedder
+    // bounding CPU for battery/thermals means the MP3 export too, not just
+    // inference. With no cap, all logical cores: MP3 is ALU-bound with a small
+    // working set, so hyperthreads help here (unlike GGML GEMM, which shares SIMD
+    // units, hence the P-core default in backend.h -- so both the auto default and
+    // the clamp ceiling here are the logical count, not that P-core count). Same
+    // shared clamp as backend_cpu_n_threads(), sourced from the same ace_logical_cpus()
+    // (robust to hardware_concurrency() returning 0 via an Apple sysctl), so an
+    // absurd cap can't spawn that many encoders and auto never collapses to 1; the
+    // length-based max_threads below is a second ceiling regardless. minimum ~2s per
+    // chunk so filter warmup at boundaries is negligible.
+    int logical      = ace_logical_cpus();
+    int n_threads    = ace_resolve_threads(ace_backend_config().n_threads, logical, logical);
     int total_frames = (enc_T + 1151) / 1152;
     int min_frames   = (enc_sr * 2 + 1151) / 1152;  // ~2s worth of frames
     int max_threads  = total_frames / (min_frames > 0 ? min_frames : 1);
