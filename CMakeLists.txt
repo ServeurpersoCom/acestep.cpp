@@ -121,6 +121,19 @@ add_library(acestep-core STATIC
 target_link_libraries(acestep-core PUBLIC yyjson)
 link_ggml_backends(acestep-core)
 
+# ace_fatal() exit(1)s by default; with this ON it throws ace_fatal_error so an
+# embedder can catch a failed load instead of dying (see src/ace-fatal.h). It
+# gates the body of an inline function, so it is PUBLIC and build-wide -- the one
+# correct way to turn it on, uniformly across acestep-core and its consumers, the
+# way GGML_MAX_NAME is. Defining it on only some targets is an ODR violation.
+# OFF by default, and do not turn it on until the inference path is
+# exception-safe: today only the model-store load path frees cleanly on a throw
+# (a forward-time fatal still leaks -- see the ACESTEP_FATAL_THROWS follow-up).
+option(ACESTEP_FATAL_THROWS "ace_fatal() throws instead of exit(1) (load-path only so far)" OFF)
+if(ACESTEP_FATAL_THROWS)
+    target_compile_definitions(acestep-core PUBLIC ACESTEP_FATAL_THROWS)
+endif()
+
 # ace-synth: full pipeline (text-enc + cond + dit + vae + wav)
 add_executable(ace-synth tools/ace-synth.cpp)
 target_link_libraries(ace-synth PRIVATE acestep-core)

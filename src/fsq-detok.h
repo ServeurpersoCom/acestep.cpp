@@ -79,6 +79,7 @@ static bool detok_ggml_load(DetokGGML * m, const char * gguf_path) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
+    GgufCloser gfc(&gf);
 
     // FSQ(2) + embed(2) + special(1) + 2 layers x 11(22) + norm(1) + proj(2) = 30
     wctx_init(&m->wctx, 30);

@@ -12,6 +12,7 @@
 //   Pack: cat(lyric, timbre[0:1], text_proj) -> [2048, S_total]
 
 #pragma once
+#include "ace-fatal.h"
 #include "qwen3-enc.h"
 
 // Lyric/Timbre encoder configs
@@ -100,6 +101,7 @@ static bool cond_ggml_load(CondGGML * m, const char * gguf_path) {
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
+    GgufCloser gfc(&gf);
 
     // XL models have encoder_hidden_size in GGUF metadata (2B models omit it).
     // When present, the timbre encoder prepends a learned CLS token.
@@ -185,6 +187,7 @@ static void cond_ggml_forward(CondGGML *           m,
     size_t                  ctx_size = 4096 * ggml_tensor_overhead() + ggml_graph_overhead();
     struct ggml_init_params gp       = { ctx_size, NULL, true };
     struct ggml_context *   ctx      = ggml_init(gp);
+    struct GgmlCtxGuard { ggml_context* p; ~GgmlCtxGuard(){ if(p) ggml_free(p); } } _ctx_guard{ctx};
     struct ggml_cgraph *    gf       = ggml_new_graph_custom(ctx, 8192, false);
 
     // Positions for lyric (bidirectional, 0..S_lyric-1)
@@ -288,8 +291,7 @@ static void cond_ggml_forward(CondGGML *           m,
 
     // Allocate and set inputs
     if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
-        fprintf(stderr, "[CondEncoder] FATAL: failed to allocate graph\n");
-        exit(1);
+        ace_fatal(1, "[CondEncoder] FATAL: failed to allocate graph\n");
     }
 
     ggml_backend_tensor_set(t_lyric_in, lyric_embed, 0, 1024 * S_lyric * sizeof(float));
@@ -376,7 +378,7 @@ static void cond_ggml_forward(CondGGML *           m,
             S_total);
 
     ggml_backend_sched_reset(m->sched);
-    ggml_free(ctx);
+    // _ctx_guard frees ctx
 }
 
 // Free
