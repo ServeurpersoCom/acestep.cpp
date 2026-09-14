@@ -189,8 +189,7 @@ int main(int argc, char ** argv) {
     // same entry point with the full latent IO surface.
     request_resolve_lm_seed(&req);
     AceRequest out;
-    int rc = ace_understand_generate(ctx, src_interleaved, src_len, nullptr, 0, &req, &out, nullptr, nullptr, nullptr,
-                                     nullptr);
+    int rc = ace_understand_generate(ctx, src_interleaved, src_len, nullptr, 0, &req, &out, nullptr, nullptr, {});
     free(src_interleaved);
     ace_understand_free(ctx);
     store_free(store);
