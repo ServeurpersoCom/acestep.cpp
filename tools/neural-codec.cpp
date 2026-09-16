@@ -331,7 +331,7 @@ static void print_usage(const char * prog) {
             "  -o <path>               Output file (auto-named if omitted)\n"
             "  --q8                    Quantize latent to int8 (~13 kbit/s)\n"
             "  --q4                    Quantize latent to int4 (~6.8 kbit/s)\n"
-            "  --format <fmt>          WAV format: wav16, wav24, wav32 (default: wav16)\n\n"
+            "  --format <fmt>          WAV format: wav16, wav24, wav32; FLAC: flac16, flac24 (default: wav16)\n\n"
             "Output naming: song.wav -> song.vae (f32) or song.nac8 (Q8) or song.nac4 (Q4)\n"
             "               song.vae -> song.wav\n\n"
             "Memory control:\n"
@@ -375,8 +375,9 @@ int main(int argc, char ** argv) {
         } else if (strcmp(argv[i], "--output") == 0 && i + 1 < argc) {
             output_path = argv[++i];
         } else if (strcmp(argv[i], "--format") == 0 && i + 1 < argc) {
-            bool dummy_mp3;
-            if (!audio_parse_format(argv[++i], dummy_mp3, wav_fmt)) {
+            AudioFormat dummy_fmt;
+            int         dummy_flac_bits;
+            if (!audio_parse_format(argv[++i], dummy_fmt, wav_fmt, dummy_flac_bits)) {
                 fprintf(stderr, "Unknown format: %s\n", argv[i]);
                 print_usage(argv[0]);
                 return 1;

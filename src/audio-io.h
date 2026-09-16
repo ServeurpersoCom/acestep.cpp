@@ -1,7 +1,7 @@
 #pragma once
-// audio-io.h: unified audio read/write for WAV and MP3.
+// audio-io.h: unified audio read/write for WAV, MP3 and FLAC.
 // Reads any WAV (PCM16/float32, mono/stereo, any rate) or MP3.
-// Writes WAV (16-bit PCM) or MP3 (via mp3enc).
+// Writes WAV (16/24/32-bit), MP3 (via mp3enc) or FLAC (via libFLAC).
 // All functions use planar stereo float: [L: T samples][R: T samples].
 // Part of acestep.cpp. MIT license.
 
@@ -22,6 +22,9 @@
 
 // audio-resample.h: sample rate conversion
 #include "audio-resample.h"
+
+// libFLAC (BSD, vendored): FLAC encoder
+#include "FLAC/stream_encoder.h"
 
 // minimp3 (CC0): MP3 decoder. Guard against double-implementation.
 #ifndef AUDIO_IO_MP3DEC_IMPL
@@ -374,27 +377,45 @@ enum WavFormat {
     WAV_F32,  // 32-bit IEEE 754 float (classic RIFF, fmt_tag=3)
 };
 
-// Parse the JSON output_format string into container type and WAV subformat.
-// Accepts: mp3, wav16, wav24, wav32. Returns false on unknown format.
-// Also accepts NULL and "mp3" as default (is_mp3 = true).
-static bool audio_parse_format(const char * s, bool & is_mp3, WavFormat & wav_fmt) {
+// Output container type
+enum AudioFormat {
+    FMT_MP3,   // lossy MPEG-1 Layer III
+    FMT_WAV,   // classic RIFF (see WavFormat for sample encoding)
+    FMT_FLAC,  // lossless FLAC (bits per sample tracked separately)
+};
+
+// Parse the JSON output_format string into container type, WAV subformat and
+// FLAC bit depth. Accepts: mp3, wav16, wav24, wav32, flac16, flac24.
+// Returns false on unknown format.
+// Also accepts NULL and "mp3" as default (FMT_MP3).
+static bool audio_parse_format(const char * s, AudioFormat & fmt, WavFormat & wav_fmt, int & flac_bits) {
     if (!s || !strcmp(s, OUTPUT_FORMAT_MP3)) {
-        is_mp3 = true;
+        fmt = FMT_MP3;
         return true;
     }
     if (!strcmp(s, OUTPUT_FORMAT_WAV16)) {
-        is_mp3  = false;
-        wav_fmt = WAV_S16;
+        fmt      = FMT_WAV;
+        wav_fmt  = WAV_S16;
         return true;
     }
     if (!strcmp(s, OUTPUT_FORMAT_WAV24)) {
-        is_mp3  = false;
-        wav_fmt = WAV_S24;
+        fmt      = FMT_WAV;
+        wav_fmt  = WAV_S24;
         return true;
     }
     if (!strcmp(s, OUTPUT_FORMAT_WAV32)) {
-        is_mp3  = false;
-        wav_fmt = WAV_F32;
+        fmt      = FMT_WAV;
+        wav_fmt  = WAV_F32;
+        return true;
+    }
+    if (!strcmp(s, OUTPUT_FORMAT_FLAC16)) {
+        fmt       = FMT_FLAC;
+        flac_bits = 16;
+        return true;
+    }
+    if (!strcmp(s, OUTPUT_FORMAT_FLAC24)) {
+        fmt       = FMT_FLAC;
+        flac_bits = 24;
         return true;
     }
     return false;
@@ -571,6 +592,116 @@ static bool audio_write_wav(const char * path, const float * audio, int T_audio,
     fclose(fp);
 
     fprintf(stderr, "[WAV] Wrote %s: %d samples, %d Hz, stereo\n", path, T_audio, sr);
+    return true;
+}
+
+// In-memory seekable sink for the FLAC stream encoder. The encoder writes
+// the STREAMINFO placeholder at init, streams frames, then seeks back to
+// patch sizes + MD5 at finish, so we need seek + tell, not just append.
+struct flac_mem_sink {
+    std::string data;
+    size_t      pos;
+};
+
+static FLAC__StreamEncoderWriteStatus flac_sink_write(const FLAC__StreamEncoder *, const FLAC__byte buffer[],
+                                                      size_t bytes, uint32_t, uint32_t, void * client_data) {
+    flac_mem_sink * s = (flac_mem_sink *) client_data;
+    if (s->pos + bytes > s->data.size()) {
+        s->data.resize(s->pos + bytes);
+    }
+    memcpy(&s->data[s->pos], buffer, bytes);
+    s->pos += bytes;
+    return FLAC__STREAM_ENCODER_WRITE_STATUS_OK;
+}
+
+static FLAC__StreamEncoderSeekStatus flac_sink_seek(const FLAC__StreamEncoder *, FLAC__uint64 absolute_byte_offset,
+                                                    void * client_data) {
+    flac_mem_sink * s = (flac_mem_sink *) client_data;
+    s->pos = (size_t) absolute_byte_offset;
+    return FLAC__STREAM_ENCODER_SEEK_STATUS_OK;
+}
+
+static FLAC__StreamEncoderTellStatus flac_sink_tell(const FLAC__StreamEncoder *, FLAC__uint64 * absolute_byte_offset,
+                                                    void * client_data) {
+    flac_mem_sink * s = (flac_mem_sink *) client_data;
+    *absolute_byte_offset = (FLAC__uint64) s->pos;
+    return FLAC__STREAM_ENCODER_TELL_STATUS_OK;
+}
+
+// Encode planar stereo to FLAC in memory via the reference libFLAC encoder.
+// bits is 16 or 24. Clamps to [-1, +1], coerces NaN/Inf to zero (same as the
+// WAV integer paths). Compression level 5 (the reference default). The audio
+// is converted to the target depth by the caller's normalizer + rounding.
+// Returns empty string on failure.
+static std::string audio_encode_flac(const float * audio, int T_audio, int sr, int bits = 16) {
+    if (bits != 16 && bits != 24) {
+        fprintf(stderr, "[FLAC] Unsupported bit depth: %d (use 16 or 24)\n", bits);
+        return "";
+    }
+
+    FLAC__StreamEncoder * enc = FLAC__stream_encoder_new();
+    if (!enc) {
+        fprintf(stderr, "[FLAC] OOM allocating encoder\n");
+        return "";
+    }
+
+    FLAC__stream_encoder_set_channels(enc, 2);
+    FLAC__stream_encoder_set_bits_per_sample(enc, (uint32_t) bits);
+    FLAC__stream_encoder_set_sample_rate(enc, (uint32_t) sr);
+    FLAC__stream_encoder_set_compression_level(enc, 5);
+
+    flac_mem_sink sink;
+    sink.data.clear();
+    sink.pos = 0;
+
+    FLAC__StreamEncoderInitStatus st =
+        FLAC__stream_encoder_init_stream(enc, flac_sink_write, flac_sink_seek, flac_sink_tell, NULL, &sink);
+    if (st != FLAC__STREAM_ENCODER_INIT_STATUS_OK) {
+        fprintf(stderr, "[FLAC] init_stream failed: %d\n", (int) st);
+        FLAC__stream_encoder_delete(enc);
+        return "";
+    }
+
+    float scale = (bits == 16) ? 32767.0f : 8388607.0f;
+    std::vector<FLAC__int32> buf((size_t) T_audio * 2);
+    const float *            L = audio;
+    const float *            R = audio + T_audio;
+    for (int t = 0; t < T_audio; t++) {
+        buf[(size_t) t * 2 + 0] = (FLAC__int32) (wav_clamp1(wav_sanitize(L[t])) * scale);
+        buf[(size_t) t * 2 + 1] = (FLAC__int32) (wav_clamp1(wav_sanitize(R[t])) * scale);
+    }
+
+    if (!FLAC__stream_encoder_process_interleaved(enc, buf.data(), (uint32_t) T_audio)) {
+        fprintf(stderr, "[FLAC] process_interleaved failed\n");
+        FLAC__stream_encoder_delete(enc);
+        return "";
+    }
+    if (!FLAC__stream_encoder_finish(enc)) {
+        fprintf(stderr, "[FLAC] finish failed\n");
+        FLAC__stream_encoder_delete(enc);
+        return "";
+    }
+    FLAC__stream_encoder_delete(enc);
+
+    return std::move(sink.data);
+}
+
+// Write planar stereo audio to FLAC file. Thin wrapper around audio_encode_flac.
+static bool audio_write_flac(const char * path, const float * audio, int T_audio, int sr, int bits = 16) {
+    std::string flac = audio_encode_flac(audio, T_audio, sr, bits);
+    if (flac.empty()) {
+        return false;
+    }
+
+    FILE * fp = fopen(path, "wb");
+    if (!fp) {
+        fprintf(stderr, "[Audio] Cannot open %s for writing\n", path);
+        return false;
+    }
+    fwrite(flac.data(), 1, flac.size(), fp);
+    fclose(fp);
+
+    fprintf(stderr, "[FLAC] Wrote %s: %d samples, %d Hz, %d-bit stereo\n", path, T_audio, sr, bits);
     return true;
 }
 
@@ -797,6 +928,7 @@ static bool audio_write_mp3(const char * path, const float * audio, int T_audio,
 
 // Write audio, auto-detect container from extension.
 // .mp3 -> MP3 encoding at the given kbps (default 128).
+// .flac -> FLAC encoding at the given bit depth (default 16).
 // .wav (or anything else) -> WAV in the requested format.
 // Normalizes in place before writing, except WAV_F32 (preserves full range).
 static bool audio_write(const char * path,
@@ -804,15 +936,21 @@ static bool audio_write(const char * path,
                         int          T_audio,
                         int          sr,
                         int          kbps,
-                        WavFormat    wav_fmt   = WAV_S16,
-                        int          peak_clip = 10) {
-    bool skip_norm = (wav_fmt == WAV_F32 && !audio_io_ends_with(path, ".mp3"));
+                        WavFormat    wav_fmt    = WAV_S16,
+                        int          peak_clip  = 10,
+                        int          flac_bits  = 16) {
+    bool is_mp3   = audio_io_ends_with(path, ".mp3");
+    bool is_flac  = audio_io_ends_with(path, ".flac");
+    bool skip_norm = (wav_fmt == WAV_F32 && !is_mp3 && !is_flac);
     if (!skip_norm) {
         audio_normalize(audio, T_audio * 2, peak_clip);
     }
 
-    if (audio_io_ends_with(path, ".mp3")) {
+    if (is_mp3) {
         return audio_write_mp3(path, audio, T_audio, sr, (kbps > 0) ? kbps : 128);
+    }
+    if (is_flac) {
+        return audio_write_flac(path, audio, T_audio, sr, flac_bits);
     }
     return audio_write_wav(path, audio, T_audio, sr, wav_fmt);
 }
