@@ -8,6 +8,7 @@
 // Upsample: 10x6x4x4x2 = 1920x
 
 #pragma once
+#include "ace-fatal.h"
 #include "backend.h"
 #include "ggml-backend.h"
 #include "ggml.h"
@@ -167,9 +168,9 @@ static void vae_load_bias(struct ggml_tensor * dst, const GGUFModel & gf, const 
 static void vae_ggml_load(VAEGGML * m, const char * path) {
     GGUFModel gf = {};
     if (!gf_load(&gf, path)) {
-        fprintf(stderr, "[VAE] FATAL: cannot load %s\n", path);
-        exit(1);
+        ace_fatal(1, "[VAE] FATAL: cannot load %s\n", path);
     }
+    GgufCloser gfc(&gf);
 
     static const int strides[]   = { 10, 6, 4, 4, 2 };
     static const int in_ch[]     = { 2048, 1024, 512, 256, 128 };
@@ -220,8 +221,7 @@ static void vae_ggml_load(VAEGGML * m, const char * path) {
     m->sched       = backend_sched_new(bp, 8192);
     m->buf         = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
     if (!m->buf) {
-        fprintf(stderr, "[VAE] FATAL: failed to allocate weight buffer\n");
-        exit(1);
+        ace_fatal(1, "[VAE] FATAL: failed to allocate weight buffer\n");
     }
     fprintf(stderr, "[VAE] Backend: %s, Weight buffer: %.1f MB\n", ggml_backend_name(m->backend),
             (float) ggml_backend_buffer_get_size(m->buf) / (1024 * 1024));
