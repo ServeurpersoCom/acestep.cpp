@@ -4,8 +4,29 @@ project(acestep-ggml LANGUAGES C CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# The tools -- the CLIs, the server and the tests -- build when acestep.cpp is
+# the top of the tree, and are skipped when it is pulled into a parent build via
+# add_subdirectory: an embedder wants libacestep-core and nothing else. A
+# top-level build is unchanged, so it still produces every binary it did before.
+#
+# PROJECT_IS_TOP_LEVEL is a CMake 3.21 variable and this file's floor is 3.14, so
+# fall back to comparing source dirs when it is undefined -- otherwise an old
+# CMake would read it as empty and silently drop the tools from a top-level
+# build, which is exactly the regression the default is meant to prevent.
+if(NOT DEFINED PROJECT_IS_TOP_LEVEL)
+    if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
+        set(PROJECT_IS_TOP_LEVEL ON)
+    else()
+        set(PROJECT_IS_TOP_LEVEL OFF)
+    endif()
+endif()
+option(ACESTEP_BUILD_TOOLS
+       "Build the CLIs, server and tests (off when embedding acestep-core)"
+       ${PROJECT_IS_TOP_LEVEL})
+
 # version.h: embed git commit hash into all binaries.
 # runs on every build, only rewrites if the hash changed.
+if(ACESTEP_BUILD_TOOLS)
 set(VERSION_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/version.h")
 add_custom_target(version ALL
     COMMAND "${CMAKE_COMMAND}" "-DSRC_DIR=${CMAKE_CURRENT_SOURCE_DIR}" "-DOUTPUT=${VERSION_OUTPUT}"
@@ -13,6 +34,7 @@ add_custom_target(version ALL
     BYPRODUCTS "${VERSION_OUTPUT}"
     COMMENT "Checking git version"
 )
+endif()
 
 # pthread: required explicitly on older glibc (< 2.34) where libpthread
 # is not merged into libc. Modern distros link it implicitly but aarch64
@@ -59,7 +81,10 @@ endif()
 add_subdirectory(ggml)
 
 # cpp-httplib (HTTP server library, used by ace-server)
-add_subdirectory(vendor/cpp-httplib)
+# Only ace-server links it, so it is gated with the rest of the tools.
+if(ACESTEP_BUILD_TOOLS)
+    add_subdirectory(vendor/cpp-httplib)
+endif()
 
 # Shared compile options and ggml linkage
 macro(link_ggml_backends target)
@@ -97,7 +122,9 @@ macro(link_ggml_backends target)
     if(TARGET ggml-sycl AND GGML_SYCL)
         target_link_options(${target} PRIVATE -fsycl)
     endif()
-    add_dependencies(${target} version)
+    if(ACESTEP_BUILD_TOOLS)
+        add_dependencies(${target} version)
+    endif()
 endmacro()
 
 # yyjson (MIT, fast JSON parser/writer)
@@ -121,63 +148,77 @@ add_library(acestep-core STATIC
 target_link_libraries(acestep-core PUBLIC yyjson)
 link_ggml_backends(acestep-core)
 
-# ace-synth: full pipeline (text-enc + cond + dit + vae + wav)
-add_executable(ace-synth tools/ace-synth.cpp)
-target_link_libraries(ace-synth PRIVATE acestep-core)
-link_ggml_backends(ace-synth)
+# GGML_MAX_NAME is set to 128 at directory scope above so ggml itself sees it,
+# but add_compile_definitions does not cross into a parent project that pulls
+# acestep-core in via add_subdirectory. struct ggml_tensor embeds
+# char name[GGML_MAX_NAME], so a consumer compiled at the default 64 disagrees
+# with this library on sizeof(ggml_tensor) and reads garbage past .name -- with
+# no link error, because the symbols still resolve. PUBLIC puts the define on
+# the target's interface so every consumer inherits it without restating it.
+target_compile_definitions(acestep-core PUBLIC GGML_MAX_NAME=128)
 
-# ace-lm: LLM inference (CoT + audio codes)
-add_executable(ace-lm tools/ace-lm.cpp)
-target_link_libraries(ace-lm PRIVATE acestep-core)
-link_ggml_backends(ace-lm)
+# The tools and the tests. Everything below is gated on ACESTEP_BUILD_TOOLS,
+# which is ON for a top-level build and OFF when acestep-core is embedded. Only
+# acestep-core (and ggml and yyjson, above) is built when the flag is off.
+if(ACESTEP_BUILD_TOOLS)
+    # ace-synth: full pipeline (text-enc + cond + dit + vae + wav)
+    add_executable(ace-synth tools/ace-synth.cpp)
+    target_link_libraries(ace-synth PRIVATE acestep-core)
+    link_ggml_backends(ace-synth)
 
-# webui: convert tools/webui/public/index.html.gz to a C header for embedding.
-# the .gz is committed to git so the C++ build works without npm.
-# to update: cd tools/webui && npm install && npm run build, then rebuild ace-server.
-set(WEBUI_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/tools/public/index.html.gz")
-set(WEBUI_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz.hpp")
-add_custom_command(
-    OUTPUT "${WEBUI_OUTPUT}"
-    COMMAND "${CMAKE_COMMAND}" "-DINPUT=${WEBUI_INPUT}" "-DOUTPUT=${WEBUI_OUTPUT}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/xxd.cmake"
-    DEPENDS "${WEBUI_INPUT}"
-    COMMENT "Embedding webui into index.html.gz.hpp"
-)
-set_source_files_properties(${WEBUI_OUTPUT} PROPERTIES GENERATED TRUE)
+    # ace-lm: LLM inference (CoT + audio codes)
+    add_executable(ace-lm tools/ace-lm.cpp)
+    target_link_libraries(ace-lm PRIVATE acestep-core)
+    link_ggml_backends(ace-lm)
 
-# ace-server: HTTP server (LM + synth endpoints + embedded webui)
-add_executable(ace-server tools/ace-server.cpp ${WEBUI_OUTPUT})
-target_include_directories(ace-server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
-target_link_libraries(ace-server PRIVATE acestep-core httplib)
-link_ggml_backends(ace-server)
+    # webui: convert tools/webui/public/index.html.gz to a C header for embedding.
+    # the .gz is committed to git so the C++ build works without npm.
+    # to update: cd tools/webui && npm install && npm run build, then rebuild ace-server.
+    set(WEBUI_INPUT "${CMAKE_CURRENT_SOURCE_DIR}/tools/public/index.html.gz")
+    set(WEBUI_OUTPUT "${CMAKE_CURRENT_BINARY_DIR}/index.html.gz.hpp")
+    add_custom_command(
+        OUTPUT "${WEBUI_OUTPUT}"
+        COMMAND "${CMAKE_COMMAND}" "-DINPUT=${WEBUI_INPUT}" "-DOUTPUT=${WEBUI_OUTPUT}" -P "${CMAKE_CURRENT_SOURCE_DIR}/tools/xxd.cmake"
+        DEPENDS "${WEBUI_INPUT}"
+        COMMENT "Embedding webui into index.html.gz.hpp"
+    )
+    set_source_files_properties(${WEBUI_OUTPUT} PROPERTIES GENERATED TRUE)
 
-add_executable(ace-understand tools/ace-understand.cpp)
-target_link_libraries(ace-understand PRIVATE acestep-core)
-link_ggml_backends(ace-understand)
+    # ace-server: HTTP server (LM + synth endpoints + embedded webui)
+    add_executable(ace-server tools/ace-server.cpp ${WEBUI_OUTPUT})
+    target_include_directories(ace-server PRIVATE ${CMAKE_CURRENT_BINARY_DIR})
+    target_link_libraries(ace-server PRIVATE acestep-core httplib)
+    link_ggml_backends(ace-server)
 
-# quantize: GGUF requantizer (BF16 -> K-quants)
-add_executable(quantize tools/quantize.cpp)
-link_ggml_backends(quantize)
+    add_executable(ace-understand tools/ace-understand.cpp)
+    target_link_libraries(ace-understand PRIVATE acestep-core)
+    link_ggml_backends(ace-understand)
 
-# neural-codec: Oobleck VAE neural audio codec (encode/decode WAV <-> latent)
-add_executable(neural-codec tools/neural-codec.cpp)
-link_ggml_backends(neural-codec)
+    # quantize: GGUF requantizer (BF16 -> K-quants)
+    add_executable(quantize tools/quantize.cpp)
+    link_ggml_backends(quantize)
 
-# mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
-# The mp3/ headers are header-only and usable by ace-synth too via #include "mp3/mp3enc.h"
-add_executable(mp3-codec tools/mp3-codec.cpp)
-target_include_directories(mp3-codec PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_BINARY_DIR}
-)
-add_dependencies(mp3-codec version)
-if(MSVC)
-    target_compile_options(mp3-codec PRIVATE /W4 /wd4100 /wd4505)
-else()
-    target_compile_options(mp3-codec PRIVATE -Wall -Wextra -Wconversion
-                          -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
-    target_link_libraries(mp3-codec PRIVATE m)
+    # neural-codec: Oobleck VAE neural audio codec (encode/decode WAV <-> latent)
+    add_executable(neural-codec tools/neural-codec.cpp)
+    link_ggml_backends(neural-codec)
+
+    # mp3-codec: MP3 encoder/decoder (standalone, no ggml needed)
+    # The mp3/ headers are header-only and usable by ace-synth too via #include "mp3/mp3enc.h"
+    add_executable(mp3-codec tools/mp3-codec.cpp)
+    target_include_directories(mp3-codec PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+    )
+    add_dependencies(mp3-codec version)
+    if(MSVC)
+        target_compile_options(mp3-codec PRIVATE /W4 /wd4100 /wd4505)
+    else()
+        target_compile_options(mp3-codec PRIVATE -Wall -Wextra -Wconversion
+                              -Wno-unused-parameter -Wno-unused-function -Wno-sign-conversion)
+        target_link_libraries(mp3-codec PRIVATE m)
+    endif()
+    target_link_libraries(mp3-codec PRIVATE Threads::Threads)
+
+    add_subdirectory(tests)
 endif()
-target_link_libraries(mp3-codec PRIVATE Threads::Threads)
-
-add_subdirectory(tests)
