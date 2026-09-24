@@ -6,6 +6,7 @@
 // Downsample: 2x4x4x6x10 = 1920x (matches decoder upsample)
 
 #pragma once
+#include "ace-fatal.h"
 #include "vae.h"
 
 // Encoder block: 3xResUnit(in_ch) -> snake(in_ch) -> strided Conv1d(in_ch -> out_ch)
@@ -44,9 +45,9 @@ struct VAEEncoder {
 static void vae_enc_load(VAEEncoder * m, const char * path) {
     GGUFModel gf = {};
     if (!gf_load(&gf, path)) {
-        fprintf(stderr, "[VAE-Enc] FATAL: cannot load %s\n", path);
-        exit(1);
+        ace_fatal(1, "[VAE-Enc] FATAL: cannot load %s\n", path);
     }
+    GgufCloser gfc(&gf);
 
     // Encoder channel layout (mirror of decoder, bottom-up):
     //   conv1: 2 -> 128
@@ -111,8 +112,7 @@ static void vae_enc_load(VAEEncoder * m, const char * path) {
     m->sched       = backend_sched_new(bp, 8192);
     m->buf         = ggml_backend_alloc_ctx_tensors(ctx, m->backend);
     if (!m->buf) {
-        fprintf(stderr, "[VAE-Enc] FATAL: failed to allocate weight buffer\n");
-        exit(1);
+        ace_fatal(1, "[VAE-Enc] FATAL: failed to allocate weight buffer\n");
     }
     fprintf(stderr, "[VAE-Enc] Backend: %s, Weight buffer: %.1f MB\n", ggml_backend_name(m->backend),
             (float) ggml_backend_buffer_get_size(m->buf) / (1024 * 1024));

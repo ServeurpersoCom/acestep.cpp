@@ -3,6 +3,7 @@
 // Loads from GGUF, supports prefill + decode, tied lm_head
 #pragma once
 
+#include "ace-fatal.h"
 #include "graph-arena.h"
 #include "qwen3-enc.h"  // Qwen3Layer, Qwen3Config, layer build helpers
 #include "static-graph.h"
@@ -248,8 +249,7 @@ static void qw3lm_alloc_kv_cache(Qwen3LM * m, int n_sets) {
 
     m->kv_buf = ggml_backend_alloc_ctx_tensors(m->kv_ctx, m->backend);
     if (!m->kv_buf) {
-        fprintf(stderr, "[LM-KV] FATAL: failed to allocate KV cache\n");
-        exit(1);
+        ace_fatal(1, "[LM-KV] FATAL: failed to allocate KV cache\n");
     }
 
     // Zero the buffer once: the attention window is padded past kv_pos
@@ -290,6 +290,7 @@ static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int
         fprintf(stderr, "[LM-Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
+    GgufCloser gfc(&gf);
 
     m->cfg = qw3lm_load_config(gf);
     if (max_seq_len > 0) {
@@ -573,8 +574,7 @@ static void qw3lm_forward(Qwen3LM * m, const int * token_ids, int n_tokens, int 
     // Schedule + allocate
     ggml_backend_sched_reset(m->sched);
     if (!ggml_backend_sched_alloc_graph(m->sched, gf)) {
-        fprintf(stderr, "[LM] FATAL: failed to allocate graph (prefill, %d tokens)\n", n_tokens);
-        exit(1);
+        ace_fatal(1, "[LM] FATAL: failed to allocate graph (prefill, %d tokens)\n", n_tokens);
     }
 
     // Set token IDs
@@ -646,8 +646,7 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
             max_kv_len = kl;
         }
         if (kl > c.max_seq_len) {
-            fprintf(stderr, "[LM-Batch] FATAL: kv_len %d > max_seq %d (set %d)\n", kl, c.max_seq_len, kv_sets[i]);
-            exit(1);
+            ace_fatal(1, "[LM-Batch] FATAL: kv_len %d > max_seq %d (set %d)\n", kl, c.max_seq_len, kv_sets[i]);
         }
     }
 
@@ -829,8 +828,7 @@ static void qw3lm_forward_batch(Qwen3LM *   m,
         ggml_build_forward_expand(gf, lgt);
 
         if (!static_graph_alloc(&m->batch_graph.graph, m->backend, m->sched, gf)) {
-            fprintf(stderr, "[LM] FATAL: failed to allocate graph (batch decode, N=%d)\n", N);
-            exit(1);
+            ace_fatal(1, "[LM] FATAL: failed to allocate graph (batch decode, N=%d)\n", N);
         }
 
         m->batch_graph.gf            = gf;
