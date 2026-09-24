@@ -316,7 +316,15 @@ static bool qw3lm_load(Qwen3LM * m, const char * gguf_path, int max_seq_len, int
         qwen3_load_layer(&m->wctx, gf, &m->layers[i], prefix, i);
     }
 
-    wctx_alloc(&m->wctx, m->backend);
+    // The only wctx_alloc caller that may not discard the bool: a failed backend
+    // allocation leaves buffer == NULL, and a module that reports success anyway
+    // dereferences it on the first prefill. (Every other loader checks.) No
+    // self-teardown on this failure: store_require_lm's LoadGuard owns the
+    // module, same as the other five loaders, and gf_close below is still
+    // reached on the way out.
+    if (!wctx_alloc(&m->wctx, m->backend)) {
+        return false;
+    }
     gf_close(&gf);
 
     // KV cache
