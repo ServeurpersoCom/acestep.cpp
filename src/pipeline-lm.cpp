@@ -57,8 +57,7 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                 
                                                       float                                 cfg_scale         = 1.0f,
                                                       const std::vector<std::vector<int>> * unconds           = nullptr,
                                                       bool                                  stop_at_reasoning = false,
-                                                      bool (*cancel)(void *)                                  = nullptr,
-                                                      void * cancel_data = nullptr) {
+                                                      AceProgress                              progress       = {}) {
     int  N       = (int) prompts.size();
     int  V       = m->cfg.vocab_size;
     bool use_cfg = cfg_scale > 1.0f && unconds && !unconds->empty();
@@ -187,8 +186,13 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                 
         }
     }
 
+    if (ace_cancelled(progress,
+                      ACE_STAGE_LM)) {  // honour a cancel before the loop; the loop's step-0 poll sizes the bar
+        fprintf(stderr, "[LM-Phase1] Cancelled at step 0\n");
+        return {};
+    }
     for (int step = 0; step < max_new_tokens && n_active > 0; step++) {
-        if (cancel && cancel(cancel_data)) {
+        if (ace_progress(progress, ACE_STAGE_LM, step, max_new_tokens)) {
             fprintf(stderr, "[LM-Phase1] Cancelled at step %d\n", step);
             return {};
         }
@@ -297,8 +301,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                                                  float                          cfg_scale,
                                                  const char *                   negative_prompt,
                                                  bool                           use_batch_cfg,
-                                                 bool (*cancel)(void *),
-                                                 void * cancel_data) {
+                                                 AceProgress                    progress) {
     int  N       = (int) aces.size();
     int  V       = m->cfg.vocab_size;
     bool use_cfg = cfg_scale > 1.0f;
@@ -449,8 +452,13 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
         }
     }
 
+    if (ace_cancelled(progress,
+                      ACE_STAGE_LM)) {  // honour a cancel before the loop; the loop's step-0 poll sizes the bar
+        fprintf(stderr, "[LM-Phase2] Cancelled at step 0\n");
+        return {};
+    }
     for (int step = 0; step < max_tokens && n_active > 0; step++) {
-        if (cancel && cancel(cancel_data)) {
+        if (ace_progress(progress, ACE_STAGE_LM, step, max_tokens)) {
             fprintf(stderr, "[LM-Phase2] Cancelled at step %d\n", step);
             return {};
         }
@@ -611,9 +619,8 @@ int ace_lm_generate(AceLm *            ctx,
                     AceRequest *       out,
                     const char *       dump_logits,
                     const char *       dump_tokens,
-                    bool (*cancel)(void *),
-                    void * cancel_data,
-                    int    mode) {
+                    AceProgress        progress,
+                    int                mode) {
     if (!ctx || !reqs || !out || n_req < 1) {
         return -1;
     }
@@ -814,7 +821,7 @@ int ace_lm_generate(AceLm *            ctx,
 
         auto phase1_texts = generate_phase1_batch(
             model, bpe, prompts, 2048, temperature, fill_top_p, fill_top_k, seeds, fsm_template ? &fsms : nullptr,
-            gen_lyrics, fill_cfg, unconds.empty() ? nullptr : &unconds, !gen_lyrics, cancel, cancel_data);
+            gen_lyrics, fill_cfg, unconds.empty() ? nullptr : &unconds, !gen_lyrics, progress);
         if (phase1_texts.empty()) {
             return -1;
         }
@@ -885,7 +892,7 @@ int ace_lm_generate(AceLm *            ctx,
                 mode == LM_MODE_INSPIRE ? "Inspire" : "Format");
     } else if (!user_has_codes) {
         batch_codes = run_phase2_batch(model, *bpe, aces, temperature, top_p, top_k, seeds, cfg_scale, neg_prompt,
-                                       ctx->params.use_batch_cfg, cancel, cancel_data);
+                                       ctx->params.use_batch_cfg, progress);
         if (batch_codes.empty()) {
             return -1;
         }

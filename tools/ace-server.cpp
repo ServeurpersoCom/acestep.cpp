@@ -508,8 +508,11 @@ static void handle_logs(const httplib::Request &, httplib::Response & res) {
         });
 }
 
-// cancel callback: checks the per-job cancel flag.
-static bool server_cancel_job(void * data) {
+// progress + cancel callback. Reports (stage, step, total) are ignored here --
+// the client polls job status separately -- but the return still cancels via the
+// per-job flag. It only reads the atomic, so it has no thread-safety needs of
+// its own (the pipelines call it from a single thread regardless).
+static bool server_progress(void * data, AceStage /*stage*/, int /*step*/, int /*total*/) {
     auto * flag = (const std::atomic<bool> *) data;
     return flag && flag->load(std::memory_order_relaxed);
 }
@@ -576,8 +579,8 @@ static void lm_worker(std::shared_ptr<Job> job, std::vector<AceRequest> ace_reqs
     // Execute and always free the ctx, success or failure: the store decides
     // whether the underlying GPU module stays resident.
     std::vector<AceRequest> out(N);
-    int rc = ace_lm_generate(ctx, ace_reqs.data(), N, out.data(), NULL, NULL, server_cancel_job, (void *) &job->cancel,
-                             mode);
+    int rc = ace_lm_generate(ctx, ace_reqs.data(), N, out.data(), NULL, NULL,
+                             AceProgress{ server_progress, (void *) &job->cancel }, mode);
     ace_lm_free(ctx);
 
     if (rc != 0) {
@@ -831,7 +834,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
     std::vector<std::vector<float>> captured_latents;
     const int rc = synth_batch_run(ctx, groups, src_interleaved, src_len, src_lat_ptr, src_T_latent, ref_interleaved,
                                    ref_len, ref_lat_ptr, ref_T_latent, audio.data(), &captured_latents,
-                                   server_cancel_job, (void *) &job->cancel);
+                                   AceProgress{ server_progress, (void *) &job->cancel });
     ace_synth_free(ctx);
     free(src_interleaved);
     free(ref_interleaved);
@@ -875,7 +878,7 @@ static void synth_worker(std::shared_ptr<Job>    job,
             encoded[b] = audio_encode_wav(audio[b].samples, audio[b].n_samples, 48000, wav_fmt);
         } else {
             encoded[b] = audio_encode_mp3(audio[b].samples, audio[b].n_samples, 48000, groups[0][b].mp3_bitrate,
-                                          server_cancel_job, (void *) &job->cancel);
+                                          AceProgress{ server_progress, (void *) &job->cancel });
         }
         ace_audio_free(&audio[b]);
     }
@@ -1109,7 +1112,8 @@ static void understand_worker(std::shared_ptr<Job> job,
     int                captured_T_latent = 0;
     const float *      src_lat_ptr       = src_latents.empty() ? nullptr : src_latents.data();
     int rc = ace_understand_generate(ctx, src_interleaved, src_len, src_lat_ptr, src_T_latent, &ace_req, &out,
-                                     &captured_latent, &captured_T_latent, server_cancel_job, (void *) &job->cancel);
+                                     &captured_latent, &captured_T_latent,
+                                     AceProgress{ server_progress, (void *) &job->cancel });
     ace_understand_free(ctx);
     free(src_interleaved);
 
@@ -1276,10 +1280,12 @@ static void decode_worker(std::shared_ptr<Job> job,
     int                T_audio_max = (src_T_latent + 64) * 1920;
     std::vector<float> audio_buf((size_t) T_audio_max * 2);
     int T_audio = vae_ggml_decode_tiled(vae, src_latents.data(), src_T_latent, audio_buf.data(), T_audio_max,
-                                        g_synth_params.vae_chunk, g_synth_params.vae_overlap);
+                                        g_synth_params.vae_chunk, g_synth_params.vae_overlap,
+                                        AceProgress{ server_progress, (void *) &job->cancel });
     if (T_audio < 0) {
-        fprintf(stderr, "[Server] decode: vae_ggml_decode_tiled failed\n");
-        job->status.store(JobStatus::FAILED);
+        bool cancelled = job->cancel.load();
+        fprintf(stderr, "[Server] decode: %s\n", cancelled ? "cancelled" : "vae_ggml_decode_tiled failed");
+        job->status.store(cancelled ? JobStatus::CANCELLED : JobStatus::FAILED);
         return;
     }
     fprintf(stderr, "[Server] decode: %d latent frames -> %d audio samples (%.2fs), %.0fms\n", src_T_latent, T_audio,
@@ -1302,8 +1308,8 @@ static void decode_worker(std::shared_ptr<Job> job,
     if (output_wav) {
         encoded = audio_encode_wav(audio_buf.data(), T_audio, 48000, wav_fmt);
     } else {
-        encoded = audio_encode_mp3(audio_buf.data(), T_audio, 48000, ace_req.mp3_bitrate, server_cancel_job,
-                                   (void *) &job->cancel);
+        encoded = audio_encode_mp3(audio_buf.data(), T_audio, 48000, ace_req.mp3_bitrate,
+                                   AceProgress{ server_progress, (void *) &job->cancel });
     }
 
     // Response: raw audio, single Content-Type. No latent in the body: the
@@ -1365,11 +1371,13 @@ static void encode_worker(std::shared_ptr<Job> job, AceRequest ace_req, float * 
         T_latent_max = MAX_T_LATENT;
     }
     std::vector<float> latent((size_t) T_latent_max * LATENT_CHANNELS);
-    int                T_latent = vae_enc_encode_tiled(vae, src_interleaved, src_len, latent.data(), T_latent_max,
-                                                       g_synth_params.vae_chunk, g_synth_params.vae_overlap);
+    int                T_latent =
+        vae_enc_encode_tiled(vae, src_interleaved, src_len, latent.data(), T_latent_max, g_synth_params.vae_chunk,
+                             g_synth_params.vae_overlap, AceProgress{ server_progress, (void *) &job->cancel });
     if (T_latent < 0) {
-        fprintf(stderr, "[Server] encode: vae_enc_encode_tiled failed\n");
-        job->status.store(JobStatus::FAILED);
+        bool cancelled = job->cancel.load();
+        fprintf(stderr, "[Server] encode: %s\n", cancelled ? "cancelled" : "vae_enc_encode_tiled failed");
+        job->status.store(cancelled ? JobStatus::CANCELLED : JobStatus::FAILED);
         return;
     }
     fprintf(stderr, "[Server] encode: %d audio samples (%.2fs) -> %d latent frames, %.0fms\n", src_len,
