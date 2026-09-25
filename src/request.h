@@ -93,7 +93,29 @@ struct AceRequest {
     // Solver name resolved by solver_lookup() (see src/solvers).
     // Accepted values: "euler", "sde", "dpm3m", "stork4".
     std::string solver;          // "euler"
-    int         stork_substeps;  // 10, only used by the "stork4" solver
+    int         stork_substeps;  // 10, only used by the "stork2" and "stork4" solvers
+
+    // JKASS Fast momentum blending (see src/solvers/solver-jkass.h).
+    float jkass_beat_stability;      // 0.25
+    float jkass_frequency_damping;   // 0.4
+    float jkass_temporal_smoothing;  // 0.13
+
+    // Timestep spacing, resolved by scheduler_build() (see src/schedulers).
+    // "linear" is the original shift schedule. Also "power:<p>",
+    // "beta:<a>:<b>" and "composite:<A>+<B>:<crossover>:<split>".
+    // custom_timesteps, when set, overrides it.
+    std::string scheduler;  // "linear"
+
+    // Guidance mode for CFG (see src/guidance.h): apg, cfg_pp, dynamic_cfg,
+    // rescaled_cfg, cfg_zero_star, smc_cfg, cfg_mp. Only active when the
+    // resolved guidance_scale is above 1.
+    std::string guidance;             // "apg"
+    float       apg_momentum;         // 0.75
+    float       apg_norm_threshold;   // 2.5, 0 disables the clip
+    int         cfg_zero_init_steps;  // 1
+    float       smc_lambda;           // 0.5
+    float       smc_k;                // 0.1
+    int         cfg_mp_iterations;    // 1
 
     // LM mode: "generate" (full: metadata + lyrics + codes),
     // "inspire" (short query -> metadata + lyrics, no codes),

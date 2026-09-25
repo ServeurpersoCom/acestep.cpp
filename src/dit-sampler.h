@@ -8,6 +8,7 @@
 #include "dit-graph.h"
 #include "dit.h"
 #include "dwt-haar.h"
+#include "guidance.h"
 #include "solvers/solver-registry.h"
 #include "static-graph.h"
 
@@ -15,112 +16,6 @@
 #include <cstdio>
 #include <cstring>
 #include <vector>
-
-// APG (Adaptive Projected Guidance) for DiT CFG
-// Matches Python ACE-Step-1.5 acestep/models/base/apg_guidance.py
-struct APGMomentumBuffer {
-    double              momentum;
-    std::vector<double> running_average;
-    bool                initialized;
-
-    APGMomentumBuffer(double m = -0.75) : momentum(m), initialized(false) {}
-
-    void update(const double * values, int n) {
-        if (!initialized) {
-            running_average.assign(values, values + n);
-            initialized = true;
-        } else {
-            for (int i = 0; i < n; i++) {
-                running_average[i] = values[i] + momentum * running_average[i];
-            }
-        }
-    }
-};
-
-// project(v0, v1, dims=[1]): decompose v0 into parallel + orthogonal w.r.t. v1
-// All math in double precision matching Python .double() calls.
-// Layout: memory [T, Oc] time-major (ggml ne=[Oc, T]).
-// Python dims=[1] on [B,T,C] = normalize/project per channel over T dimension.
-// In memory [T, Oc] layout: for each channel c, operate over all T time frames.
-static void apg_project(const double * v0, const double * v1, double * out_par, double * out_orth, int Oc, int T) {
-    for (int c = 0; c < Oc; c++) {
-        double norm2 = 0.0;
-        for (int t = 0; t < T; t++) {
-            norm2 += v1[t * Oc + c] * v1[t * Oc + c];
-        }
-        double inv_norm = (norm2 > 1e-60) ? (1.0 / sqrt(norm2)) : 0.0;
-
-        double dot = 0.0;
-        for (int t = 0; t < T; t++) {
-            dot += v0[t * Oc + c] * (v1[t * Oc + c] * inv_norm);
-        }
-
-        for (int t = 0; t < T; t++) {
-            int    idx    = t * Oc + c;
-            double v1n    = v1[idx] * inv_norm;
-            out_par[idx]  = dot * v1n;
-            out_orth[idx] = v0[idx] - out_par[idx];
-        }
-    }
-}
-
-// APG forward matching Python apg_forward() exactly:
-//   1. diff = cond - uncond
-//   2. momentum.update(diff); diff = running_average
-//   3. norm clip: per-channel L2 over T (dims=[1]), clip to norm_threshold=2.5
-//   4. project(diff, pred_COND) -> (parallel, orthogonal)
-//   5. result = pred_cond + (scale - 1) * orthogonal
-// Internal computation in double precision (Python uses .double()).
-static void apg_forward(const float *       pred_cond,
-                        const float *       pred_uncond,
-                        float               guidance_scale,
-                        APGMomentumBuffer & mbuf,
-                        float *             result,
-                        int                 Oc,
-                        int                 T,
-                        float               norm_threshold = 2.5f) {
-    int n = Oc * T;
-
-    // 1. diff = cond - uncond (promote to double)
-    std::vector<double> diff(n);
-    for (int i = 0; i < n; i++) {
-        diff[i] = (double) pred_cond[i] - (double) pred_uncond[i];
-    }
-
-    // 2. momentum update, then use smoothed diff
-    mbuf.update(diff.data(), n);
-    memcpy(diff.data(), mbuf.running_average.data(), n * sizeof(double));
-
-    // 3. norm clipping: per-channel L2 over T (dims=[1]), clip to threshold
-    if (norm_threshold > 0.0f) {
-        for (int c = 0; c < Oc; c++) {
-            double norm2 = 0.0;
-            for (int t = 0; t < T; t++) {
-                norm2 += diff[t * Oc + c] * diff[t * Oc + c];
-            }
-            double norm = sqrt(norm2 > 0.0 ? norm2 : 0.0);
-            double s    = (norm > 1e-60) ? fmin(1.0, (double) norm_threshold / norm) : 1.0;
-            if (s < 1.0) {
-                for (int t = 0; t < T; t++) {
-                    diff[t * Oc + c] *= s;
-                }
-            }
-        }
-    }
-
-    // 4. project(diff, pred_COND) -> orthogonal component (double precision)
-    std::vector<double> pred_cond_d(n), par(n), orth(n);
-    for (int i = 0; i < n; i++) {
-        pred_cond_d[i] = (double) pred_cond[i];
-    }
-    apg_project(diff.data(), pred_cond_d.data(), par.data(), orth.data(), Oc, T);
-
-    // 5. result = pred_cond + (scale - 1) * orthogonal (back to float)
-    double w = (double) guidance_scale - 1.0;
-    for (int i = 0; i < n; i++) {
-        result[i] = (float) ((double) pred_cond[i] + w * orth[i]);
-    }
-}
 
 // Flow matching generation loop (batched)
 // Runs num_steps euler steps to denoise N latent samples in parallel.
@@ -140,29 +35,34 @@ static int dit_ggml_generate(DiTGGML *           model,
                              int                 num_steps,
                              const float *       schedule,
                              float *             output,
-                             float               guidance_scale = 1.0f,
-                             const DebugDumper * dbg            = nullptr,
-                             const float *       context_switch = nullptr,
-                             int                 cover_steps    = -1,
-                             bool (*cancel)(void *)             = nullptr,
-                             void *          cancel_data        = nullptr,
-                             const int *     real_enc_S         = nullptr,
-                             const float *   enc_switch         = nullptr,
-                             const int *     real_enc_S_switch  = nullptr,
-                             const int64_t * seeds              = nullptr,
-                             bool            use_batch_cfg      = true,
-                             float           dcw_scaler         = 0.0f,
-                             float           dcw_high_scaler    = 0.0f,
-                             const char *    dcw_mode           = "low",
-                             const char *    solver_name        = "euler",
-                             int             stork_substeps     = 10) {
-    DiTGGMLConfig & c       = model->cfg;
-    int             Oc      = c.out_channels;      // 64
-    int             ctx_ch  = c.in_channels - Oc;  // 128
-    int             in_ch   = c.in_channels;       // 192
-    int             S       = T / c.patch_size;
-    int             n_per   = T * Oc;              // elements per sample
-    int             n_total = N * n_per;           // total output elements
+                             float               guidance_scale              = 1.0f,
+                             const DebugDumper * dbg                         = nullptr,
+                             const float *       context_switch              = nullptr,
+                             int                 cover_steps                 = -1,
+                             bool (*cancel)(void *)                          = nullptr,
+                             void *                 cancel_data              = nullptr,
+                             const int *            real_enc_S               = nullptr,
+                             const float *          enc_switch               = nullptr,
+                             const int *            real_enc_S_switch        = nullptr,
+                             const int64_t *        seeds                    = nullptr,
+                             bool                   use_batch_cfg            = true,
+                             float                  dcw_scaler               = 0.0f,
+                             float                  dcw_high_scaler          = 0.0f,
+                             const char *           dcw_mode                 = "low",
+                             const char *           solver_name              = "euler",
+                             int                    stork_substeps           = 10,
+                             const GuidanceParams * guidance                 = nullptr,
+                             float                  jkass_beat_stability     = 0.25f,
+                             float                  jkass_frequency_damping  = 0.4f,
+                             float                  jkass_temporal_smoothing = 0.13f) {
+    const GuidanceParams guide_params = guidance ? *guidance : GuidanceParams{};
+    DiTGGMLConfig &      c            = model->cfg;
+    int                  Oc           = c.out_channels;      // 64
+    int                  ctx_ch       = c.in_channels - Oc;  // 128
+    int                  in_ch        = c.in_channels;       // 192
+    int                  S            = T / c.patch_size;
+    int                  n_per        = T * Oc;              // elements per sample
+    int                  n_total      = N * n_per;           // total output elements
 
     // CFG batching: pack conditional + unconditional into one graph of size 2*N.
     // Slots [0, N): conditional (real encoder states).
@@ -310,14 +210,15 @@ static int dit_ggml_generate(DiTGGML *           model,
     }
     ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0, enc_S * S * N_graph * sizeof(uint16_t));
 
-    // CFG: prepare null encoder states and APG buffers
-    std::vector<APGMomentumBuffer> apg_mbufs;
-    std::vector<float>             null_enc_buf;
+    // CFG: prepare null encoder states and per sample guidance state
+    std::vector<GuidanceState> guide_states;
+    std::vector<float>         null_enc_buf;
+    GuidanceStep               guide_step = { 0, num_steps, 0.0f, 1.0f };
 
     if (do_cfg) {
-        apg_mbufs.resize(N);
-        fprintf(stderr, "[DiT] CFG enabled: guidance_scale=%.1f, %s, N_graph=%d\n", guidance_scale,
-                batch_cfg ? "batched" : "2-pass", N_graph);
+        guide_states.assign(N, GuidanceState(-(double) guide_params.apg_momentum));
+        fprintf(stderr, "[DiT] CFG enabled: guidance_scale=%.1f, %s, N_graph=%d, guidance=%s\n", guidance_scale,
+                batch_cfg ? "batched" : "2-pass", N_graph, guide_params.mode.c_str());
     }
 
     // Prepare host buffers (all N real samples contiguous)
@@ -405,10 +306,184 @@ static int dit_ggml_generate(DiTGGML *           model,
             solver_info->order);
 
     SolverState solver_state;
-    solver_state.seeds          = seeds;
-    solver_state.batch_n        = N;
-    solver_state.n_per          = n_per;
-    solver_state.stork_substeps = stork_substeps;
+    solver_state.seeds              = seeds;
+    solver_state.batch_n            = N;
+    solver_state.n_per              = n_per;
+    solver_state.stork_substeps     = stork_substeps;
+    solver_state.beat_stability     = jkass_beat_stability;
+    solver_state.frequency_damping  = jkass_frequency_damping;
+    solver_state.temporal_smoothing = jkass_temporal_smoothing;
+
+    // Evaluate the DiT at (xt_in, t_val) and write the guided velocity into vt.
+    // The main loop calls it once per step; multi evaluation solvers call it
+    // again through model_fn at intermediate points. dump_step is the step
+    // index for debug dumps, -1 for solver internal evaluations.
+    int  dump_step         = -1;
+    // guide = false leaves the raw predictions in vt_cond / vt_uncond (CFG-MP).
+    auto evaluate_velocity = [&](const float * xt_in, float t_val, bool guide) {
+        // Set timestep (changes each step)
+        if (t_t) {
+            ggml_backend_tensor_set(t_t, &t_val, 0, sizeof(float));
+        }
+        if (t_tr) {
+            ggml_backend_tensor_set(t_tr, &t_val, 0, sizeof(float));
+        }
+
+        // Scheduler fallback inputs may be reused as scratch, so they refresh
+        // every step. A direct graph pins the constants through their output
+        // flag; only enc_hidden re-uploads under two-pass CFG because the
+        // uncond pass swaps its contents.
+        if (!dit_graph.direct || (do_cfg && !batch_cfg)) {
+            ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
+        }
+        if (!dit_graph.direct) {
+            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, (size_t) S * (size_t) N_graph * sizeof(int32_t));
+            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
+                                    (size_t) S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
+            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
+                                    (size_t) enc_S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
+        }
+
+        // Update xt portion of input: [in_ch, T, N_graph] (context_latents pre-filled)
+        // Both cond and uncond slots receive the same noisy latent
+        for (int b = 0; b < N; b++) {
+            for (int t = 0; t < T; t++) {
+                memcpy(&input_buf[b * T * in_ch + t * in_ch + ctx_ch], &xt_in[b * n_per + t * Oc], Oc * sizeof(float));
+            }
+            if (batch_cfg) {
+                for (int t = 0; t < T; t++) {
+                    memcpy(&input_buf[(N + b) * T * in_ch + t * in_ch + ctx_ch], &xt_in[b * n_per + t * Oc],
+                           Oc * sizeof(float));
+                }
+            }
+        }
+        ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
+
+        // Conditional forward pass
+        static_graph_compute(&dit_graph, model->backend, model->sched, gf);
+
+        // dump intermediate tensors on step 0 (sample 0 only for batch)
+        if (dump_step == 0 && dbg && dbg->enabled) {
+            auto dump_named = [&](const char * name) {
+                struct ggml_tensor * t = ggml_graph_get_tensor(gf, name);
+                if (t) {
+                    // For batched tensors, dump only sample 0 (first slice)
+                    int64_t            n0           = t->ne[0];
+                    int64_t            n1           = t->ne[1];
+                    int64_t            sample_elems = n0 * n1;  // [ne0, ne1] of first sample
+                    std::vector<float> buf(sample_elems);
+                    ggml_backend_tensor_get(t, buf.data(), 0, sample_elems * sizeof(float));
+                    if (n1 <= 1) {
+                        debug_dump_1d(dbg, name, buf.data(), (int) n0);
+                    } else {
+                        debug_dump_2d(dbg, name, buf.data(), (int) n0, (int) n1);
+                    }
+                }
+            };
+            dump_named("tproj");
+            dump_named("temb");
+            dump_named("temb_t");
+            dump_named("temb_r");
+            dump_named("sinusoidal_t");
+            dump_named("sinusoidal_r");
+            dump_named("temb_lin1_t");
+            dump_named("temb_lin1_r");
+            dump_named("hidden_after_proj_in");
+            dump_named("proj_in_input");
+            dump_named("enc_after_cond_emb");
+            dump_named("layer0_sa_input");
+            dump_named("layer0_q_after_rope");
+            dump_named("layer0_k_after_rope");
+            dump_named("layer0_sa_output");
+            dump_named("layer0_attn_out");
+            dump_named("layer0_after_self_attn");
+            dump_named("layer0_after_cross_attn");
+            dump_named("hidden_after_layer0");
+            dump_named("hidden_after_layer6");
+            dump_named("hidden_after_layer12");
+            dump_named("hidden_after_layer18");
+            char last_layer_name[64];
+            snprintf(last_layer_name, sizeof(last_layer_name), "hidden_after_layer%d", c.n_layers - 1);
+            dump_named(last_layer_name);
+        }
+
+        // Read velocity output and apply CFG
+        if (batch_cfg) {
+            // Output is [Oc, T, 2N]: first N = conditional, last N = unconditional
+            std::vector<float> full_output(n_per * N_graph);
+            ggml_backend_tensor_get(t_output, full_output.data(), 0, n_per * N_graph * sizeof(float));
+            memcpy(vt_cond.data(), full_output.data(), n_total * sizeof(float));
+            memcpy(vt_uncond.data(), full_output.data() + n_total, n_total * sizeof(float));
+
+            if (dump_step >= 0 && dbg && dbg->enabled) {
+                char name[64];
+                snprintf(name, sizeof(name), "dit_step%d_vt_cond", dump_step);
+                debug_dump_2d(dbg, name, vt_cond.data(), T, Oc);
+                snprintf(name, sizeof(name), "dit_step%d_vt_uncond", dump_step);
+                debug_dump_2d(dbg, name, vt_uncond.data(), T, Oc);
+            }
+
+            if (guide) {
+                for (int b = 0; b < N; b++) {
+                    guidance_apply(guide_params, guide_step, vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
+                                   guidance_scale, guide_states[b], vt.data() + b * n_per, Oc, T);
+                }
+            }
+        } else if (do_cfg) {
+            // 2-pass: conditional output already computed, read it
+            ggml_backend_tensor_get(t_output, vt_cond.data(), 0, n_total * sizeof(float));
+
+            if (dump_step >= 0 && dbg && dbg->enabled) {
+                char name[64];
+                snprintf(name, sizeof(name), "dit_step%d_vt_cond", dump_step);
+                debug_dump_2d(dbg, name, vt_cond.data(), T, Oc);
+            }
+
+            // Unconditional pass: re-upload null encoder + all inputs (scheduler clobbers buffers)
+            ggml_backend_tensor_set(t_enc, null_enc_buf.data(), 0, H_enc * enc_S * N * sizeof(float));
+            ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N * sizeof(float));
+            if (t_t) {
+                ggml_backend_tensor_set(t_t, &t_val, 0, sizeof(float));
+            }
+            if (t_tr) {
+                ggml_backend_tensor_set(t_tr, &t_val, 0, sizeof(float));
+            }
+            if (!dit_graph.direct) {
+                ggml_backend_tensor_set(t_pos, pos_data.data(), 0, (size_t) S * (size_t) N * sizeof(int32_t));
+                ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
+                                        (size_t) S * (size_t) S * (size_t) N * sizeof(uint16_t));
+                ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
+                                        (size_t) enc_S * (size_t) S * (size_t) N * sizeof(uint16_t));
+            }
+
+            static_graph_compute(&dit_graph, model->backend, model->sched, gf);
+            ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
+
+            if (dump_step >= 0 && dbg && dbg->enabled) {
+                char name[64];
+                snprintf(name, sizeof(name), "dit_step%d_vt_uncond", dump_step);
+                debug_dump_2d(dbg, name, vt_uncond.data(), T, Oc);
+            }
+
+            if (guide) {
+                for (int b = 0; b < N; b++) {
+                    guidance_apply(guide_params, guide_step, vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
+                                   guidance_scale, guide_states[b], vt.data() + b * n_per, Oc, T);
+                }
+            }
+        } else {
+            // read velocity output: [Oc, T, N]
+            ggml_backend_tensor_get(t_output, vt.data(), 0, n_total * sizeof(float));
+        }
+    };
+    SolverModelFn model_fn;
+    if (solver_info->nfe != 1) {
+        model_fn = [&](const float * xt_in, float t_val) {
+            dump_step = -1;
+            evaluate_velocity(xt_in, t_val, true);
+        };
+    }
+    std::vector<float> vt_step;
 
     // Flow matching loop
     bool switched_cover = false;
@@ -463,158 +538,11 @@ static int dit_ggml_generate(DiTGGML *           model,
             fprintf(stderr, "[DiT] Cover: switched to non-cover context at step %d/%d\n", step, num_steps);
         }
 
-        // Set timestep (changes each step)
-        if (t_t) {
-            ggml_backend_tensor_set(t_t, &t_curr, 0, sizeof(float));
-        }
-        if (t_tr) {
-            ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
-        }
-
-        // Scheduler fallback inputs may be reused as scratch, so they refresh
-        // every step. A direct graph pins the constants through their output
-        // flag; only enc_hidden re-uploads under two-pass CFG because the
-        // uncond pass swaps its contents.
-        if (!dit_graph.direct || (do_cfg && !batch_cfg)) {
-            ggml_backend_tensor_set(t_enc, enc_buf.data(), 0, enc_buf.size() * sizeof(float));
-        }
-        if (!dit_graph.direct) {
-            ggml_backend_tensor_set(t_pos, pos_data.data(), 0, (size_t) S * (size_t) N_graph * sizeof(int32_t));
-            ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
-                                    (size_t) S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
-            ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
-                                    (size_t) enc_S * (size_t) S * (size_t) N_graph * sizeof(uint16_t));
-        }
-
-        // Update xt portion of input: [in_ch, T, N_graph] (context_latents pre-filled)
-        // Both cond and uncond slots receive the same noisy latent
-        for (int b = 0; b < N; b++) {
-            for (int t = 0; t < T; t++) {
-                memcpy(&input_buf[b * T * in_ch + t * in_ch + ctx_ch], &xt[b * n_per + t * Oc], Oc * sizeof(float));
-            }
-            if (batch_cfg) {
-                for (int t = 0; t < T; t++) {
-                    memcpy(&input_buf[(N + b) * T * in_ch + t * in_ch + ctx_ch], &xt[b * n_per + t * Oc],
-                           Oc * sizeof(float));
-                }
-            }
-        }
-        ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N_graph * sizeof(float));
-
-        // Conditional forward pass
-        static_graph_compute(&dit_graph, model->backend, model->sched, gf);
-
-        // dump intermediate tensors on step 0 (sample 0 only for batch)
-        if (step == 0 && dbg && dbg->enabled) {
-            auto dump_named = [&](const char * name) {
-                struct ggml_tensor * t = ggml_graph_get_tensor(gf, name);
-                if (t) {
-                    // For batched tensors, dump only sample 0 (first slice)
-                    int64_t            n0           = t->ne[0];
-                    int64_t            n1           = t->ne[1];
-                    int64_t            sample_elems = n0 * n1;  // [ne0, ne1] of first sample
-                    std::vector<float> buf(sample_elems);
-                    ggml_backend_tensor_get(t, buf.data(), 0, sample_elems * sizeof(float));
-                    if (n1 <= 1) {
-                        debug_dump_1d(dbg, name, buf.data(), (int) n0);
-                    } else {
-                        debug_dump_2d(dbg, name, buf.data(), (int) n0, (int) n1);
-                    }
-                }
-            };
-            dump_named("tproj");
-            dump_named("temb");
-            dump_named("temb_t");
-            dump_named("temb_r");
-            dump_named("sinusoidal_t");
-            dump_named("sinusoidal_r");
-            dump_named("temb_lin1_t");
-            dump_named("temb_lin1_r");
-            dump_named("hidden_after_proj_in");
-            dump_named("proj_in_input");
-            dump_named("enc_after_cond_emb");
-            dump_named("layer0_sa_input");
-            dump_named("layer0_q_after_rope");
-            dump_named("layer0_k_after_rope");
-            dump_named("layer0_sa_output");
-            dump_named("layer0_attn_out");
-            dump_named("layer0_after_self_attn");
-            dump_named("layer0_after_cross_attn");
-            dump_named("hidden_after_layer0");
-            dump_named("hidden_after_layer6");
-            dump_named("hidden_after_layer12");
-            dump_named("hidden_after_layer18");
-            char last_layer_name[64];
-            snprintf(last_layer_name, sizeof(last_layer_name), "hidden_after_layer%d", c.n_layers - 1);
-            dump_named(last_layer_name);
-        }
-
-        // Read velocity output and apply CFG
-        if (batch_cfg) {
-            // Output is [Oc, T, 2N]: first N = conditional, last N = unconditional
-            std::vector<float> full_output(n_per * N_graph);
-            ggml_backend_tensor_get(t_output, full_output.data(), 0, n_per * N_graph * sizeof(float));
-            memcpy(vt_cond.data(), full_output.data(), n_total * sizeof(float));
-            memcpy(vt_uncond.data(), full_output.data() + n_total, n_total * sizeof(float));
-
-            if (dbg && dbg->enabled) {
-                char name[64];
-                snprintf(name, sizeof(name), "dit_step%d_vt_cond", step);
-                debug_dump_2d(dbg, name, vt_cond.data(), T, Oc);
-                snprintf(name, sizeof(name), "dit_step%d_vt_uncond", step);
-                debug_dump_2d(dbg, name, vt_uncond.data(), T, Oc);
-            }
-
-            // APG per sample
-            for (int b = 0; b < N; b++) {
-                apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale, apg_mbufs[b],
-                            vt.data() + b * n_per, Oc, T);
-            }
-        } else if (do_cfg) {
-            // 2-pass: conditional output already computed, read it
-            ggml_backend_tensor_get(t_output, vt_cond.data(), 0, n_total * sizeof(float));
-
-            if (dbg && dbg->enabled) {
-                char name[64];
-                snprintf(name, sizeof(name), "dit_step%d_vt_cond", step);
-                debug_dump_2d(dbg, name, vt_cond.data(), T, Oc);
-            }
-
-            // Unconditional pass: re-upload null encoder + all inputs (scheduler clobbers buffers)
-            ggml_backend_tensor_set(t_enc, null_enc_buf.data(), 0, H_enc * enc_S * N * sizeof(float));
-            ggml_backend_tensor_set(t_input, input_buf.data(), 0, in_ch * T * N * sizeof(float));
-            if (t_t) {
-                ggml_backend_tensor_set(t_t, &t_curr, 0, sizeof(float));
-            }
-            if (t_tr) {
-                ggml_backend_tensor_set(t_tr, &t_curr, 0, sizeof(float));
-            }
-            if (!dit_graph.direct) {
-                ggml_backend_tensor_set(t_pos, pos_data.data(), 0, (size_t) S * (size_t) N * sizeof(int32_t));
-                ggml_backend_tensor_set(t_sa_mask_sw, sa_sw_data.data(), 0,
-                                        (size_t) S * (size_t) S * (size_t) N * sizeof(uint16_t));
-                ggml_backend_tensor_set(t_ca_mask, ca_data.data(), 0,
-                                        (size_t) enc_S * (size_t) S * (size_t) N * sizeof(uint16_t));
-            }
-
-            static_graph_compute(&dit_graph, model->backend, model->sched, gf);
-            ggml_backend_tensor_get(t_output, vt_uncond.data(), 0, n_total * sizeof(float));
-
-            if (dbg && dbg->enabled) {
-                char name[64];
-                snprintf(name, sizeof(name), "dit_step%d_vt_uncond", step);
-                debug_dump_2d(dbg, name, vt_uncond.data(), T, Oc);
-            }
-
-            // APG per sample
-            for (int b = 0; b < N; b++) {
-                apg_forward(vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per, guidance_scale, apg_mbufs[b],
-                            vt.data() + b * n_per, Oc, T);
-            }
-        } else {
-            // read velocity output: [Oc, T, N]
-            ggml_backend_tensor_get(t_output, vt.data(), 0, n_total * sizeof(float));
-        }
+        guide_step.step_idx = step;
+        guide_step.t_curr   = t_curr;
+        guide_step.dt       = t_curr - (step + 1 < num_steps ? schedule[step + 1] : 0.0f);
+        dump_step           = step;
+        evaluate_velocity(xt.data(), t_curr, true);
 
         if (dbg && dbg->enabled) {
             char name[64];
@@ -632,9 +560,15 @@ static int dit_ggml_generate(DiTGGML *           model,
             float t_next = schedule[step + 1];
 
             // Modular solver dispatch. The solver mutates xt in place.
-            // 1 NFE solvers ignore the model_fn callback (passed empty).
+            // Multi evaluation solvers overwrite vt through model_fn, so they
+            // read the step's own velocity from a snapshot.
+            const float * vt_in = vt.data();
+            if (model_fn) {
+                vt_step.assign(vt.begin(), vt.end());
+                vt_in = vt_step.data();
+            }
             solver_state.step_index = step;
-            solver_info->step_fn(xt.data(), vt.data(), t_curr, t_next, n_total, solver_state, {}, vt.data());
+            solver_info->step_fn(xt.data(), vt_in, t_curr, t_next, n_total, solver_state, model_fn, vt.data());
 
             // DCW: Differential Correction in Wavelet domain (CVPR 2026).
             // Sampler-side correction for SNR-t bias in flow matching.
@@ -670,7 +604,7 @@ static int dit_ggml_generate(DiTGGML *           model,
                 float s_pix      = dcw_scaler;                         // constant per paper
                 for (int b = 0; b < N; b++) {
                     const float * xt_b = xt.data() + b * n_per;
-                    const float * vt_b = vt.data() + b * n_per;
+                    const float * vt_b = vt_in + b * n_per;
                     for (int i = 0; i < n_per; i++) {
                         denoised[i] = xt_b[i] - vt_b[i] * t_next;
                     }
@@ -689,6 +623,23 @@ static int dit_ggml_generate(DiTGGML *           model,
                     }
                 }
                 fprintf(stderr, "[DiT] DCW step %d/%d mode=%s (t_curr=%.3f)\n", step + 1, num_steps, dcw_mode, t_curr);
+            }
+
+            // CFG-MP manifold projection at t_next: K fixed point iterations of
+            // z = x - a * v_uncond(x), x = z + a * v_cond(z), a = |dt| / 2.
+            if (do_cfg && guide_params.mode == "cfg_mp") {
+                float a = fabsf(t_curr - t_next) * 0.5f;
+                for (int k = 0; k < guide_params.mp_iterations; k++) {
+                    dump_step = -1;
+                    evaluate_velocity(xt.data(), t_next, false);
+                    for (int i = 0; i < n_total; i++) {
+                        xt[i] -= a * vt_uncond[i];
+                    }
+                    evaluate_velocity(xt.data(), t_next, false);
+                    for (int i = 0; i < n_total; i++) {
+                        xt[i] += a * vt_cond[i];
+                    }
+                }
             }
         }
 
