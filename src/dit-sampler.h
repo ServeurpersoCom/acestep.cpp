@@ -425,8 +425,9 @@ static int dit_ggml_generate(DiTGGML *           model,
 
             if (guide) {
                 for (int b = 0; b < N; b++) {
-                    guidance_apply(guide_params, guide_step, vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
-                                   guidance_scale, guide_states[b], vt.data() + b * n_per, Oc, T);
+                    guidance_apply(guide_params, guide_step, xt_in + b * n_per, vt_cond.data() + b * n_per,
+                                   vt_uncond.data() + b * n_per, guidance_scale, guide_states[b], vt.data() + b * n_per,
+                                   Oc, T);
                 }
             }
         } else if (do_cfg) {
@@ -467,8 +468,9 @@ static int dit_ggml_generate(DiTGGML *           model,
 
             if (guide) {
                 for (int b = 0; b < N; b++) {
-                    guidance_apply(guide_params, guide_step, vt_cond.data() + b * n_per, vt_uncond.data() + b * n_per,
-                                   guidance_scale, guide_states[b], vt.data() + b * n_per, Oc, T);
+                    guidance_apply(guide_params, guide_step, xt_in + b * n_per, vt_cond.data() + b * n_per,
+                                   vt_uncond.data() + b * n_per, guidance_scale, guide_states[b], vt.data() + b * n_per,
+                                   Oc, T);
                 }
             }
         } else {
@@ -627,7 +629,8 @@ static int dit_ggml_generate(DiTGGML *           model,
 
             // CFG-MP manifold projection at t_next: K fixed point iterations of
             // z = x - a * v_uncond(x), x = z + a * v_cond(z), a = |dt| / 2.
-            if (do_cfg && guide_params.mode == "cfg_mp") {
+            if (do_cfg && guide_params.mode == "cfg_mp" && t_next >= guide_params.interval_start &&
+                t_next <= guide_params.interval_end) {
                 float a = fabsf(t_curr - t_next) * 0.5f;
                 for (int k = 0; k < guide_params.mp_iterations; k++) {
                     dump_step = -1;

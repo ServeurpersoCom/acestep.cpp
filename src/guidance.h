@@ -17,6 +17,12 @@
 //   cfg_mp         APG, then manifold projection after each solver step
 //                  with extra model evaluations (Su et al. 2025,
 //                  arXiv:2601.21892). The projection lives in the sampler.
+//   adg            Angle based Dynamic Guidance, no APG: the angle between
+//                  the conditional and unconditional x0 estimates is scaled
+//                  and clipped to pi/6 (ACE-Step 1.5 adg_forward, base model).
+//
+// cfg_interval_start / cfg_interval_end restrict any mode to the steps whose
+// t_curr falls inside them; outside it the conditional prediction is used.
 //
 // C++ ports of the HOT-Step guidance plugins (https://github.com/scragnog/HOT-Step-CPP).
 
@@ -143,6 +149,8 @@ struct GuidanceParams {
     float       smc_lambda      = 0.5f;   // smc_cfg sliding surface slope
     float       smc_k           = 0.1f;   // smc_cfg switching gain
     int         mp_iterations   = 1;      // cfg_mp fixed point iterations per step
+    float       interval_start  = 0.0f;   // CFG only for t_curr in [start, end]
+    float       interval_end    = 1.0f;
 };
 
 // Per sample state, lives across the steps of one generation.
@@ -162,12 +170,65 @@ struct GuidanceStep {
 
 static bool guidance_known(const std::string & mode) {
     return mode == "apg" || mode == "cfg_pp" || mode == "dynamic_cfg" || mode == "rescaled_cfg" ||
-           mode == "cfg_zero_star" || mode == "smc_cfg" || mode == "cfg_mp";
+           mode == "cfg_zero_star" || mode == "smc_cfg" || mode == "cfg_mp" || mode == "adg";
 }
 
-// Combine one sample's predictions [T, Oc] into the guided velocity.
+// ADG (ACE-Step 1.5 adg_forward), per frame of Oc channels: rotate the
+// conditional x0 estimate away from the unconditional one by the scaled,
+// clipped angle between them. xt is the current latent [T, Oc], t = t_curr.
+static void guidance_adg(const float * xt,
+                         const float * pred_cond,
+                         const float * pred_uncond,
+                         float         scale,
+                         float         t,
+                         float *       result,
+                         int           Oc,
+                         int           T) {
+    const double        w     = (scale - 1.0 > 0.0 ? scale - 1.0 : 0.0) + 1e-3;
+    const double        clip  = 3.14 / 6.0;
+    const double        sigma = t > 1e-6f ? t : 1e-6;
+    std::vector<double> lt(Oc), lu(Oc), perp(Oc);
+    for (int f = 0; f < T; f++) {
+        const float * x      = xt + (size_t) f * Oc;
+        const float * vc     = pred_cond + (size_t) f * Oc;
+        const float * vu     = pred_uncond + (size_t) f * Oc;
+        double        dot_tu = 0.0, nt = 0.0, nu = 0.0;
+        for (int c = 0; c < Oc; c++) {
+            lt[c] = x[c] - sigma * vc[c];
+            lu[c] = x[c] - sigma * vu[c];
+            dot_tu += lt[c] * lu[c];
+            nt += lt[c] * lt[c];
+            nu += lu[c] * lu[c];
+        }
+        double cos_theta = dot_tu / (sqrt(nt) * sqrt(nu) + 1e-12);
+        cos_theta        = fmin(fmax(cos_theta, -1.0 + 1e-6), 1.0 - 1e-6);
+        double theta     = acos(cos_theta);
+        double theta_new = fmin(fmax(w * theta, -clip), clip);
+        // perpendicular part of (lt - lu) relative to lu
+        double dot_du    = 0.0;
+        for (int c = 0; c < Oc; c++) {
+            dot_du += (lt[c] - lu[c]) * lu[c];
+        }
+        double k = dot_du / (nu + 1e-8);
+        for (int c = 0; c < Oc; c++) {
+            perp[c] = (lt[c] - lu[c]) - k * lu[c];
+        }
+        double  s_theta = sin(theta);
+        double  p_gain  = s_theta > 1e-3 ? sin(theta_new) / s_theta : w;
+        double  v_gain  = cos(theta_new);
+        float * out     = result + (size_t) f * Oc;
+        for (int c = 0; c < Oc; c++) {
+            double latent_new = v_gain * lt[c] + p_gain * perp[c];
+            out[c]            = (float) ((x[c] - latent_new) / sigma);
+        }
+    }
+}
+
+// Combine one sample's predictions [T, Oc] into the guided velocity. xt is
+// the sample's current latent, read by adg.
 static void guidance_apply(const GuidanceParams & p,
                            const GuidanceStep &   st,
+                           const float *          xt,
                            const float *          pred_cond,
                            const float *          pred_uncond,
                            float                  scale,
@@ -176,6 +237,15 @@ static void guidance_apply(const GuidanceParams & p,
                            int                    Oc,
                            int                    T) {
     const int n = Oc * T;
+
+    if (st.t_curr < p.interval_start || st.t_curr > p.interval_end) {
+        memcpy(result, pred_cond, (size_t) n * sizeof(float));
+        return;
+    }
+    if (p.mode == "adg") {
+        guidance_adg(xt, pred_cond, pred_uncond, scale, st.t_curr, result, Oc, T);
+        return;
+    }
 
     if (p.mode == "cfg_zero_star" && st.step_idx < p.zero_init_steps) {
         memset(result, 0, (size_t) n * sizeof(float));

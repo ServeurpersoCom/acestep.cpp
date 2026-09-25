@@ -65,6 +65,10 @@ void request_init(AceRequest * r) {
     r->smc_lambda               = 0.5f;
     r->smc_k                    = 0.1f;
     r->cfg_mp_iterations        = 1;
+    r->cfg_interval_start       = 0.0f;
+    r->cfg_interval_end         = 1.0f;
+    r->retake_seed              = -1;
+    r->retake_variance          = 0.0f;
     r->lm_mode                  = LM_MODE_NAME_GENERATE;
     r->output_format            = OUTPUT_FORMAT_MP3;
     r->synth_model              = "";
@@ -159,6 +163,18 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "cfg_mp_iterations")) && yyjson_is_int(v)) {
         r->cfg_mp_iterations = (int) yyjson_get_int(v);
+    }
+    if ((v = yyjson_obj_get(obj, "cfg_interval_start")) && yyjson_is_num(v)) {
+        r->cfg_interval_start = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "cfg_interval_end")) && yyjson_is_num(v)) {
+        r->cfg_interval_end = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "retake_seed")) && yyjson_is_num(v)) {
+        r->retake_seed = (int64_t) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "retake_variance")) && yyjson_is_num(v)) {
+        r->retake_variance = (float) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "custom_timesteps")) && yyjson_is_str(v)) {
         r->custom_timesteps = yy_str(v);
@@ -568,6 +584,18 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     }
     if (all || r->cfg_mp_iterations != def.cfg_mp_iterations) {
         yyjson_mut_obj_add_int(doc, root, "cfg_mp_iterations", r->cfg_mp_iterations);
+    }
+    if (all || r->cfg_interval_start != def.cfg_interval_start) {
+        yyjson_mut_obj_add_real(doc, root, "cfg_interval_start", r->cfg_interval_start);
+    }
+    if (all || r->cfg_interval_end != def.cfg_interval_end) {
+        yyjson_mut_obj_add_real(doc, root, "cfg_interval_end", r->cfg_interval_end);
+    }
+    if (all || r->retake_seed != def.retake_seed) {
+        yyjson_mut_obj_add_int(doc, root, "retake_seed", r->retake_seed);
+    }
+    if (all || r->retake_variance != def.retake_variance) {
+        yyjson_mut_obj_add_real(doc, root, "retake_variance", r->retake_variance);
     }
     if (all || r->custom_timesteps != def.custom_timesteps) {
         yyjson_mut_obj_add_str(doc, root, "custom_timesteps", r->custom_timesteps.c_str());

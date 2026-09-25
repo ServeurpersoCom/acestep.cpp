@@ -775,6 +775,21 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
         float * dst = s.noise.data() + b * s.Oc * s.T;
         s.seeds[b]  = reqs[b].seed;
         philox_randn(reqs[b].seed, dst, s.Oc * s.T, /*bf16_round=*/true);
+        // Retake: a variance preserving blend with a second draw
+        // (ACE-Step 1.5 retake_variance / retake_seed).
+        if (reqs[b].retake_variance > 0.0f) {
+            int64_t retake_seed =
+                reqs[b].retake_seed >= 0 ? reqs[b].retake_seed : (reqs[b].seed ^ 0x9E3779B9LL) & 0xFFFFFFFFLL;
+            std::vector<float> retake((size_t) s.Oc * s.T);
+            philox_randn(retake_seed, retake.data(), s.Oc * s.T, /*bf16_round=*/true);
+            const float v_rad = reqs[b].retake_variance * 1.57079632679f;
+            const float a = cosf(v_rad), c = sinf(v_rad);
+            for (size_t i = 0; i < retake.size(); i++) {
+                dst[i] = a * dst[i] + c * retake[i];
+            }
+            fprintf(stderr, "[Init-Noise Batch%d] Retake seed=%lld variance=%.2f\n", b, (long long) retake_seed,
+                    reqs[b].retake_variance);
+        }
         fprintf(stderr, "[Init-Noise Batch%d] Philox noise seed=%lld, [%d, %d] solver=%s\n", b,
                 (long long) reqs[b].seed, s.T, s.Oc, s.rr.solver.c_str());
     }
@@ -856,6 +871,8 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     guidance.smc_lambda      = s.rr.smc_lambda;
     guidance.smc_k           = s.rr.smc_k;
     guidance.mp_iterations   = s.rr.cfg_mp_iterations > 0 ? s.rr.cfg_mp_iterations : 1;
+    guidance.interval_start  = s.rr.cfg_interval_start;
+    guidance.interval_end    = s.rr.cfg_interval_end;
 
     s.timer.reset();
     int dit_rc = dit_ggml_generate(

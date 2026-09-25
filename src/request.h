@@ -122,6 +122,17 @@ struct AceRequest {
     float       smc_lambda;           // 0.5
     float       smc_k;                // 0.1
     int         cfg_mp_iterations;    // 1
+    // CFG only while t_curr is inside [cfg_interval_start, cfg_interval_end],
+    // the conditional prediction alone outside it.
+    float       cfg_interval_start;  // 0.0
+    float       cfg_interval_end;    // 1.0
+
+    // Retake: blend the initial noise with a second draw,
+    // noise = cos(v*pi/2) * noise(seed) + sin(v*pi/2) * noise(retake_seed).
+    // 0 keeps the take, 1 is the take retake_seed would give. -1 derives the
+    // retake seed from seed.
+    int64_t retake_seed;      // -1
+    float   retake_variance;  // 0.0
 
     // LM mode: "generate" (full: metadata + lyrics + codes),
     // "inspire" (short query -> metadata + lyrics, no codes),
