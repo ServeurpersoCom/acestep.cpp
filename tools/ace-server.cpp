@@ -1562,6 +1562,19 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     }
     yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
 
+    // adapter_info: which half of the model each adapter changes
+    yyjson_mut_val * info_arr = yyjson_mut_arr(doc);
+    for (const auto & e : g_registry.adapters) {
+        bool dit = false, lm = false;
+        adapter_classify(e.path, &dit, &lm);
+        yyjson_mut_val * item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "name", e.name.c_str());
+        yyjson_mut_obj_add_bool(doc, item, "dit", dit);
+        yyjson_mut_obj_add_bool(doc, item, "lm", lm);
+        yyjson_mut_arr_append(info_arr, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "adapter_info", info_arr);
+
     // cli: server settings
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
     yyjson_mut_obj_add_val(doc, root, "cli", cli);

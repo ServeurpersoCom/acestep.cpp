@@ -2,6 +2,7 @@
 // adapter-resolve.h: turn a request's DiT adapter fields into the spec
 // dit_ggml_load merges (adapter-stack.h), names resolved in the registry.
 
+#include "adapter-merge.h"
 #include "adapter-stack.h"
 #include "model-registry.h"
 #include "request.h"
@@ -49,4 +50,41 @@ static bool request_adapter_spec(const AceRequest &    req,
     }
     *spec = adapter_stack_encode(stack);
     return true;
+}
+
+// What half of the model an adapter changes, read from its tensor names:
+// the DiT (decoder, cross attention) or the planner LM (model.layers without
+// cross attention). False for both when the weights cannot be read.
+static void adapter_classify(const std::string & path, bool * dit, bool * lm) {
+    *dit             = false;
+    *lm              = false;
+    std::string file = path;
+    struct stat sb;
+    if (stat(path.c_str(), &sb) == 0 && S_ISDIR(sb.st_mode)) {
+        const char * names[] = { "/adapter_model.safetensors", "/lokr_weights.safetensors" };
+        file.clear();
+        for (const char * n : names) {
+            if (stat((path + n).c_str(), &sb) == 0) {
+                file = path + n;
+                break;
+            }
+        }
+        if (file.empty()) {
+            file = adapter_single_weights(path.c_str());
+        }
+    }
+    STFile st = {};
+    if (file.empty() || !st_open(&st, file.c_str())) {
+        return;
+    }
+    bool cross = false, decoder = false, lm_layers = false;
+    for (const STEntry & e : st.entries) {
+        cross |= e.name.find("cross_attn") != std::string::npos;
+        decoder |= e.name.find("decoder.") != std::string::npos || e.name.find("diffusion_model.") != std::string::npos;
+        lm_layers |=
+            e.name.find("model.layers.") != std::string::npos || e.name.find("lycoris_layers_") != std::string::npos;
+    }
+    st_close(&st);
+    *dit = cross || decoder;
+    *lm  = !*dit && lm_layers;
 }
