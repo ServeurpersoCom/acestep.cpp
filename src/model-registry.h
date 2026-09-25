@@ -268,10 +268,29 @@ static bool registry_scan_adapters(ModelRegistry * reg, const char * adapters_di
             std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + "adapter_model.safetensors";
         std::string lokr = std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + "lokr_weights.safetensors";
         bool        is_peft = registry_is_file(adapter.c_str());
-        if (is_peft || registry_is_file(lokr.c_str())) {
-            std::string full = std::string(adapters_dir) + REGISTRY_SEP + dname;
-            reg->adapters.push_back({ dname, full });
-            fprintf(stderr, "[Registry] Adapter: %s (%s)\n", dname.c_str(), is_peft ? "PEFT" : "LoKr");
+        bool        is_lokr = !is_peft && registry_is_file(lokr.c_str());
+        std::string dir     = std::string(adapters_dir) + REGISTRY_SEP + dname;
+        // a folder holding one weights file under its own name, as most
+        // published adapters ship (name.safetensors + adapter_config.json)
+        std::string single;
+        if (!is_peft && !is_lokr) {
+            std::vector<std::string> inner;
+            registry_list_dir(dir.c_str(), &inner);
+            int n = 0;
+            for (const auto & f : inner) {
+                if (str_ends_with(f, ".safetensors")) {
+                    single = f;
+                    n++;
+                }
+            }
+            if (n != 1) {
+                single.clear();
+            }
+        }
+        if (is_peft || is_lokr || !single.empty()) {
+            reg->adapters.push_back({ dname, dir });
+            fprintf(stderr, "[Registry] Adapter: %s (%s)\n", dname.c_str(),
+                    is_peft ? "PEFT" : (is_lokr ? "LoKr" : single.c_str()));
             count++;
         }
     }

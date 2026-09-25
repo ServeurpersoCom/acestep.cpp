@@ -72,6 +72,13 @@ void request_init(AceRequest * r) {
     r->adapter                  = "";
     r->adapter_scale            = 1.0f;
     r->lm_adapter_scale         = 1.0f;
+    r->adapters.clear();
+    r->adapter_group_self_attn  = 1.0f;
+    r->adapter_group_cross_attn = 1.0f;
+    r->adapter_group_mlp        = 1.0f;
+    r->adapter_group_cond_embed = 1.0f;
+    r->adapter_group_time_embed = 1.0f;
+    r->adapter_group_proj_in    = 1.0f;
     r->vae                      = "";
     r->peak_clip                = 10;
     r->mp3_bitrate              = 128;
@@ -176,6 +183,44 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "lm_adapter_scale")) && yyjson_is_num(v)) {
         r->lm_adapter_scale = (float) yyjson_get_num(v);
+    }
+    if ((v = yyjson_obj_get(obj, "adapters")) && yyjson_is_arr(v)) {
+        r->adapters.clear();
+        size_t       idx, max;
+        yyjson_val * item;
+        yyjson_arr_foreach(v, idx, max, item) {
+            yyjson_val * n = yyjson_obj_get(item, "name");
+            if (!n || !yyjson_is_str(n) || yyjson_get_len(n) == 0) {
+                continue;
+            }
+            AceAdapterRef ref;
+            ref.name       = yy_str(n);
+            yyjson_val * s = yyjson_obj_get(item, "scale");
+            if (s && yyjson_is_num(s)) {
+                ref.scale = (float) yyjson_get_num(s);
+            }
+            r->adapters.push_back(ref);
+        }
+    }
+    if ((v = yyjson_obj_get(obj, "adapter_group_scales")) && yyjson_is_obj(v)) {
+        struct {
+            const char * key;
+            float *      dst;
+        } groups[] = {
+            { "self_attn",  &r->adapter_group_self_attn  },
+            { "cross_attn", &r->adapter_group_cross_attn },
+            { "mlp",        &r->adapter_group_mlp        },
+            { "cond_embed", &r->adapter_group_cond_embed },
+            { "time_embed", &r->adapter_group_time_embed },
+            { "proj_in",    &r->adapter_group_proj_in    },
+        };
+
+        for (auto & g : groups) {
+            yyjson_val * gv = yyjson_obj_get(v, g.key);
+            if (gv && yyjson_is_num(gv)) {
+                *g.dst = (float) yyjson_get_num(gv);
+            }
+        }
     }
     if ((v = yyjson_obj_get(obj, "vae")) && yyjson_is_str(v)) {
         r->vae = yy_str(v);
@@ -557,6 +602,29 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->lm_adapter_scale != def.lm_adapter_scale) {
         yyjson_mut_obj_add_real(doc, root, "lm_adapter_scale", r->lm_adapter_scale);
     }
+    if (all || !r->adapters.empty()) {
+        yyjson_mut_val * arr = yyjson_mut_arr(doc);
+        for (const auto & a : r->adapters) {
+            yyjson_mut_val * item = yyjson_mut_obj(doc);
+            yyjson_mut_obj_add_strcpy(doc, item, "name", a.name.c_str());
+            yyjson_mut_obj_add_real(doc, item, "scale", a.scale);
+            yyjson_mut_arr_append(arr, item);
+        }
+        yyjson_mut_obj_add_val(doc, root, "adapters", arr);
+    }
+    bool groups_set = r->adapter_group_self_attn != 1.0f || r->adapter_group_cross_attn != 1.0f ||
+                      r->adapter_group_mlp != 1.0f || r->adapter_group_cond_embed != 1.0f ||
+                      r->adapter_group_time_embed != 1.0f || r->adapter_group_proj_in != 1.0f;
+    if (all || groups_set) {
+        yyjson_mut_val * g = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_real(doc, g, "self_attn", r->adapter_group_self_attn);
+        yyjson_mut_obj_add_real(doc, g, "cross_attn", r->adapter_group_cross_attn);
+        yyjson_mut_obj_add_real(doc, g, "mlp", r->adapter_group_mlp);
+        yyjson_mut_obj_add_real(doc, g, "cond_embed", r->adapter_group_cond_embed);
+        yyjson_mut_obj_add_real(doc, g, "time_embed", r->adapter_group_time_embed);
+        yyjson_mut_obj_add_real(doc, g, "proj_in", r->adapter_group_proj_in);
+        yyjson_mut_obj_add_val(doc, root, "adapter_group_scales", g);
+    }
     if (all || r->vae != def.vae) {
         yyjson_mut_obj_add_str(doc, root, "vae", r->vae.c_str());
     }
@@ -648,6 +716,9 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (!r->lm_adapter.empty()) {
         fprintf(f, "[Request] lm_adapter: %s (scale=%.2f)\n", r->lm_adapter.c_str(), r->lm_adapter_scale);
+    }
+    for (const auto & a : r->adapters) {
+        fprintf(f, "[Request] adapters[]: %s (scale=%.2f)\n", a.name.c_str(), a.scale);
     }
     if (!r->vae.empty()) {
         fprintf(f, "[Request] vae: %s\n", r->vae.c_str());

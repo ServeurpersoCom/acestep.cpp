@@ -19,6 +19,7 @@
 //
 // Ported from HOT-Step-CPP (scragnog).
 
+#include "adapter-merge.h"  // adapter_single_weights
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "qwen3-enc.h"  // Qwen3Layer + lm_slot_weight (the DoRA norm pass)
@@ -302,7 +303,13 @@ static LMLora * lm_adapter_load(const char * path, float user_scale, ggml_backen
         if (probe) {
             fclose(probe);
         } else {
-            sf_path = p + "/lokr_weights.safetensors";
+            sf_path     = p + "/lokr_weights.safetensors";
+            FILE * lokr = fopen(sf_path.c_str(), "rb");
+            if (lokr) {
+                fclose(lokr);
+            } else {
+                sf_path = adapter_single_weights(p.c_str());
+            }
         }
     }
 

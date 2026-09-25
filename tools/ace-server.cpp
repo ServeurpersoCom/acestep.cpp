@@ -28,6 +28,7 @@
 //   /synth      DiT + Text-Enc + VAE
 //   /understand LM + DiT + VAE
 
+#include "adapter-resolve.h"
 #include "audio-io.h"
 #include "backend.h"
 #include "model-registry.h"
@@ -775,20 +776,22 @@ static void synth_worker(std::shared_ptr<Job>    job,
     p.vae_path          = vae->path.c_str();
     p.adapter_path      = nullptr;
     p.adapter_scale     = 1.0f;
-    if (!ace_reqs[0].adapter.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
-        if (!adapter) {
-            fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
-            free(src_interleaved);
-            free(ref_interleaved);
-            job->status.store(JobStatus::FAILED);
-            return;
-        }
-        p.adapter_path  = adapter->path.c_str();
-        p.adapter_scale = ace_reqs[0].adapter_scale;
+    std::string adapter_spec, adapter_missing;
+    float       adapter_spec_scale = 1.0f;
+    if (!request_adapter_spec(ace_reqs[0], g_registry, &adapter_spec, &adapter_spec_scale, &adapter_missing)) {
+        fprintf(stderr, "[Server] Adapter not found: %s\n", adapter_missing.c_str());
+        free(src_interleaved);
+        free(ref_interleaved);
+        job->status.store(JobStatus::FAILED);
+        return;
     }
-    fprintf(stderr, "[Server] Loading synth: DiT=%s VAE=%s%s%s\n", dit_name.c_str(), vae_name.c_str(),
-            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str());
+    if (!adapter_spec.empty()) {
+        p.adapter_path  = adapter_spec.c_str();
+        p.adapter_scale = adapter_spec_scale;
+    }
+    fprintf(stderr, "[Server] Loading synth: DiT=%s VAE=%s%s%s (%d adapter(s))\n", dit_name.c_str(), vae_name.c_str(),
+            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str(),
+            (int) (ace_reqs[0].adapters.empty() ? !ace_reqs[0].adapter.empty() : ace_reqs[0].adapters.size()));
 
     AceSynth * ctx = ace_synth_load(g_store, &p);
     if (!ctx) {

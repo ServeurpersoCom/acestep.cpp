@@ -30,10 +30,12 @@
 // DoRA rescale all run on the backend.
 // PendingCopy lookup is O(1) via hashmap.
 
+#include "adapter-stack.h"
 #include "ggml-alloc.h"
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "model-registry.h"
 #include "safetensors.h"
 #include "weight-ctx.h"
 #include "yyjson.h"
@@ -435,7 +437,8 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     }
 
     // helper-owned uploads: base in native type from mmap, ds if DoRA
-    ggml_backend_tensor_set(tbase_native, base_ptr, 0, base_nb);
+    // the current weight: the file's, or the previous adapter's merge result
+    ggml_backend_tensor_set(tbase_native, pc->src, 0, base_nb);
     if (tds) {
         ggml_backend_tensor_set(tds, ds, 0, (size_t) ne1 * sizeof(float));
     }
@@ -452,6 +455,9 @@ static bool adapter_merge_on_backend(WeightCtx *                                
     if (encode_ok) {
         // download straight into staging in native type, zero host postprocess
         ggml_backend_tensor_get(tout, merged_buf, 0, base_nb);
+        if (!pc->origin) {
+            pc->origin = pc->src;
+        }
         pc->src    = merged_buf;
         pc->nbytes = base_nb;
     } else {
@@ -463,6 +469,9 @@ static bool adapter_merge_on_backend(WeightCtx *                                
             ggml_backend_buffer_free(buf);
             ggml_free(ctx);
             return false;
+        }
+        if (!pc->origin) {
+            pc->origin = pc->src;
         }
         pc->src    = merged_buf;
         pc->nbytes = merged_bytes;
@@ -479,12 +488,13 @@ static bool adapter_merge_on_backend(WeightCtx *                                
 //   delta = (alpha / rank) * scale * B @ A
 // Applied to base weights in place. Alpha is read per tensor if present
 // (ComfyUI baked), else from adapter_config.json, else defaults to rank.
-static bool adapter_merge_lora(WeightCtx *         wctx,
-                               const GGUFModel &   gf,
-                               const STFile &      st,
-                               const std::string & cfg_dir,
-                               float               scale,
-                               ggml_backend_t      backend) {
+static bool adapter_merge_lora(WeightCtx *                wctx,
+                               const GGUFModel &          gf,
+                               const STFile &             st,
+                               const std::string &        cfg_dir,
+                               float                      scale,
+                               ggml_backend_t             backend,
+                               const AdapterGroupScales & groups) {
     int alpha_cfg = adapter_read_alpha(cfg_dir.c_str());
 
     // group lora_A and lora_B entries by their GGUF base tensor name.
@@ -522,7 +532,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
     std::unordered_map<const void *, size_t> pending_idx;
     pending_idx.reserve(wctx->pending.size());
     for (size_t i = 0; i < wctx->pending.size(); i++) {
-        pending_idx[wctx->pending[i].src] = i;
+        pending_idx[wctx->pending[i].origin ? wctx->pending[i].origin : wctx->pending[i].src] = i;
     }
 
     int merged  = 0;
@@ -584,7 +594,7 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
         } else {
             alpha = (float) rank;
         }
-        float scaling = (alpha / (float) rank) * scale;
+        float scaling = (alpha / (float) rank) * scale * groups.for_tensor(gguf_name);
 
         // load A and B to F32, PEFT rounds them through BF16 before the GEMM
         int64_t            a_nel = rank * in_feat;
@@ -671,11 +681,12 @@ static bool adapter_merge_lora(WeightCtx *         wctx,
 // (1, 3, 0, 2). The fast pair (d, b) then collapses into in_feat and the
 // slow pair (c, a) into out_feat under reshape_2d. Net effect:
 //   delta_rm[aa*c + cc, bb*d + dd] = W1[aa, bb] * W2[cc, dd]
-static bool adapter_merge_lokr(WeightCtx *       wctx,
-                               const GGUFModel & gf,
-                               const STFile &    st,
-                               float             user_scale,
-                               ggml_backend_t    backend) {
+static bool adapter_merge_lokr(WeightCtx *                wctx,
+                               const GGUFModel &          gf,
+                               const STFile &             st,
+                               float                      user_scale,
+                               ggml_backend_t             backend,
+                               const AdapterGroupScales & groups) {
     // group the per module tensors by LyCORIS prefix. Each module has either
     // w2 alone (monolithic) or w2_a + w2_b (factorized), never both.
     struct LoKrEntry {
@@ -718,7 +729,7 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
     std::unordered_map<const void *, size_t> pending_idx;
     pending_idx.reserve(wctx->pending.size());
     for (size_t i = 0; i < wctx->pending.size(); i++) {
-        pending_idx[wctx->pending[i].src] = i;
+        pending_idx[wctx->pending[i].origin ? wctx->pending[i].origin : wctx->pending[i].src] = i;
     }
 
     // linear_dim from __metadata__.lokr_config, only needed by monolithic modules.
@@ -928,8 +939,8 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
             return db;
         };
 
-        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr, user_scale, backend,
-                                      gguf_name.c_str(), build)) {
+        if (!adapter_merge_on_backend(wctx, pending_idx, base_ptr, ttype, ne0, ne1, ds_ptr,
+                                      user_scale * groups.for_tensor(gguf_name), backend, gguf_name.c_str(), build)) {
             skipped++;
             continue;
         }
@@ -948,6 +959,23 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
     return merged > 0;
 }
 
+// The one .safetensors file of an adapter folder that ships its weights under
+// their own name (name.safetensors + adapter_config.json), "" when there is
+// not exactly one.
+static std::string adapter_single_weights(const char * dir) {
+    std::vector<std::string> names;
+    registry_list_dir(dir, &names);
+    std::string found;
+    int         n = 0;
+    for (const auto & f : names) {
+        if (f.size() > 12 && f.compare(f.size() - 12, 12, ".safetensors") == 0) {
+            found = std::string(dir) + "/" + f;
+            n++;
+        }
+    }
+    return n == 1 ? found : std::string();
+}
+
 // Main adapter merge entry point.
 //
 // Call after all GGUF tensors are loaded into wctx->pending but before wctx_alloc.
@@ -956,11 +984,12 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
 //   PEFT directory  : a folder with adapter_model.safetensors + adapter_config.json
 //   LoKr directory  : a folder with lokr_weights.safetensors (ace-train output)
 //   LyCORIS file    : a flat .safetensors file (LoRA ComfyUI or LoKr)
-static bool adapter_merge(WeightCtx *       wctx,
-                          const GGUFModel & gf,
-                          const char *      adapter_path,
-                          float             scale,
-                          ggml_backend_t    backend) {
+static bool adapter_merge(WeightCtx *                wctx,
+                          const GGUFModel &          gf,
+                          const char *               adapter_path,
+                          float                      scale,
+                          ggml_backend_t             backend,
+                          const AdapterGroupScales & groups = AdapterGroupScales{}) {
     std::string sf_path;
     std::string cfg_dir;
 
@@ -977,13 +1006,15 @@ static bool adapter_merge(WeightCtx *       wctx,
         cfg_dir = adapter_path;
         if (stat(sf_path.c_str(), &sb) != 0) {
             std::string lokr_path = std::string(adapter_path) + "/lokr_weights.safetensors";
-            if (stat(lokr_path.c_str(), &sb) != 0) {
-                fprintf(stderr,
-                        "[Adapter] directory %s has neither adapter_model.safetensors nor lokr_weights.safetensors\n",
-                        adapter_path);
-                return false;
+            if (stat(lokr_path.c_str(), &sb) == 0) {
+                sf_path = lokr_path;
+            } else {
+                sf_path = adapter_single_weights(adapter_path);
+                if (sf_path.empty()) {
+                    fprintf(stderr, "[Adapter] directory %s holds no adapter weights\n", adapter_path);
+                    return false;
+                }
             }
-            sf_path = lokr_path;
         }
         // warn if adapter_config.json is missing, alpha lives there for PEFT so
         // the merge silently falls back to alpha=rank (scaling=1) otherwise
@@ -1010,9 +1041,9 @@ static bool adapter_merge(WeightCtx *       wctx,
 
     bool ok;
     if (adapter_detect_lokr(st)) {
-        ok = adapter_merge_lokr(wctx, gf, st, scale, backend);
+        ok = adapter_merge_lokr(wctx, gf, st, scale, backend, groups);
     } else {
-        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, scale, backend);
+        ok = adapter_merge_lora(wctx, gf, st, cfg_dir, scale, backend, groups);
     }
 
     st_close(&st);

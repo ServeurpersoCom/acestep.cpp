@@ -8,6 +8,12 @@
 #include <string>
 #include <vector>
 
+// One adapter of a DiT adapter stack: a name under --adapters and its scale.
+struct AceAdapterRef {
+    std::string name;
+    float       scale = 1.0f;
+};
+
 struct AceRequest {
     // text content
     std::string caption;  // ""
@@ -130,15 +136,26 @@ struct AceRequest {
     // the CLI binaries. An empty value falls to the first matching entry of
     // the registry. adapter and adapter_scale are read by server and
     // ace-synth and resolved against --adapters <dir> when set.
-    std::string synth_model;    // ""
-    std::string lm_model;       // ""
-    std::string adapter;        // ""
-    float       adapter_scale;  // 1.0
+    std::string                synth_model;    // ""
+    std::string                lm_model;       // ""
+    std::string                adapter;        // ""
+    float                      adapter_scale;  // 1.0
     // Planner LM adapter (LoRA, LoKr, DoRA), resolved against --adapters
     // <dir> like adapter, applied at runtime by /lm and ace-lm.
-    std::string lm_adapter;        // ""
-    float       lm_adapter_scale;  // 1.0
-    std::string vae;               // ""
+    std::string                lm_adapter;        // ""
+    float                      lm_adapter_scale;  // 1.0
+    // DiT adapter stack, merged in order. When non-empty it replaces
+    // adapter / adapter_scale. JSON: [{"name": "...", "scale": 1.0}, ...]
+    std::vector<AceAdapterRef> adapters;
+    // Per group multipliers on every DiT adapter delta, all 1.0 by default.
+    // JSON: {"self_attn", "cross_attn", "mlp", "cond_embed", "time_embed", "proj_in"}
+    float                      adapter_group_self_attn;
+    float                      adapter_group_cross_attn;
+    float                      adapter_group_mlp;
+    float                      adapter_group_cond_embed;
+    float                      adapter_group_time_embed;
+    float                      adapter_group_proj_in;
+    std::string                vae;  // ""
 
     // audio output: peak clip via percentile normalization.
     // 0 = peak normalization (100.0000th percentile, no clipping).
