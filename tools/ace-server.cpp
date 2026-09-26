@@ -182,6 +182,21 @@ static ModelStore * g_store = nullptr;
 // model registry (populated at startup from GGUF metadata)
 static ModelRegistry g_registry;
 
+// the adapter folder, read again whenever a request or /props needs its list:
+// an adapter installed while the server runs is usable without a restart
+static std::string g_adapters_dir;
+static std::mutex  mtx_adapters;
+
+static void refresh_adapters() {
+    if (g_adapters_dir.empty()) {
+        return;
+    }
+    ModelRegistry fresh;
+    registry_scan_adapters(&fresh, g_adapters_dir.c_str(), false);
+    std::lock_guard<std::mutex> lock(mtx_adapters);
+    g_registry.adapters = std::move(fresh.adapters);
+}
+
 // loaded model names (empty = nothing loaded)
 static std::string g_loaded_lm;
 static std::string g_loaded_dit;
@@ -564,14 +579,22 @@ static void lm_worker(std::shared_ptr<Job> job, std::vector<AceRequest> ace_reqs
     }
     AceLmParams p = g_lm_params;
     p.model_path  = entry->path.c_str();
+    std::string lm_adapter_path;
     if (!ace_reqs[0].lm_adapter.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].lm_adapter.c_str());
-        if (!adapter) {
+        refresh_adapters();
+        {
+            std::lock_guard<std::mutex> lock(mtx_adapters);
+            const AdapterEntry *        adapter = registry_find_adapter(g_registry, ace_reqs[0].lm_adapter.c_str());
+            if (adapter) {
+                lm_adapter_path = adapter->path;
+            }
+        }
+        if (lm_adapter_path.empty()) {
             fprintf(stderr, "[Server] LM adapter not found: %s\n", ace_reqs[0].lm_adapter.c_str());
             job->status.store(JobStatus::FAILED);
             return;
         }
-        p.adapter_path  = adapter->path.c_str();
+        p.adapter_path  = lm_adapter_path.c_str();
         p.adapter_scale = ace_reqs[0].lm_adapter_scale;
     }
 
@@ -778,7 +801,15 @@ static void synth_worker(std::shared_ptr<Job>    job,
     p.adapter_scale     = 1.0f;
     std::string adapter_spec, adapter_missing;
     float       adapter_spec_scale = 1.0f;
-    if (!request_adapter_spec(ace_reqs[0], g_registry, &adapter_spec, &adapter_spec_scale, &adapter_missing)) {
+    bool        adapters_found     = true;
+    if (!ace_reqs[0].adapter.empty() || !ace_reqs[0].adapters.empty()) {
+        refresh_adapters();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mtx_adapters);
+        adapters_found = request_adapter_spec(ace_reqs[0], g_registry, &adapter_spec, &adapter_spec_scale, &adapter_missing);
+    }
+    if (!adapters_found) {
         fprintf(stderr, "[Server] Adapter not found: %s\n", adapter_missing.c_str());
         free(src_interleaved);
         free(ref_interleaved);
@@ -1555,16 +1586,22 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     add_names(models, "dit", g_registry.dit);
     add_names(models, "vae", g_registry.vae);
 
-    // adapters: available adapter names
+    // adapters: available adapter names, as the folder holds them now
+    refresh_adapters();
+    std::vector<AdapterEntry> adapters;
+    {
+        std::lock_guard<std::mutex> lock(mtx_adapters);
+        adapters = g_registry.adapters;
+    }
     yyjson_mut_val * adapters_arr = yyjson_mut_arr(doc);
-    for (const auto & e : g_registry.adapters) {
+    for (const auto & e : adapters) {
         yyjson_mut_arr_add_str(doc, adapters_arr, e.name.c_str());
     }
     yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
 
     // adapter_info: which half of the model each adapter changes
     yyjson_mut_val * info_arr = yyjson_mut_arr(doc);
-    for (const auto & e : g_registry.adapters) {
+    for (const auto & e : adapters) {
         bool dit = false, lm = false;
         adapter_classify(e.path, &dit, &lm);
         yyjson_mut_val * item = yyjson_mut_obj(doc);
@@ -1740,6 +1777,7 @@ int main(int argc, char ** argv) {
     if (adapters_dir) {
         fprintf(stderr, "[Server] Scanning adapters in %s\n", adapters_dir);
         registry_scan_adapters(&g_registry, adapters_dir);
+        g_adapters_dir = adapters_dir;
     }
 
     // validate pipeline

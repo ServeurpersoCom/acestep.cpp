@@ -90,16 +90,20 @@ static bool adapter_to_f32(const void * src, float * dst, int64_t n, const std::
 static std::string lora_base_name(const std::string & key) {
     std::string s = key;
 
-    // strip known prefixes (PEFT, ComfyUI)
+    // strip known prefixes (PEFT, ComfyUI); an adapter re-wrapped by PEFT
+    // several times carries "base_model.model." once per wrap
     static const char * prefixes[] = {
         "base_model.model.",  // PEFT
         "diffusion_model.",   // ComfyUI official ACE-Step format
     };
-    for (const char * pfx : prefixes) {
-        size_t pfx_len = strlen(pfx);
-        if (s.compare(0, pfx_len, pfx) == 0) {
-            s = s.substr(pfx_len);
-            break;
+    for (bool stripped = true; stripped;) {
+        stripped = false;
+        for (const char * pfx : prefixes) {
+            size_t pfx_len = strlen(pfx);
+            if (s.compare(0, pfx_len, pfx) == 0) {
+                s        = s.substr(pfx_len);
+                stripped = true;
+            }
         }
     }
 
