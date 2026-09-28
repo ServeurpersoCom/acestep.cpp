@@ -4,6 +4,7 @@
 // comes from the request JSON. The registry resolves names to GGUF paths
 // under --models <dir> and --adapters <dir>.
 
+#include "adapter-resolve.h"
 #include "audio-io.h"
 #include "model-registry.h"
 #include "model-store.h"
@@ -158,14 +159,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "[Ace-Synth] FATAL: vae '%s' not found in registry\n", reqs[0].vae.c_str());
         return 1;
     }
-    const AdapterEntry * adapter_entry = NULL;
-    if (!reqs[0].adapter.empty()) {
-        adapter_entry = registry_find_adapter(registry, reqs[0].adapter.c_str());
-        if (!adapter_entry) {
-            fprintf(stderr, "[Ace-Synth] FATAL: adapter '%s' not found (use --adapters <dir>)\n",
-                    reqs[0].adapter.c_str());
-            return 1;
-        }
+    std::string adapter_spec, adapter_missing;
+    float       adapter_scale = 1.0f;
+    if (!request_adapter_spec(reqs[0], registry, &adapter_spec, &adapter_scale, &adapter_missing)) {
+        fprintf(stderr, "[Ace-Synth] FATAL: adapter '%s' not found (use --adapters <dir>)\n", adapter_missing.c_str());
+        return 1;
     }
 
     // Resolve output_format to (is_mp3, wav_fmt).
@@ -181,8 +179,8 @@ int main(int argc, char ** argv) {
     params.text_encoder_path = registry.text_enc[0].path.c_str();
     params.dit_path          = dit_entry->path.c_str();
     params.vae_path          = vae_entry->path.c_str();
-    params.adapter_path      = adapter_entry ? adapter_entry->path.c_str() : NULL;
-    params.adapter_scale     = reqs[0].adapter_scale;
+    params.adapter_path      = adapter_spec.empty() ? NULL : adapter_spec.c_str();
+    params.adapter_scale     = adapter_scale;
     params.use_fa            = use_fa;
     params.use_batch_cfg     = use_batch_cfg;
     params.clamp_fp16        = clamp_fp16;

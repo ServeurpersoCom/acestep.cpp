@@ -13,6 +13,7 @@
 #include "model-store.h"
 
 #include "gguf-weights.h"
+#include "lm-adapter.h"
 #include "timer.h"
 
 #include <cassert>
@@ -28,8 +29,8 @@ namespace {
 // Key hashing. Only the fields relevant for this ModelKind participate, so
 // pipeline authors cannot accidentally drift a key by leaving a field that
 // their kind does not care about at a different default than their peer.
-// LM: kind + path + max_seq + n_kv_sets. DiT: kind + path + adapter_path
-// + adapter_scale. Everything else: kind + path.
+// LM: kind + path + max_seq + n_kv_sets + adapter_path + adapter_scale.
+// DiT: kind + path + adapter_path + adapter_scale. Everything else: kind + path.
 struct ModelKeyHash {
     size_t operator()(const ModelKey & k) const noexcept {
         size_t h = std::hash<int>{}(static_cast<int>(k.kind));
@@ -37,7 +38,8 @@ struct ModelKeyHash {
         if (k.kind == MODEL_LM) {
             h ^= std::hash<int>{}(k.max_seq) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             h ^= std::hash<int>{}(k.n_kv_sets) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-        } else if (k.kind == MODEL_DIT) {
+        }
+        if (k.kind == MODEL_LM || k.kind == MODEL_DIT) {
             h ^= std::hash<std::string>{}(k.adapter_path) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
             // adapter_scale: hash the raw bit pattern so 1.0f and 1.00001f are distinct.
             uint32_t bits;
@@ -54,7 +56,8 @@ struct ModelKeyEq {
             return false;
         }
         if (a.kind == MODEL_LM) {
-            return a.max_seq == b.max_seq && a.n_kv_sets == b.n_kv_sets;
+            return a.max_seq == b.max_seq && a.n_kv_sets == b.n_kv_sets && a.adapter_path == b.adapter_path &&
+                   a.adapter_scale == b.adapter_scale;
         }
         if (a.kind == MODEL_DIT) {
             return a.adapter_path == b.adapter_path && a.adapter_scale == b.adapter_scale;
@@ -198,6 +201,7 @@ void store_free(ModelStore * s) {
 // load, install entry. The deleter is a plain C function that matches the
 // module's free signature, avoiding template plumbing.
 static void del_lm(void * p) {
+    lm_adapter_free(static_cast<Qwen3LM *>(p)->lora);
     qw3lm_free(static_cast<Qwen3LM *>(p));
     delete static_cast<Qwen3LM *>(p);
 }
@@ -281,11 +285,39 @@ Qwen3LM * store_require_lm(ModelStore * s, const ModelKey & k) {
     if (s->policy == EVICT_STRICT) {
         evict_all_except(s, k);
     }
-    Timer     t;
-    Qwen3LM * m = new Qwen3LM();
-    if (!qw3lm_load(m, k.path.c_str(), k.max_seq, k.n_kv_sets)) {
+    Timer      t;
+    Qwen3LM *  m            = new Qwen3LM();
+    // An adapter needs every projection addressable, so its LM loads unfused.
+    const bool want_adapter = !k.adapter_path.empty();
+    g_qwen3_load_no_fuse    = want_adapter;
+    const bool loaded       = qw3lm_load(m, k.path.c_str(), k.max_seq, k.n_kv_sets);
+    g_qwen3_load_no_fuse    = false;
+    if (!loaded) {
         delete m;
         return nullptr;
+    }
+    if (want_adapter) {
+        // A failed adapter is a failed load: never cache the base model
+        // under a key that names an adapter.
+        m->lora          = lm_adapter_load(k.adapter_path.c_str(), k.adapter_scale, m->backend);
+        const char * why = nullptr;
+        if (!m->lora) {
+            why = "cannot load it";
+        } else if (m->lora->max_layer >= m->cfg.n_layers) {
+            why = "it has more layers than the model";
+        } else if (m->lora->dora_pending && !lm_adapter_dora_prepare(m->lora, m->layers, m->backend)) {
+            why = "its DoRA norm pass failed";
+        }
+        if (why) {
+            fprintf(stderr, "[Store] LM adapter %s refused: %s\n", k.adapter_path.c_str(), why);
+            lm_adapter_free(m->lora);
+            qw3lm_free(m);
+            delete m;
+            return nullptr;
+        }
+        for (int i = 0; i <= m->lora->max_layer; i++) {
+            m->layers[i].lora = &m->lora->layers[i];
+        }
     }
     install_entry(s, k, m, bytes_of_lm(m), "LM", del_lm);
     fprintf(stderr, "[Store] Load LM: %.0f ms\n", t.ms());

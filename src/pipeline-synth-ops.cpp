@@ -9,6 +9,7 @@
 #include "dit-sampler.h"
 #include "philox.h"
 #include "pipeline-synth-impl.h"
+#include "schedulers/scheduler-registry.h"
 #include "task-types.h"
 #include "vae-enc.h"
 
@@ -301,8 +302,15 @@ void ops_build_schedule(SynthState & s) {
         }
         fprintf(stderr, "[Build-Schedule] WARN: custom_timesteps needs >= 2 values, falling back to shift\n");
     }
-    // Default: t_i = shift * t / (1 + (shift-1)*t) with t = 1 - i/steps
     s.schedule.resize(s.num_steps);
+    if (s.rr.scheduler != "linear") {
+        if (scheduler_build(s.rr.scheduler, s.schedule.data(), s.num_steps, s.shift)) {
+            fprintf(stderr, "[Build-Schedule] Scheduler %s, shift=%.2f\n", s.rr.scheduler.c_str(), s.shift);
+            return;
+        }
+        fprintf(stderr, "[Build-Schedule] WARN: unknown scheduler '%s', using linear\n", s.rr.scheduler.c_str());
+    }
+    // Default: t_i = shift * t / (1 + (shift-1)*t) with t = 1 - i/steps
     for (int i = 0; i < s.num_steps; i++) {
         float t       = 1.0f - (float) i / (float) s.num_steps;
         s.schedule[i] = s.shift * t / (1.0f + (s.shift - 1.0f) * t);
@@ -767,6 +775,21 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
         float * dst = s.noise.data() + b * s.Oc * s.T;
         s.seeds[b]  = reqs[b].seed;
         philox_randn(reqs[b].seed, dst, s.Oc * s.T, /*bf16_round=*/true);
+        // Retake: a variance preserving blend with a second draw
+        // (ACE-Step 1.5 retake_variance / retake_seed).
+        if (reqs[b].retake_variance > 0.0f) {
+            int64_t retake_seed =
+                reqs[b].retake_seed >= 0 ? reqs[b].retake_seed : (reqs[b].seed ^ 0x9E3779B9LL) & 0xFFFFFFFFLL;
+            std::vector<float> retake((size_t) s.Oc * s.T);
+            philox_randn(retake_seed, retake.data(), s.Oc * s.T, /*bf16_round=*/true);
+            const float v_rad = reqs[b].retake_variance * 1.57079632679f;
+            const float a = cosf(v_rad), c = sinf(v_rad);
+            for (size_t i = 0; i < retake.size(); i++) {
+                dst[i] = a * dst[i] + c * retake[i];
+            }
+            fprintf(stderr, "[Init-Noise Batch%d] Retake seed=%lld variance=%.2f\n", b, (long long) retake_seed,
+                    reqs[b].retake_variance);
+        }
         fprintf(stderr, "[Init-Noise Batch%d] Philox noise seed=%lld, [%d, %d] solver=%s\n", b,
                 (long long) reqs[b].seed, s.T, s.Oc, s.rr.solver.c_str());
     }
@@ -836,6 +859,21 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
         dit->use_flash_attn = false;
     }
 
+    GuidanceParams guidance;
+    guidance.mode = s.rr.guidance;
+    if (!guidance_known(guidance.mode)) {
+        fprintf(stderr, "[DiT-Generate] WARN: unknown guidance '%s', using apg\n", guidance.mode.c_str());
+        guidance.mode = "apg";
+    }
+    guidance.apg_momentum    = s.rr.apg_momentum;
+    guidance.norm_threshold  = s.rr.apg_norm_threshold;
+    guidance.zero_init_steps = s.rr.cfg_zero_init_steps;
+    guidance.smc_lambda      = s.rr.smc_lambda;
+    guidance.smc_k           = s.rr.smc_k;
+    guidance.mp_iterations   = s.rr.cfg_mp_iterations > 0 ? s.rr.cfg_mp_iterations : 1;
+    guidance.interval_start  = s.rr.cfg_interval_start;
+    guidance.interval_end    = s.rr.cfg_interval_end;
+
     s.timer.reset();
     int dit_rc = dit_ggml_generate(
         dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
@@ -843,7 +881,8 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
         s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
         s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
         s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.seeds.data(), ctx->params.use_batch_cfg,
-        s.rr.dcw_scaler, s.rr.dcw_high_scaler, s.rr.dcw_mode.c_str(), s.rr.solver.c_str(), s.rr.stork_substeps);
+        s.rr.dcw_scaler, s.rr.dcw_high_scaler, s.rr.dcw_mode.c_str(), s.rr.solver.c_str(), s.rr.stork_substeps,
+        &guidance, s.rr.jkass_beat_stability, s.rr.jkass_frequency_damping, s.rr.jkass_temporal_smoothing);
     if (dit_rc != 0) {
         return -1;
     }

@@ -28,6 +28,7 @@
 //   /synth      DiT + Text-Enc + VAE
 //   /understand LM + DiT + VAE
 
+#include "adapter-resolve.h"
 #include "audio-io.h"
 #include "model-registry.h"
 #include "model-store.h"
@@ -179,6 +180,21 @@ static ModelStore * g_store = nullptr;
 
 // model registry (populated at startup from GGUF metadata)
 static ModelRegistry g_registry;
+
+// the adapter folder, read again whenever a request or /props needs its list:
+// an adapter installed while the server runs is usable without a restart
+static std::string g_adapters_dir;
+static std::mutex  mtx_adapters;
+
+static void refresh_adapters() {
+    if (g_adapters_dir.empty()) {
+        return;
+    }
+    ModelRegistry fresh;
+    registry_scan_adapters(&fresh, g_adapters_dir.c_str(), false);
+    std::lock_guard<std::mutex> lock(mtx_adapters);
+    g_registry.adapters = std::move(fresh.adapters);
+}
 
 // loaded model names (empty = nothing loaded)
 static std::string g_loaded_lm;
@@ -562,6 +578,24 @@ static void lm_worker(std::shared_ptr<Job> job, std::vector<AceRequest> ace_reqs
     }
     AceLmParams p = g_lm_params;
     p.model_path  = entry->path.c_str();
+    std::string lm_adapter_path;
+    if (!ace_reqs[0].lm_adapter.empty()) {
+        refresh_adapters();
+        {
+            std::lock_guard<std::mutex> lock(mtx_adapters);
+            const AdapterEntry *        adapter = registry_find_adapter(g_registry, ace_reqs[0].lm_adapter.c_str());
+            if (adapter) {
+                lm_adapter_path = adapter->path;
+            }
+        }
+        if (lm_adapter_path.empty()) {
+            fprintf(stderr, "[Server] LM adapter not found: %s\n", ace_reqs[0].lm_adapter.c_str());
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        p.adapter_path  = lm_adapter_path.c_str();
+        p.adapter_scale = ace_reqs[0].lm_adapter_scale;
+    }
 
     // Acquire a fresh LM ctx from the shared store. Under EVICT_STRICT the
     // module is reloaded if another pipeline evicted it; under EVICT_NEVER
@@ -764,20 +798,30 @@ static void synth_worker(std::shared_ptr<Job>    job,
     p.vae_path          = vae->path.c_str();
     p.adapter_path      = nullptr;
     p.adapter_scale     = 1.0f;
-    if (!ace_reqs[0].adapter.empty()) {
-        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].adapter.c_str());
-        if (!adapter) {
-            fprintf(stderr, "[Server] Adapter not found: %s\n", ace_reqs[0].adapter.c_str());
-            free(src_interleaved);
-            free(ref_interleaved);
-            job->status.store(JobStatus::FAILED);
-            return;
-        }
-        p.adapter_path  = adapter->path.c_str();
-        p.adapter_scale = ace_reqs[0].adapter_scale;
+    std::string adapter_spec, adapter_missing;
+    float       adapter_spec_scale = 1.0f;
+    bool        adapters_found     = true;
+    if (!ace_reqs[0].adapter.empty() || !ace_reqs[0].adapters.empty()) {
+        refresh_adapters();
     }
-    fprintf(stderr, "[Server] Loading synth: DiT=%s VAE=%s%s%s\n", dit_name.c_str(), vae_name.c_str(),
-            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str());
+    {
+        std::lock_guard<std::mutex> lock(mtx_adapters);
+        adapters_found = request_adapter_spec(ace_reqs[0], g_registry, &adapter_spec, &adapter_spec_scale, &adapter_missing);
+    }
+    if (!adapters_found) {
+        fprintf(stderr, "[Server] Adapter not found: %s\n", adapter_missing.c_str());
+        free(src_interleaved);
+        free(ref_interleaved);
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    if (!adapter_spec.empty()) {
+        p.adapter_path  = adapter_spec.c_str();
+        p.adapter_scale = adapter_spec_scale;
+    }
+    fprintf(stderr, "[Server] Loading synth: DiT=%s VAE=%s%s%s (%d adapter(s))\n", dit_name.c_str(), vae_name.c_str(),
+            ace_reqs[0].adapter.empty() ? "" : " Adapter=", ace_reqs[0].adapter.c_str(),
+            (int) (ace_reqs[0].adapters.empty() ? !ace_reqs[0].adapter.empty() : ace_reqs[0].adapters.size()));
 
     AceSynth * ctx = ace_synth_load(g_store, &p);
     if (!ctx) {
@@ -1541,12 +1585,31 @@ static void handle_props(const httplib::Request &, httplib::Response & res) {
     add_names(models, "dit", g_registry.dit);
     add_names(models, "vae", g_registry.vae);
 
-    // adapters: available adapter names
+    // adapters: available adapter names, as the folder holds them now
+    refresh_adapters();
+    std::vector<AdapterEntry> adapters;
+    {
+        std::lock_guard<std::mutex> lock(mtx_adapters);
+        adapters = g_registry.adapters;
+    }
     yyjson_mut_val * adapters_arr = yyjson_mut_arr(doc);
-    for (const auto & e : g_registry.adapters) {
+    for (const auto & e : adapters) {
         yyjson_mut_arr_add_str(doc, adapters_arr, e.name.c_str());
     }
     yyjson_mut_obj_add_val(doc, root, "adapters", adapters_arr);
+
+    // adapter_info: which half of the model each adapter changes
+    yyjson_mut_val * info_arr = yyjson_mut_arr(doc);
+    for (const auto & e : adapters) {
+        bool dit = false, lm = false;
+        adapter_classify(e.path, &dit, &lm);
+        yyjson_mut_val * item = yyjson_mut_obj(doc);
+        yyjson_mut_obj_add_strcpy(doc, item, "name", e.name.c_str());
+        yyjson_mut_obj_add_bool(doc, item, "dit", dit);
+        yyjson_mut_obj_add_bool(doc, item, "lm", lm);
+        yyjson_mut_arr_append(info_arr, item);
+    }
+    yyjson_mut_obj_add_val(doc, root, "adapter_info", info_arr);
 
     // cli: server settings
     yyjson_mut_val * cli = yyjson_mut_obj(doc);
@@ -1702,6 +1765,7 @@ int main(int argc, char ** argv) {
     if (adapters_dir) {
         fprintf(stderr, "[Server] Scanning adapters in %s\n", adapters_dir);
         registry_scan_adapters(&g_registry, adapters_dir);
+        g_adapters_dir = adapters_dir;
     }
 
     // validate pipeline
