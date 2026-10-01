@@ -8,6 +8,7 @@
 // Only handles the flat safetensors JSON structure.
 // Not a general purpose JSON parser.
 
+#include <cerrno>
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
@@ -305,7 +306,16 @@ static void st_close(STFile * st) {
     }
 #else
     if (st->mapping) {
-        munmap(st->mapping, st->file_size);
+        // Adapter payloads come from user-supplied files, so this is the likeliest
+        // unmap to actually fail; a silent failure would leave the mapping resident
+        // until process exit with nothing on stderr. Runs once per file, so a plain
+        // line per failure is right.
+        if (munmap(st->mapping, st->file_size) != 0) {
+            fprintf(stderr,
+                    "[Safetensors] WARNING: munmap of the adapter mapping failed (%s); its pages stay "
+                    "resident\n",
+                    strerror(errno));
+        }
     }
     if (st->fd >= 0) {
         close(st->fd);
