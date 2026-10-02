@@ -6,6 +6,7 @@
 // Downsample: 2x4x4x6x10 = 1920x (matches decoder upsample)
 
 #pragma once
+#include "progress.h"
 #include "vae.h"
 
 // Encoder block: 3xResUnit(in_ch) -> snake(in_ch) -> strided Conv1d(in_ch -> out_ch)
@@ -295,7 +296,8 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
                                 float *       latent_out,  // [T_latent, 64] output, time-major
                                 int           max_T_latent,
                                 int           chunk_size = 256,
-                                int           overlap    = 64) {
+                                int           overlap    = 64,
+                                AceProgress   progress   = {}) {
     // Work in audio-sample space. Each latent frame = 1920 audio samples.
     int audio_chunk   = chunk_size * 1920;
     int audio_overlap = overlap * 1920;
@@ -305,8 +307,14 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
         audio_overlap /= 2;
     }
 
-    // Short audio: encode directly
+    // Short audio: encode directly, as one implicit tile. Still report it and
+    // honour a cancel, so a short input is neither invisible to a progress bar
+    // nor uncancellable (the encode itself is a single un-interruptible graph).
     if (T_audio <= audio_chunk) {
+        if (ace_progress(progress, ACE_STAGE_VAE_ENCODE, 0, 1)) {
+            fprintf(stderr, "[VAE-Enc] Cancelled at tile 0/1\n");
+            return -1;
+        }
         return vae_enc_encode(m, audio, T_audio, latent_out, max_T_latent);
     }
 
@@ -319,7 +327,16 @@ static int vae_enc_encode_tiled(VAEEncoder *  m,
     float downsample_factor = 0.0f;
     int   latent_write_pos  = 0;
 
+    if (ace_cancelled(progress,
+                      ACE_STAGE_VAE_ENCODE)) {  // honour a cancel before the loop; the loop's step-0 poll sizes the bar
+        fprintf(stderr, "[VAE-Enc] Cancelled at tile 0/%d\n", num_steps);
+        return -1;
+    }
     for (int i = 0; i < num_steps; i++) {
+        if (ace_progress(progress, ACE_STAGE_VAE_ENCODE, i, num_steps)) {
+            fprintf(stderr, "[VAE-Enc] Cancelled at tile %d/%d\n", i, num_steps);
+            return -1;
+        }
         // Core range in audio samples (the part we keep)
         int core_start = i * audio_stride;
         int core_end   = core_start + audio_stride;
