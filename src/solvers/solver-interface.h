@@ -5,9 +5,10 @@
 // The sampler loop resolves the solver by name and calls it once per step.
 // xt is modified in place to xt_next.
 //
-// Single evaluation solvers (Euler, SDE, DPM++ 3M, STORK4) ignore model_fn.
-// Multi evaluation solvers (Heun, RK4, ...) added later use model_fn to re evaluate
-// the DiT at intermediate timesteps.
+// Single evaluation solvers (Euler, SDE, DPM++, STORK, UniPC-P, A-FloPS,
+// JKASS Fast) ignore model_fn. Multi evaluation solvers (Heun, RK4, RK5,
+// DOPRI5, DOP853, GL2S, RF-Solver, UniPC, JKASS Quality, A-FloPS 2) call
+// model_fn to re evaluate the DiT at intermediate points.
 
 #include <cstdint>
 #include <functional>
@@ -23,11 +24,19 @@ using SolverModelFn = std::function<void(const float *, float)>;
 struct SolverState {
     int step_index = 0;
 
-    // DPM++ 3M: velocity history over the last two steps.
+    // DPM++ 2M / 3M: velocity history over the last two steps.
     std::vector<float> prev_vt;
     std::vector<float> prev_prev_vt;
+    // DPM++ 2M adaptive: previous step size.
+    float              prev_dt = 0.0f;
 
-    // STORK4: velocity history with associated step sizes (last 3 records).
+    // JKASS Fast: momentum blending.
+    std::vector<float> prev_delta;
+    float              beat_stability     = 0.25f;
+    float              frequency_damping  = 0.4f;
+    float              temporal_smoothing = 0.13f;
+
+    // STORK2 / STORK4: velocity history with associated step sizes (last 3 records).
     struct VelocityRecord {
         std::vector<float> vt;
         float              dt;
@@ -40,6 +49,22 @@ struct SolverState {
     const int64_t * seeds   = nullptr;
     int             batch_n = 1;
     int             n_per   = 0;
+
+    // UniPC: data prediction history, one record per step up to the order.
+    struct UniPCRecord {
+        std::vector<float> model_output;
+        float              t;
+    };
+
+    std::vector<UniPCRecord> unipc_history;
+
+    // A-FloPS: residual velocity of the previous step and its timesteps.
+    std::vector<float> aflops_prev_w;
+    float              aflops_prev_t     = 0.0f;
+    float              aflops_prev_t_dst = 0.0f;
+
+    // Scratch latent for multi evaluation solvers, sized by the solver.
+    std::vector<float> xt_scratch;
 };
 
 // xt:       [n] current latent, modified in place to xt_next.
