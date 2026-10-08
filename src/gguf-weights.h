@@ -13,6 +13,7 @@
 //   wctx_alloc(&wctx, backend);
 //   gf_close(&gf);   // safe after wctx_alloc copied data to GPU
 
+#include "ace-fatal.h"
 #include "gguf.h"
 #include "weight-ctx.h"
 
@@ -30,16 +31,19 @@
 #endif
 
 struct GGUFModel {
-    struct gguf_context * gguf;         // parsed header (KV + tensor metadata)
-    struct ggml_context * meta;         // tensor descriptors (no data)
-    uint8_t *             mapping;      // mmapped file
-    size_t                file_size;
-    size_t                data_offset;  // gguf_get_data_offset(gguf)
+    struct gguf_context * gguf        = nullptr;  // parsed header (KV + tensor metadata)
+    struct ggml_context * meta        = nullptr;  // tensor descriptors (no data)
+    uint8_t *             mapping     = nullptr;  // mmapped file
+    size_t                file_size   = 0;
+    size_t                data_offset = 0;  // gguf_get_data_offset(gguf)
 #ifdef _WIN32
-    HANDLE fh;
-    HANDLE mh;
+    HANDLE fh = nullptr;
+    HANDLE mh = nullptr;
 #else
-    int fd;
+    // -1, not 0, is "no fd": 0 is a legitimate descriptor (open() returns it when
+    // stdin is closed), so gf_close must be able to close 0 yet skip the unset
+    // value. `= {}` and the *gf = {} in gf_close/gf_load both reset fd to -1.
+    int fd = -1;
 #endif
 };
 
@@ -64,12 +68,31 @@ static void gf_close(GGUFModel * gf) {
     if (gf->mapping) {
         munmap(gf->mapping, gf->file_size);
     }
+    // fd defaults to -1 (see GGUFModel), so >= 0 closes a real descriptor --
+    // including a legitimate fd 0 -- while the -1 sentinel makes this safe to
+    // call twice, which GgufCloser below relies on.
     if (gf->fd >= 0) {
         close(gf->fd);
     }
 #endif
     *gf = {};
 }
+
+// Closes an open GGUFModel when the scope unwinds -- by a return, or (under
+// ACESTEP_FATAL_THROWS) by a gf_load_tensor throwing mid-load. Each loader opens
+// a local gf, runs throwing tensor reads, and gf_close()s at the end; without
+// this a thrown fatal skips that close and leaks the whole mmap + fd + gguf
+// context on every failed load. gf_close is idempotent (above), so the loader's
+// own end-of-function gf_close stays and this is just a no-op safety net after
+// it. Construct it only once gf is open (after gf_load succeeds), never over an
+// uninitialised gf.
+struct GgufCloser {
+    GGUFModel * gf;
+    explicit GgufCloser(GGUFModel * g) : gf(g) {}
+    ~GgufCloser() { gf_close(gf); }
+    GgufCloser(const GgufCloser &)             = delete;
+    GgufCloser & operator=(const GgufCloser &) = delete;
+};
 
 static bool gf_load(GGUFModel * gf, const char * path) {
     *gf = {};
@@ -163,15 +186,13 @@ static struct ggml_tensor * gf_load_tensor(WeightCtx *         wctx,
                                            int                 n_dims_override = 0) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
     if (idx < 0) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
     }
 
     // Get metadata from the context populated by gguf_init_from_file
     struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
     if (!src) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not in meta context\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: tensor '%s' not in meta context\n", name.c_str());
     }
 
     int     n_dims;
@@ -214,8 +235,7 @@ static struct ggml_tensor * gf_try_load_tensor(WeightCtx * wctx, const GGUFModel
 static struct ggml_tensor * gf_load_tensor_f32(WeightCtx * wctx, const GGUFModel & gf, const std::string & name) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
     if (idx < 0) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
     }
     struct ggml_tensor * src    = ggml_get_tensor(gf.meta, name.c_str());
     int                  n_dims = ggml_n_dims(src);
@@ -287,9 +307,8 @@ static struct ggml_tensor * gf_load_qkv_fused(WeightCtx *         wctx,
     struct ggml_tensor * k_src = ggml_get_tensor(gf.meta, k_name.c_str());
     struct ggml_tensor * v_src = ggml_get_tensor(gf.meta, v_name.c_str());
     if (!q_src || !k_src || !v_src) {
-        fprintf(stderr, "[GGUF] FATAL: QKV tensor not found: %s / %s / %s\n", q_name.c_str(), k_name.c_str(),
-                v_name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: QKV tensor not found: %s / %s / %s\n", q_name.c_str(), k_name.c_str(),
+                  v_name.c_str());
     }
     // All must share ne[0] (input dim) and type - otherwise can't fuse
     GGML_ASSERT(q_src->ne[0] == k_src->ne[0] && k_src->ne[0] == v_src->ne[0]);

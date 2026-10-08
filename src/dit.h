@@ -8,6 +8,7 @@
 // ggml ops used: rms_norm, mul_mat, rope_ext, flash_attn_ext, swiglu_split,
 //                conv_transpose_1d, add, mul, scale, view, reshape, permute.
 
+#include "ace-fatal.h"
 #include "adapter-merge.h"
 #include "backend.h"
 #include "ggml-backend.h"
@@ -147,13 +148,11 @@ static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
                                                int                 P) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
     if (idx < 0) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
     }
     struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
     if (!src) {
-        fprintf(stderr, "[GGUF] FATAL: meta tensor '%s' not found\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: meta tensor '%s' not found\n", name.c_str());
     }
     size_t       offset = gguf_get_tensor_offset(gf.gguf, idx);
     const void * raw    = gf.mapping + gf.data_offset + offset;
@@ -186,8 +185,8 @@ static struct ggml_tensor * dit_load_proj_in_w(WeightCtx *         wctx,
         const float * s = (const float *) raw;
         cvt([&](int i) { return s[i]; });
     } else {
-        fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_in pre-permute\n", src->type, name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: unsupported type %d for '%s' in proj_in pre-permute\n", src->type,
+                  name.c_str());
     }
     wctx->pending.push_back({ dst, data, n * sizeof(float), 0 });
     wctx->staging.push_back(std::move(buf));
@@ -204,13 +203,11 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
                                                 int                 P) {
     int64_t idx = gguf_find_tensor(gf.gguf, name.c_str());
     if (idx < 0) {
-        fprintf(stderr, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: tensor '%s' not found\n", name.c_str());
     }
     struct ggml_tensor * src = ggml_get_tensor(gf.meta, name.c_str());
     if (!src) {
-        fprintf(stderr, "[GGUF] FATAL: meta tensor '%s' not found\n", name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: meta tensor '%s' not found\n", name.c_str());
     }
     size_t       offset = gguf_get_tensor_offset(gf.gguf, idx);
     const void * raw    = gf.mapping + gf.data_offset + offset;
@@ -243,9 +240,8 @@ static struct ggml_tensor * dit_load_proj_out_w(WeightCtx *         wctx,
         const float * s = (const float *) raw;
         cvt([&](int i) { return s[i]; });
     } else {
-        fprintf(stderr, "[GGUF] FATAL: unsupported type %d for '%s' in proj_out pre-permute\n", src->type,
-                name.c_str());
-        exit(1);
+        ace_fatal(1, "[GGUF] FATAL: unsupported type %d for '%s' in proj_out pre-permute\n", src->type,
+                  name.c_str());
     }
     wctx->pending.push_back({ dst, data, n * sizeof(float), 0 });
     wctx->staging.push_back(std::move(buf));
@@ -270,6 +266,7 @@ static bool dit_ggml_load(DiTGGML *    m,
         fprintf(stderr, "[Load] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
+    GgufCloser gfc(&gf);
 
     // config from GGUF metadata (all keys required)
     DiTGGMLConfig & cfg         = m->cfg;

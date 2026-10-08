@@ -85,6 +85,7 @@ static bool tok_ggml_load(TokGGML * m, const char * gguf_path) {
         fprintf(stderr, "[Tok] FATAL: cannot load %s\n", gguf_path);
         return false;
     }
+    GgufCloser gfc(&gf);
 
     // proj(2) + embed(2) + special(1) + 2 layers x 11(22) + norm(1) + fsq_in(2) = 30
     wctx_init(&m->wctx, 30);
