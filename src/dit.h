@@ -422,7 +422,10 @@ static bool dit_ggml_load(DiTGGML *    m,
     if (adapter_path) {
         Timer adapter_timer;
         if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
-            fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
+            // adapter_merge already printed the specific reason (bad path, layout,
+            // no matching tensors, or a merge-after-alloc ordering bug) -- a generic
+            // "model mismatch" here would send an operator re-exporting a good LoRA.
+            fprintf(stderr, "[Adapter] FATAL: merge failed; see the [Adapter] messages above\n");
             gf_close(&gf);
             return false;
         }
