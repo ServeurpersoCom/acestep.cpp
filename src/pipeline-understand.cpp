@@ -102,8 +102,7 @@ int ace_understand_generate(AceUnderstand *      ctx,
                             AceRequest *         out,
                             std::vector<float> * latent_out,
                             int *                T_latent_out,
-                            bool (*cancel)(void *),
-                            void * cancel_data) {
+                            AceProgress          progress) {
     if (!ctx || !req || !out) {
         return -1;
     }
@@ -161,10 +160,14 @@ int ace_understand_generate(AceUnderstand *      ctx,
         {
             ModelHandle vae_guard(ctx->store, vae_enc);
             T_25Hz = vae_enc_encode_tiled(vae_enc, src_audio, src_len, latents.data(), max_T_lat, ctx->params.vae_chunk,
-                                          ctx->params.vae_overlap);
+                                          ctx->params.vae_overlap, progress);
         }
         if (T_25Hz < 0) {
-            fprintf(stderr, "[Understand-VAE] FATAL: encode failed\n");
+            if (ace_cancelled(progress, ACE_STAGE_VAE_ENCODE)) {
+                fprintf(stderr, "[Understand-VAE] Cancelled\n");
+            } else {
+                fprintf(stderr, "[Understand-VAE] FATAL: encode failed\n");
+            }
             return -1;
         }
         fprintf(stderr, "[Understand-VAE] Encoded: %d latent frames (%.2fs), %.0fms\n", T_25Hz,
@@ -308,8 +311,13 @@ int ace_understand_generate(AceUnderstand *      ctx,
     bool             past_think = false;
     int              max_tokens = 4096;
 
+    if (ace_cancelled(progress,
+                      ACE_STAGE_LM)) {  // honour a cancel before the loop; the loop's step-0 poll sizes the bar
+        fprintf(stderr, "[Understand] Cancelled at step 0\n");
+        return -1;
+    }
     for (int step = 0; step < max_tokens; step++) {
-        if (cancel && cancel(cancel_data)) {
+        if (ace_progress(progress, ACE_STAGE_LM, step, max_tokens)) {
             fprintf(stderr, "[Understand] Cancelled at step %d\n", step);
             return -1;
         }
