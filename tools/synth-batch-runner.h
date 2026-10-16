@@ -43,8 +43,7 @@ static int synth_batch_run(AceSynth *                             ctx,
                            int                                    ref_T_latent,
                            AceAudio *                             audio_out,
                            std::vector<std::vector<float>> *      latents_out = nullptr,
-                           bool (*cancel)(void *)                             = nullptr,
-                           void * cancel_data                                 = nullptr) {
+                           AceProgress                            progress    = {}) {
     const int                  n_groups = (int) groups.size();
     std::vector<AceSynthJob *> jobs(n_groups, nullptr);
     std::vector<int>           audio_off(n_groups, 0);
@@ -59,7 +58,7 @@ static int synth_batch_run(AceSynth *                             ctx,
     for (int g = 0; g < n_groups; g++) {
         const int gn = (int) groups[g].size();
         jobs[g] = ace_synth_job_run_dit(ctx, groups[g].data(), src_audio, src_len, src_latents, src_T_latent, ref_audio,
-                                        ref_len, ref_latents, ref_T_latent, gn, cancel, cancel_data);
+                                        ref_len, ref_latents, ref_T_latent, gn, progress);
         if (!jobs[g]) {
             for (int j = 0; j < g; j++) {
                 ace_synth_job_free(jobs[j]);
@@ -88,7 +87,7 @@ static int synth_batch_run(AceSynth *                             ctx,
     // Phase 2: latent splice + VAE decode for each job. The decoder is
     // acquired and released by ops_vae_decode inside ace_synth_job_run_vae.
     for (int g = 0; g < n_groups; g++) {
-        const int rc = ace_synth_job_run_vae(ctx, jobs[g], audio_out + audio_off[g], cancel, cancel_data);
+        const int rc = ace_synth_job_run_vae(ctx, jobs[g], audio_out + audio_off[g], progress);
         ace_synth_job_free(jobs[g]);
         jobs[g] = nullptr;
         if (rc != 0) {

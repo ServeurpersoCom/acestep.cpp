@@ -8,6 +8,7 @@
 // caches everything across calls. DiT weight swap between phases is an
 // invisible consequence of the store, not an orchestration concern anymore.
 
+#include "progress.h"
 #include "request.h"
 
 #include <cstdlib>
@@ -60,7 +61,9 @@ AceSynth * ace_synth_load(ModelStore * store, const AceSynthParams * params);
 //   pass is skipped. Mutually exclusive per side: when both audio and latents
 //   are provided for the same side, latents win and audio is ignored.
 // batch_n: number of requests (1..9).
-// cancel/cancel_data: abort callback, polled between DiT steps. NULL = never cancel.
+// progress: abort + progress callback. Reports ACE_STAGE_DIT between DiT steps,
+// and ACE_STAGE_VAE_ENCODE while encoding the source and/or timbre reference in
+// Cover-family tasks. Default {} = never cancel, no progress.
 // Returns NULL on error or cancellation.
 AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     const AceRequest * reqs,
@@ -73,8 +76,7 @@ AceSynthJob * ace_synth_job_run_dit(AceSynth *         ctx,
                                     const float *      ref_latents,
                                     int                ref_T_latent,
                                     int                batch_n,
-                                    bool (*cancel)(void *) = nullptr,
-                                    void * cancel_data     = nullptr);
+                                    AceProgress        progress = {});
 
 // Access the post-DiT denoised latent for one track of the job, owned by the
 // job and valid until ace_synth_job_free. Layout is flat [T_latent * 64] f32
@@ -88,11 +90,7 @@ const float * ace_synth_job_get_latent(const AceSynthJob * job, int track_idx, i
 // captured during phase 1, no source audio is needed.
 // out[batch_n] allocated by caller, filled with audio buffers.
 // Returns 0 on success, -1 on error or cancellation.
-int ace_synth_job_run_vae(AceSynth *    ctx,
-                          AceSynthJob * job,
-                          AceAudio *    out,
-                          bool (*cancel)(void *) = nullptr,
-                          void * cancel_data     = nullptr);
+int ace_synth_job_run_vae(AceSynth * ctx, AceSynthJob * job, AceAudio * out, AceProgress progress = {});
 
 void ace_synth_job_free(AceSynthJob * job);
 

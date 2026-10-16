@@ -8,6 +8,7 @@
 #include "dit-graph.h"
 #include "dit.h"
 #include "dwt-haar.h"
+#include "progress.h"
 #include "solvers/solver-registry.h"
 #include "static-graph.h"
 
@@ -144,10 +145,9 @@ static int dit_ggml_generate(DiTGGML *           model,
                              const DebugDumper * dbg            = nullptr,
                              const float *       context_switch = nullptr,
                              int                 cover_steps    = -1,
-                             bool (*cancel)(void *)             = nullptr,
-                             void *          cancel_data        = nullptr,
-                             const int *     real_enc_S         = nullptr,
-                             const float *   enc_switch         = nullptr,
+                             AceProgress         progress       = {},
+                             const int *         real_enc_S     = nullptr,
+                             const float *       enc_switch     = nullptr,
                              const int *     real_enc_S_switch  = nullptr,
                              const int64_t * seeds              = nullptr,
                              bool            use_batch_cfg      = true,
@@ -412,8 +412,14 @@ static int dit_ggml_generate(DiTGGML *           model,
 
     // Flow matching loop
     bool switched_cover = false;
+    if (ace_cancelled(progress,
+                      ACE_STAGE_DIT)) {  // honour a cancel before the loop; the loop's step-0 poll sizes the bar
+        fprintf(stderr, "[DiT] Cancelled at step 0/%d\n", num_steps);
+        ggml_free(ctx);
+        return -1;
+    }
     for (int step = 0; step < num_steps; step++) {
-        if (cancel && cancel(cancel_data)) {
+        if (ace_progress(progress, ACE_STAGE_DIT, step, num_steps)) {
             fprintf(stderr, "[DiT] Cancelled at step %d/%d\n", step, num_steps);
             static_graph_release(&dit_graph, model->sched);
             ggml_free(ctx);
