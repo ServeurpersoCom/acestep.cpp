@@ -467,6 +467,18 @@ static bool adapter_merge_on_backend(WeightCtx *                                
         pc->src    = merged_buf;
         pc->nbytes = merged_bytes;
     }
+    // The PendingCopy keeps the file range it was pushed with (file_src/file_nbytes/
+    // file_base/file_len, untouched by the swap above), so wctx_alloc releases the
+    // base weight's staged pages exactly as it does for an unmerged tensor -- an
+    // adapter load gets the same residency reduction as a plain one, and the release
+    // shows up in its "unmapped N MB" line. Nothing is released here, mid-merge: the
+    // pages are only dead once every pending entry has been copied.
+    //
+    // A second merge targeting the same base tensor is last-wins and safe as-is: it
+    // re-reads the pristine base from the mapping (the merge never writes back to
+    // base_ptr), recomputes, and replaces pc->src. Within one pass that cannot happen
+    // anyway -- both merge paths visit each base tensor once -- and merges always run
+    // before wctx_alloc, so the released pages are never read here.
     wctx->staging.push_back(std::move(staging_buf));
 
     ggml_backend_buffer_free(buf);
@@ -962,6 +974,19 @@ static bool adapter_merge(WeightCtx *       wctx,
                           const char *      adapter_path,
                           float             scale,
                           ggml_backend_t    backend) {
+    // Merges read the base weights straight out of gf.mapping, which wctx_alloc
+    // punches holes in as it copies -- so the ordering (merge first, alloc second)
+    // is a correctness rule, not a preference. Enforce it -- but gracefully: the one
+    // caller already turns a false return into a clean failed load, which beats
+    // exiting the process (the default build) or unwinding mid-request (the app).
+    // Once the buffer exists some source pages may be released and the upload could
+    // fault, so refuse to run rather than guess.
+    if (wctx->buffer != nullptr) {
+        fprintf(stderr,
+                "[Adapter] FATAL: adapter merge after wctx_alloc; the base weight pages may already be "
+                "released\n");
+        return false;
+    }
     std::string sf_path;
     std::string cfg_dir;
 
