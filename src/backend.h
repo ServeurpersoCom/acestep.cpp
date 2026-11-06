@@ -60,12 +60,24 @@ static ggml_backend_t cpu_backend_new(int n_threads) {
 }
 
 // Collapse exact consecutive duplicate ggml log lines and report the total
-// count when the run ends (tames the CUDA graph capture "reused" flood).
+// count when the run ends. Debug lines are dropped, with the continuation
+// lines that follow them: the CUDA backend writes "CUDA Graph id N reused" at
+// that level on every graph launch, a different id each time, hundreds of
+// lines a job.
 static void acestep_ggml_log(enum ggml_log_level level, const char * text, void * user_data) {
-    (void) level;
     (void) user_data;
-    static char last[256] = { 0 };
-    static int  count     = 0;
+    static char                last[256]  = { 0 };
+    static int                 count      = 0;
+    static enum ggml_log_level last_level = GGML_LOG_LEVEL_NONE;
+
+    if (level == GGML_LOG_LEVEL_CONT) {
+        level = last_level;
+    } else {
+        last_level = level;
+    }
+    if (level == GGML_LOG_LEVEL_DEBUG) {
+        return;
+    }
 
     if (count > 0 && strcmp(text, last) == 0) {
         count++;
