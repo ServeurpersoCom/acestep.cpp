@@ -7,6 +7,7 @@
 // AceSynth are defined in pipeline-synth-impl.h.
 
 #include "pipeline-synth.h"
+#include "progress.h"
 
 struct AceSynth;
 struct SynthState;
@@ -19,7 +20,8 @@ int ops_encode_src(const AceSynth * ctx,
                    int              src_len,
                    const float *    src_latents,
                    int              src_T_latent,
-                   SynthState &     s);
+                   SynthState &     s,
+                   AceProgress      progress = {});
 
 // FSQ roundtrip on cover_latents (cover mode only).
 void ops_fsq_roundtrip(const AceSynth * ctx, SynthState & s);
@@ -34,12 +36,13 @@ void ops_build_schedule(SynthState & s);
 int ops_resolve_T(const AceSynth * ctx, SynthState & s);
 
 // Encode timbre from ref_audio via VAE. Sets s.timbre_feats and s.S_ref_timbre.
-void ops_encode_timbre(const AceSynth * ctx,
-                       const float *    ref_audio,
-                       int              ref_len,
-                       const float *    ref_latents,
-                       int              ref_T_latent,
-                       SynthState &     s);
+int ops_encode_timbre(const AceSynth * ctx,
+                      const float *    ref_audio,
+                      int              ref_len,
+                      const float *    ref_latents,
+                      int              ref_T_latent,
+                      SynthState &     s,
+                      AceProgress      progress = {});
 
 // Per-batch text + lyric encoding (main pass + optional non-cover pass).
 // Stacks results into s.enc_hidden / s.enc_hidden_nc.
@@ -55,16 +58,11 @@ void ops_build_context_silence(const AceSynth * ctx, int batch_n, SynthState & s
 void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, SynthState & s);
 
 // Run the DiT denoising loop.
-int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data);
+int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, AceProgress progress);
 
 // Phase 2 primitive.
 
 // Latent splice for repaint/lego (kept generated frames inside [t0, t1),
 // source latents elsewhere) followed by VAE decode for every batch item.
 // Returns 0 on success, -1 on error/cancel.
-int ops_vae_decode(const AceSynth * ctx,
-                   int              batch_n,
-                   AceAudio *       out,
-                   SynthState &     s,
-                   bool (*cancel)(void *),
-                   void * cancel_data);
+int ops_vae_decode(const AceSynth * ctx, int batch_n, AceAudio * out, SynthState & s, AceProgress progress);

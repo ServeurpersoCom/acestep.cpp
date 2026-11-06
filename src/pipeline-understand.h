@@ -5,6 +5,7 @@
 // the VAE encoder, FSQ tokenizer and LM from the store in sequence, with
 // RAII release between stages. Audio -> latents -> codes -> LM -> metadata.
 
+#include "progress.h"
 #include "request.h"
 
 #include <vector>
@@ -50,8 +51,9 @@ AceUnderstand * ace_understand_load(ModelStore * store, const AceUnderstandParam
 //   the capture. On the audio-in path, the buffer is filled (assigned)
 //   with [T_latent * 64] f32 and *T_latent_out is set; on any error path
 //   before tokenize, the buffer is left empty.
-// cancel/cancel_data: abort callback, polled between tokens. NULL = never cancel.
-// Returns 0 on success, -1 on error or cancellation.
+// progress: abort + progress callback. Reports ACE_STAGE_LM between tokens, and
+// ACE_STAGE_VAE_ENCODE while encoding input reference audio. Default {} = never
+// cancel, no progress. Returns 0 on success, -1 on error or cancellation.
 int ace_understand_generate(AceUnderstand *      ctx,
                             const float *        src_audio,
                             int                  src_len,
@@ -61,8 +63,7 @@ int ace_understand_generate(AceUnderstand *      ctx,
                             AceRequest *         out,
                             std::vector<float> * latent_out   = nullptr,
                             int *                T_latent_out = nullptr,
-                            bool (*cancel)(void *)            = nullptr,
-                            void * cancel_data                = nullptr);
+                            AceProgress          progress     = {});
 
 void ace_understand_free(AceUnderstand * ctx);
 
