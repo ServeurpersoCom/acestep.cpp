@@ -1703,6 +1703,12 @@ int main(int argc, char ** argv) {
     // stderr capture for SSE /logs (must be after arg parsing so the usage prints directly)
     LogCapture log_capture;
 
+    // a device that cannot run the first kernels stops the server here, not
+    // at the first request
+    if (!backend_check_device()) {
+        return 1;
+    }
+
     // scan models directory (reads GGUF metadata only)
     fprintf(stderr, "[Server] Scanning models in %s\n", models_dir);
     if (!registry_scan(&g_registry, models_dir)) {

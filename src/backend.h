@@ -5,8 +5,11 @@
 // keep CPU as fallback. This avoids duplicating init logic across
 // qwen3.h, qwen3-lm.h, cond.h, dit.h, vae.h.
 
+#include "ggml-alloc.h"
 #include "ggml-backend.h"
 
+#include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -112,6 +115,77 @@ static bool backend_set_device(const char * name) {
     }
     g_backend_device = name;
     return true;
+}
+
+// A device that initialises can still fail its first kernel: a CUDA driver
+// older than the toolkit rejects the PTX, a broken Vulkan driver faults. Rows
+// gathered from an F16 table and a matrix product run the kernels every model
+// starts with, on the device, before the server takes any work.
+static bool backend_self_test(ggml_backend_t backend) {
+    auto                    start  = std::chrono::steady_clock::now();
+    struct ggml_init_params params = { 16 * ggml_tensor_overhead() + ggml_graph_overhead(), NULL, true };
+    struct ggml_context *   ctx    = ggml_init(params);
+    struct ggml_tensor *    table  = ggml_new_tensor_2d(ctx, GGML_TYPE_F16, 64, 16);
+    struct ggml_tensor *    rows   = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, 4);
+    struct ggml_tensor *    x      = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, 64, 8);
+    struct ggml_tensor *    total =
+        ggml_add(ctx, ggml_sum(ctx, ggml_get_rows(ctx, table, rows)), ggml_sum(ctx, ggml_mul_mat(ctx, table, x)));
+    struct ggml_cgraph * graph = ggml_new_graph(ctx);
+    ggml_build_forward_expand(graph, total);
+    ggml_backend_buffer_t buffer = ggml_backend_alloc_ctx_tensors(ctx, backend);
+    if (!buffer) {
+        fprintf(stderr, "[Load] FATAL: self-test on %s could not allocate\n", ggml_backend_name(backend));
+        ggml_free(ctx);
+        return false;
+    }
+
+    // Every table value is 1/64, so each gathered row sums to 1 and each
+    // product element is 1: 4 + 16 * 8 = 132
+    uint16_t h = ggml_fp32_to_fp16(1.0f / 64.0f);
+    uint16_t table_data[64 * 16];
+    for (int i = 0; i < 64 * 16; i++) {
+        table_data[i] = h;
+    }
+    int32_t row_data[4] = { 0, 3, 7, 15 };
+    float   x_data[64 * 8];
+    for (int i = 0; i < 64 * 8; i++) {
+        x_data[i] = 1.0f;
+    }
+    ggml_backend_tensor_set(table, table_data, 0, sizeof(table_data));
+    ggml_backend_tensor_set(rows, row_data, 0, sizeof(row_data));
+    ggml_backend_tensor_set(x, x_data, 0, sizeof(x_data));
+
+    enum ggml_status status = ggml_backend_graph_compute(backend, graph);
+    float            result = 0.0f;
+    if (status == GGML_STATUS_SUCCESS) {
+        ggml_backend_tensor_get(total, &result, 0, sizeof(result));
+    }
+    ggml_backend_buffer_free(buffer);
+    ggml_free(ctx);
+    if (status != GGML_STATUS_SUCCESS || !std::isfinite(result) || std::fabs(result - 132.0f) > 0.5f) {
+        fprintf(stderr, "[Load] FATAL: self-test on %s failed (status %d, result %f, expected 132)\n",
+                ggml_backend_name(backend), (int) status, (double) result);
+        return false;
+    }
+    double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    fprintf(stderr, "[Load] Self-test on %s: ok (%.1f ms)\n", ggml_backend_name(backend), ms);
+    return true;
+}
+
+// Runs the self-test on the device later backend_init calls will use, the
+// one named by --device or the best available. The processor is not tested.
+// Returns false when the device fails it or cannot be initialised.
+static bool backend_check_device(void) {
+    backend_load();
+    ggml_backend_t backend =
+        g_backend_device ? ggml_backend_init_by_name(g_backend_device, nullptr) : ggml_backend_init_best();
+    if (!backend) {
+        fprintf(stderr, "[Load] FATAL: no backend available\n");
+        return false;
+    }
+    bool ok = strcmp(ggml_backend_name(backend), "CPU") == 0 || backend_self_test(backend);
+    ggml_backend_free(backend);
+    return ok;
 }
 
 // Initialize backends: the device named by --device or the best available
