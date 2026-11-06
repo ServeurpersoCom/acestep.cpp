@@ -597,10 +597,17 @@ static void lm_worker(std::shared_ptr<Job> job, std::vector<AceRequest> ace_reqs
     // serialize output as a JSON array
     std::string body = "[";
     for (int i = 0; i < N; i++) {
+        std::string item = request_to_json(&out[i]);
+        if (item.empty()) {
+            fprintf(stderr, "[Server] FATAL: LM result %d of job %s could not be written as JSON\n", i,
+                    job->id.c_str());
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
         if (i > 0) {
             body += ",";
         }
-        body += request_to_json(&out[i]);
+        body += item;
     }
     body += "]";
 
@@ -1131,7 +1138,13 @@ static void understand_worker(std::shared_ptr<Job> job,
         g_loaded_vae.clear();
     }
 
-    std::string json_part = "[" + request_to_json(&out) + "]";
+    std::string item = request_to_json(&out);
+    if (item.empty()) {
+        fprintf(stderr, "[Server] FATAL: understand result of job %s could not be written as JSON\n", job->id.c_str());
+        job->status.store(JobStatus::FAILED);
+        return;
+    }
+    std::string json_part = "[" + item + "]";
     job->result_body      = multipart_build_json_latent(json_part, captured_latent, captured_T_latent);
     job->result_mime      = MULTIPART_MIME;
     job->status.store(JobStatus::DONE);

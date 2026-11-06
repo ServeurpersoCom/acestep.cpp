@@ -95,6 +95,62 @@ static int utf8_codepoint(const char * s, int * advance) {
     return c;  // fallback
 }
 
+// Text as valid UTF-8: a byte that does not start or continue a well-formed
+// sequence becomes U+FFFD, and an incomplete sequence at the end is dropped.
+// Byte-level BPE decodes to raw bytes, so generation that stops in the middle
+// of a multi-byte character leaves exactly that incomplete tail.
+static std::string utf8_valid(const std::string & s) {
+    std::string  out;
+    const size_t n = s.size();
+    const auto * b = (const unsigned char *) s.data();
+    size_t       i = 0;
+    out.reserve(n);
+    while (i < n) {
+        const unsigned char c = b[i];
+        if (c < 0x80) {
+            out += (char) c;
+            i++;
+            continue;
+        }
+        int           len = 0;
+        unsigned char lo  = 0x80, hi = 0xBF;
+        if (c >= 0xC2 && c <= 0xDF) {
+            len = 2;
+        } else if (c >= 0xE0 && c <= 0xEF) {
+            len = 3;
+            lo  = c == 0xE0 ? 0xA0 : 0x80;
+            hi  = c == 0xED ? 0x9F : 0xBF;
+        } else if (c >= 0xF0 && c <= 0xF4) {
+            len = 4;
+            lo  = c == 0xF0 ? 0x90 : 0x80;
+            hi  = c == 0xF4 ? 0x8F : 0xBF;
+        }
+        if (len == 0) {
+            out += "\xEF\xBF\xBD";
+            i++;
+            continue;
+        }
+        int k = 1;
+        while (k < len && i + k < n) {
+            const unsigned char cc = b[i + k];
+            if (k == 1 ? (cc < lo || cc > hi) : (cc < 0x80 || cc > 0xBF)) {
+                break;
+            }
+            k++;
+        }
+        if (k == len) {
+            out.append(s, i, len);
+            i += len;
+        } else if (i + k == n) {
+            break;
+        } else {
+            out += "\xEF\xBF\xBD";
+            i += k;
+        }
+    }
+    return out;
+}
+
 // Unicode category checks (simplified but covers Latin + common scripts)
 static bool is_letter(int cp) {
     if ((cp >= 'A' && cp <= 'Z') || (cp >= 'a' && cp <= 'z')) {
