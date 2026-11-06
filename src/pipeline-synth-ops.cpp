@@ -13,6 +13,7 @@
 #include "vae-enc.h"
 
 #include <charconv>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -849,6 +850,18 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     }
     fprintf(stderr, "[DiT-Generate] Total: %.1f ms (%.1f ms/sample)\n", s.timer.ms(), s.timer.ms() / batch_n);
 
+    // The audio writers turn NaN and Inf into zero: latents that are not numbers
+    // would come out as a track of silence, with nothing said about where.
+    size_t not_finite = 0;
+    for (float v : s.output) {
+        not_finite += std::isfinite(v) ? 0 : 1;
+    }
+    if (not_finite > 0) {
+        fprintf(stderr, "[DiT-Generate] ERROR: %zu of %zu latent values are not finite (NaN or Inf)\n", not_finite,
+                s.output.size());
+        return -1;
+    }
+
     // Latent post-processing before VAE decode: pred = pred * rescale + shift.
     // Skipped at defaults (1.0 / 0.0).
     if (s.rr.latent_rescale != 1.0f || s.rr.latent_shift != 0.0f) {
@@ -899,6 +912,8 @@ int ops_vae_decode(const AceSynth * ctx,
     int                T_audio_max = T_latent * 1920;
     std::vector<float> audio(2 * T_audio_max);
 
+    // one track of NaN fails the job: its silence would pass for a song
+    bool not_numbers = false;
     for (int b = 0; b < batch_n; b++) {
         float * dit_out = s.output.data() + b * s.Oc * s.T;
 
@@ -917,6 +932,21 @@ int ops_vae_decode(const AceSynth * ctx,
             continue;
         }
         fprintf(stderr, "[VAE-Decode Batch%d] Decode: %.1f ms\n", b, s.timer.ms());
+
+        size_t not_finite = 0;
+        for (int i = 0; i < 2 * T_audio; i++) {
+            not_finite += std::isfinite(audio[(size_t) i]) ? 0 : 1;
+        }
+        if (not_finite > 0) {
+            fprintf(stderr, "[VAE-Decode Batch%d] ERROR: %zu of %d samples are not finite (NaN or Inf)\n", b,
+                    not_finite, 2 * T_audio);
+            not_numbers = true;
+
+            out[b].samples     = NULL;
+            out[b].n_samples   = 0;
+            out[b].sample_rate = 48000;
+            continue;
+        }
 
         if (b == 0) {
             debug_dump_2d(&s.dbg, "vae_audio", audio.data(), 2, T_audio);
@@ -956,5 +986,5 @@ int ops_vae_decode(const AceSynth * ctx,
             fprintf(stderr, "[WAV-Splice Batch%d] hard splice samples [%d, %d) / %d\n", b, start_s, end_s, T_clip);
         }
     }
-    return 0;
+    return not_numbers ? -1 : 0;
 }
