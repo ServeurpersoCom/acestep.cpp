@@ -954,9 +954,8 @@ static bool adapter_merge_lokr(WeightCtx *       wctx,
 // Detects the adapter algorithm from the safetensors payload and dispatches to
 // the matching merge path. The adapter_path points to either:
 //   PEFT directory  : a folder with adapter_model.safetensors + adapter_config.json
+//   LoKr directory  : a folder with lokr_weights.safetensors (ace-train output)
 //   LyCORIS file    : a flat .safetensors file (LoRA ComfyUI or LoKr)
-// Directories exist only for PEFT. LyCORIS ships as a single file for both LoRA
-// and LoKr payloads.
 static bool adapter_merge(WeightCtx *       wctx,
                           const GGUFModel & gf,
                           const char *      adapter_path,
@@ -972,18 +971,26 @@ static bool adapter_merge(WeightCtx *       wctx,
     }
 
     if (S_ISDIR(sb.st_mode)) {
-        // PEFT directory: adapter_model.safetensors is mandatory
+        // PEFT directory with adapter_model.safetensors, or a LoKr directory
+        // with lokr_weights.safetensors (alpha rides the tensors, no config).
         sf_path = std::string(adapter_path) + "/adapter_model.safetensors";
         cfg_dir = adapter_path;
         if (stat(sf_path.c_str(), &sb) != 0) {
-            fprintf(stderr, "[Adapter] directory %s is not a PEFT layout, missing adapter_model.safetensors\n",
-                    adapter_path);
-            return false;
+            std::string lokr_path = std::string(adapter_path) + "/lokr_weights.safetensors";
+            if (stat(lokr_path.c_str(), &sb) != 0) {
+                fprintf(stderr,
+                        "[Adapter] directory %s has neither adapter_model.safetensors nor lokr_weights.safetensors\n",
+                        adapter_path);
+                return false;
+            }
+            sf_path = lokr_path;
         }
         // warn if adapter_config.json is missing, alpha lives there for PEFT so
         // the merge silently falls back to alpha=rank (scaling=1) otherwise
         std::string cfg_path = cfg_dir + "/adapter_config.json";
-        if (stat(cfg_path.c_str(), &sb) != 0) {
+        bool        is_lokr =
+            sf_path.size() >= 24 && sf_path.compare(sf_path.size() - 24, 24, "lokr_weights.safetensors") == 0;
+        if (!is_lokr && stat(cfg_path.c_str(), &sb) != 0) {
             fprintf(stderr,
                     "[Adapter] WARNING: PEFT directory %s missing adapter_config.json, alpha falls back to rank "
                     "(scaling=1.0). If training used lora_alpha != rank, the merge will be under or over scaled.\n",

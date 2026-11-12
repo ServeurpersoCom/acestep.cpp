@@ -240,6 +240,7 @@ static bool registry_scan(ModelRegistry * reg, const char * models_dir) {
 // scan a directory for adapters.
 // - .safetensors files: ComfyUI single-file format (alpha baked in)
 // - subdirectories containing adapter_model.safetensors: PEFT format
+// - subdirectories containing lokr_weights.safetensors: LoKr (ace-train)
 // returns true if at least one adapter was found.
 static bool registry_scan_adapters(ModelRegistry * reg, const char * adapters_dir) {
     int count = 0;
@@ -265,10 +266,12 @@ static bool registry_scan_adapters(ModelRegistry * reg, const char * adapters_di
     for (const auto & dname : subdirs) {
         std::string adapter =
             std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + "adapter_model.safetensors";
-        if (registry_is_file(adapter.c_str())) {
+        std::string lokr = std::string(adapters_dir) + REGISTRY_SEP + dname + REGISTRY_SEP + "lokr_weights.safetensors";
+        bool        is_peft = registry_is_file(adapter.c_str());
+        if (is_peft || registry_is_file(lokr.c_str())) {
             std::string full = std::string(adapters_dir) + REGISTRY_SEP + dname;
             reg->adapters.push_back({ dname, full });
-            fprintf(stderr, "[Registry] Adapter: %s (PEFT)\n", dname.c_str());
+            fprintf(stderr, "[Registry] Adapter: %s (%s)\n", dname.c_str(), is_peft ? "PEFT" : "LoKr");
             count++;
         }
     }

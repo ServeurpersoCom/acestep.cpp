@@ -134,7 +134,11 @@ struct AceRequest {
     std::string lm_model;       // ""
     std::string adapter;        // ""
     float       adapter_scale;  // 1.0
-    std::string vae;            // ""
+    // Planner LM adapter (LoRA, LoKr, DoRA), resolved against --adapters
+    // <dir> like adapter, applied at runtime by /lm and ace-lm.
+    std::string lm_adapter;        // ""
+    float       lm_adapter_scale;  // 1.0
+    std::string vae;               // ""
 
     // audio output: peak clip via percentile normalization.
     // 0 = peak normalization (100.0000th percentile, no clipping).

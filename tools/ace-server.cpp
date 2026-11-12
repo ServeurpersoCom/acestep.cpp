@@ -563,6 +563,16 @@ static void lm_worker(std::shared_ptr<Job> job, std::vector<AceRequest> ace_reqs
     }
     AceLmParams p = g_lm_params;
     p.model_path  = entry->path.c_str();
+    if (!ace_reqs[0].lm_adapter.empty()) {
+        const AdapterEntry * adapter = registry_find_adapter(g_registry, ace_reqs[0].lm_adapter.c_str());
+        if (!adapter) {
+            fprintf(stderr, "[Server] LM adapter not found: %s\n", ace_reqs[0].lm_adapter.c_str());
+            job->status.store(JobStatus::FAILED);
+            return;
+        }
+        p.adapter_path  = adapter->path.c_str();
+        p.adapter_scale = ace_reqs[0].lm_adapter_scale;
+    }
 
     // Acquire a fresh LM ctx from the shared store. Under EVICT_STRICT the
     // module is reloaded if another pipeline evicted it; under EVICT_NEVER

@@ -71,6 +71,7 @@ void request_init(AceRequest * r) {
     r->lm_model                 = "";
     r->adapter                  = "";
     r->adapter_scale            = 1.0f;
+    r->lm_adapter_scale         = 1.0f;
     r->vae                      = "";
     r->peak_clip                = 10;
     r->mp3_bitrate              = 128;
@@ -169,6 +170,12 @@ static void request_parse_obj(yyjson_val * obj, AceRequest * r) {
     }
     if ((v = yyjson_obj_get(obj, "adapter")) && yyjson_is_str(v)) {
         r->adapter = yy_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_adapter")) && yyjson_is_str(v)) {
+        r->lm_adapter = yy_str(v);
+    }
+    if ((v = yyjson_obj_get(obj, "lm_adapter_scale")) && yyjson_is_num(v)) {
+        r->lm_adapter_scale = (float) yyjson_get_num(v);
     }
     if ((v = yyjson_obj_get(obj, "vae")) && yyjson_is_str(v)) {
         r->vae = yy_str(v);
@@ -544,6 +551,12 @@ static yyjson_mut_doc * request_build_doc(const AceRequest * r, bool sparse) {
     if (all || r->adapter_scale != def.adapter_scale) {
         yyjson_mut_obj_add_real(doc, root, "adapter_scale", r->adapter_scale);
     }
+    if (all || r->lm_adapter != def.lm_adapter) {
+        yyjson_mut_obj_add_str(doc, root, "lm_adapter", r->lm_adapter.c_str());
+    }
+    if (all || r->lm_adapter_scale != def.lm_adapter_scale) {
+        yyjson_mut_obj_add_real(doc, root, "lm_adapter_scale", r->lm_adapter_scale);
+    }
     if (all || r->vae != def.vae) {
         yyjson_mut_obj_add_str(doc, root, "vae", r->vae.c_str());
     }
@@ -632,6 +645,9 @@ void request_dump(const AceRequest * r, FILE * f) {
     }
     if (!r->adapter.empty()) {
         fprintf(f, "[Request] adapter: %s (scale=%.2f)\n", r->adapter.c_str(), r->adapter_scale);
+    }
+    if (!r->lm_adapter.empty()) {
+        fprintf(f, "[Request] lm_adapter: %s (scale=%.2f)\n", r->lm_adapter.c_str(), r->lm_adapter_scale);
     }
     if (!r->vae.empty()) {
         fprintf(f, "[Request] vae: %s\n", r->vae.c_str());
