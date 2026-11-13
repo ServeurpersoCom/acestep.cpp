@@ -284,6 +284,10 @@ static std::vector<std::string> generate_phase1_batch(Qwen3LM *                 
     return results;
 }
 
+// The synth pipeline renders at most 15000 latent frames (600 s), five per
+// audio code: more codes than this make it refuse the whole track.
+static const int PHASE2_MAX_CODES = 3000;
+
 // Batched Phase 2: N sequences, one prompt and one seed per element.
 // Identical prompts are detected and prefilled once with KV copies.
 // Returns N code strings.
@@ -408,6 +412,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
             seqs[i].done = true;
         } else if (tok >= AUDIO_CODE_BASE && tok < AUDIO_CODE_BASE + AUDIO_CODE_COUNT) {
             seqs[i].audio_codes.push_back(tok - AUDIO_CODE_BASE);
+            seqs[i].done = (int) seqs[i].audio_codes.size() >= PHASE2_MAX_CODES;
         }
     }
 
@@ -530,6 +535,7 @@ static std::vector<std::string> run_phase2_batch(Qwen3LM *                      
                 seqs[orig_i].done = true;
             } else {
                 seqs[orig_i].audio_codes.push_back(tok - AUDIO_CODE_BASE);
+                seqs[orig_i].done = (int) seqs[orig_i].audio_codes.size() >= PHASE2_MAX_CODES;
             }
         }
 
