@@ -16,8 +16,10 @@
 #include "gguf.h"
 #include "weight-ctx.h"
 
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <string>
 
 #ifdef _WIN32
@@ -30,11 +32,11 @@
 #endif
 
 struct GGUFModel {
-    struct gguf_context * gguf;         // parsed header (KV + tensor metadata)
-    struct ggml_context * meta;         // tensor descriptors (no data)
-    uint8_t *             mapping;      // mmapped file
-    size_t                file_size;
-    size_t                data_offset;  // gguf_get_data_offset(gguf)
+    struct gguf_context * gguf        = nullptr;  // parsed header (KV + tensor metadata)
+    struct ggml_context * meta        = nullptr;  // tensor descriptors (no data)
+    uint8_t *             mapping     = nullptr;  // mmapped file
+    size_t                file_size   = 0;
+    size_t                data_offset = 0;        // gguf_get_data_offset(gguf)
 #ifdef _WIN32
     HANDLE fh;
     HANDLE mh;
@@ -62,7 +64,16 @@ static void gf_close(GGUFModel * gf) {
     }
 #else
     if (gf->mapping) {
-        munmap(gf->mapping, gf->file_size);
+        // After a 2.7 load this range carries interior holes where wctx_alloc already
+        // released staged pages. Unmapping over holes works on macOS and Linux
+        // (verified), but hole tolerance is implementation behaviour rather than a
+        // POSIX guarantee -- so a failure here means the whole mapping stays resident
+        // until process exit. Plain fprintf, not warn-once: this runs once per model,
+        // and every failing close is a distinct mapping worth its own line.
+        if (munmap(gf->mapping, gf->file_size) != 0) {
+            fprintf(stderr, "[GGUF] WARNING: munmap of the model mapping failed (%s); its pages stay resident\n",
+                    strerror(errno));
+        }
     }
     if (gf->fd >= 0) {
         close(gf->fd);
@@ -153,6 +164,20 @@ static bool gf_load(GGUFModel * gf, const char * path) {
     return true;
 }
 
+// Queue a copy straight from the file mapping, recording where the bytes came from so
+// wctx_alloc can release those staged pages once copied (Apple: munmap, Linux:
+// madvise). The recorded range survives an adapter merge repointing src at a heap
+// staging buffer, so the original pages are still released. Copies from heap staging
+// or the stack push PendingCopy directly -- they have nothing to release.
+static void wctx_push_file_copy(WeightCtx *          wctx,
+                                struct ggml_tensor * tensor,
+                                const void *         file_src,
+                                size_t               nbytes,
+                                size_t               offset,
+                                const GGUFModel &    gf) {
+    wctx->pending.push_back(wctx_make_file_copy(tensor, file_src, nbytes, offset, gf.mapping, gf.file_size));
+}
+
 // Load a tensor from GGUF into the weight context.
 // Returns ggml_tensor (not yet backed by memory; call wctx_alloc after all loads).
 // Tensor shapes are already in ggml order (ne[0]=innermost).
@@ -196,7 +221,7 @@ static struct ggml_tensor * gf_load_tensor(WeightCtx *         wctx,
     const void * data   = gf.mapping + gf.data_offset + offset;
     size_t       nbytes = ggml_nbytes(src);
 
-    wctx->pending.push_back({ tensor, data, nbytes, 0 });
+    wctx_push_file_copy(wctx, tensor, data, nbytes, 0, gf);
     return tensor;
 }
 
@@ -266,6 +291,17 @@ static struct ggml_tensor * gf_load_tensor_f32(WeightCtx * wctx, const GGUFModel
 // Get raw pointer to tensor data in the mmapped file.
 // Useful for CPU-side operations (e.g. bf16 embed lookup for lyrics).
 // Returns NULL if not found.
+//
+// Lifetime: the pointer is valid only while this GGUFModel is open AND before any
+// wctx_alloc has run on a WeightCtx loading from it -- on Apple wctx_alloc unmaps
+// each copied tensor's pages as it goes (weight-ctx.h), so a late read of a copied
+// tensor now faults instead of harmlessly refaulting the page. Current users are safe
+// for different reasons, and both matter: model-store metadata and store_silence open
+// their own short-lived mapping that no WeightCtx touches, and vae.h reads its mapping
+// across phases but never calls wctx_alloc at all -- nothing releases its pages. Note
+// the second half: a module may read before OR after its own buffer allocation; the
+// rule is only about WeightCtx's release, so a module converted TO the WeightCtx
+// idiom must move every post-alloc mapping read into the push/copy flow.
 static const void * gf_get_data(const GGUFModel & gf, const char * name) {
     int64_t idx = gguf_find_tensor(gf.gguf, name);
     if (idx < 0) {
@@ -312,10 +348,9 @@ static struct ggml_tensor * gf_load_qkv_fused(WeightCtx *         wctx,
         size_t  off = gguf_get_tensor_offset(gf.gguf, idx);
         return gf.mapping + gf.data_offset + off;
     };
-
-    wctx->pending.push_back({ fused, get_data(q_name), q_bytes, 0 });
-    wctx->pending.push_back({ fused, get_data(k_name), k_bytes, q_bytes });
-    wctx->pending.push_back({ fused, get_data(v_name), v_bytes, q_bytes + k_bytes });
+    wctx_push_file_copy(wctx, fused, get_data(q_name), q_bytes, 0, gf);
+    wctx_push_file_copy(wctx, fused, get_data(k_name), k_bytes, q_bytes, gf);
+    wctx_push_file_copy(wctx, fused, get_data(v_name), v_bytes, q_bytes + k_bytes, gf);
     return fused;
 }
 
@@ -347,9 +382,8 @@ static struct ggml_tensor * gf_load_pair_fused(WeightCtx *         wctx,
         size_t  off = gguf_get_tensor_offset(gf.gguf, idx);
         return gf.mapping + gf.data_offset + off;
     };
-
-    wctx->pending.push_back({ fused, get_data(a_name), a_bytes, 0 });
-    wctx->pending.push_back({ fused, get_data(b_name), b_bytes, a_bytes });
+    wctx_push_file_copy(wctx, fused, get_data(a_name), a_bytes, 0, gf);
+    wctx_push_file_copy(wctx, fused, get_data(b_name), b_bytes, a_bytes, gf);
     return fused;
 }
 
