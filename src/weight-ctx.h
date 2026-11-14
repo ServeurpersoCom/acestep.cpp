@@ -27,6 +27,9 @@ struct WeightCtx {
         const void *         src;
         size_t               nbytes;
         size_t               offset;  // byte offset into dst tensor (0 for regular loads)
+        // the file mapping src pointed at before an adapter merge replaced it,
+        // so a second adapter of a stack still finds the tensor
+        const void *         origin = nullptr;
     };
 
     std::vector<PendingCopy> pending;
