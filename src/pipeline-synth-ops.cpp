@@ -342,6 +342,37 @@ int ops_resolve_T(const AceSynth * ctx, SynthState & s) {
     return 0;
 }
 
+// The timbre encoder is trained on 30 s of the reference (ACE-Step 1.5
+// process_reference_audio): a shorter reference repeated up to 30 s, then
+// 10 s from each third. The original takes a random 10 s of each third; the
+// middle of it keeps a request reproducible. `width` floats per frame,
+// `per_sec` frames per second.
+static std::vector<float> timbre_window(const float * x, int n, int width, int per_sec) {
+    const int          target = 30 * per_sec;
+    const int          seg    = 10 * per_sec;
+    std::vector<float> src;
+    if (n < target) {
+        int reps = (target + n - 1) / n;
+        src.reserve((size_t) n * reps * width);
+        for (int r = 0; r < reps; r++) {
+            src.insert(src.end(), x, x + (size_t) n * width);
+        }
+    } else {
+        src.assign(x, x + (size_t) n * width);
+    }
+    int                total = (int) (src.size() / width);
+    int                third = total / 3;
+    std::vector<float> out;
+    out.reserve((size_t) 3 * seg * width);
+    for (int k = 0; k < 3; k++) {
+        int span  = k == 2 ? total - 2 * third : third;
+        int start = k * third + (std::max)(0, span - seg) / 2;
+        int len   = (std::min)(seg, total - start);
+        out.insert(out.end(), src.begin() + (size_t) start * width, src.begin() + (size_t) (start + len) * width);
+    }
+    return out;
+}
+
 void ops_encode_timbre(const AceSynth * ctx,
                        const float *    ref_audio,
                        int              ref_len,
@@ -351,13 +382,14 @@ void ops_encode_timbre(const AceSynth * ctx,
     // Timbre features from ref_audio or ref_latents (independent of src).
     // Two paths converge into s.timbre_feats: pre-encoded latents skip the
     // VAE encoder entirely, raw audio takes the encoder path. Latents win
-    // when both are set. Without either input the timbre falls back to a
+    // when both are set. Either is first cut to the 30 s window of
+    // timbre_window. Without either input the timbre falls back to a
     // single silence frame, disabling timbre conditioning.
     if (ref_latents && ref_T_latent > 0) {
-        s.S_ref_timbre = ref_T_latent;
-        s.timbre_feats.assign(ref_latents, ref_latents + (size_t) ref_T_latent * 64);
-        fprintf(stderr, "[Encode-Timbre] Latents in: %d frames (%.1fs), VAE encode skipped\n", ref_T_latent,
-                (float) ref_T_latent / 25.0f);
+        s.timbre_feats = timbre_window(ref_latents, ref_T_latent, 64, 25);
+        s.S_ref_timbre = (int) (s.timbre_feats.size() / 64);
+        fprintf(stderr, "[Encode-Timbre] Latents in: %d frames (%.1fs), %d frames of them, VAE encode skipped\n",
+                ref_T_latent, (float) ref_T_latent / 25.0f, s.S_ref_timbre);
         return;
     }
     if (ref_audio && ref_len > 0) {
@@ -371,9 +403,11 @@ void ops_encode_timbre(const AceSynth * ctx,
         }
         ModelHandle ref_vae_guard(ctx->store, ref_vae);
 
-        int                max_T_ref = (ref_len / 1920) + 64;
+        std::vector<float> win       = timbre_window(ref_audio, ref_len, 2, 48000);
+        int                win_len   = (int) (win.size() / 2);
+        int                max_T_ref = (win_len / 1920) + 64;
         std::vector<float> ref_lat_buf(max_T_ref * 64);
-        int                T_ref = vae_enc_encode_tiled(ref_vae, ref_audio, ref_len, ref_lat_buf.data(), max_T_ref,
+        int                T_ref = vae_enc_encode_tiled(ref_vae, win.data(), win_len, ref_lat_buf.data(), max_T_ref,
                                                         ctx->params.vae_chunk, ctx->params.vae_overlap);
         if (T_ref < 0) {
             fprintf(stderr, "[Encode-Timbre] WARNING: ref_audio encode failed, using silence\n");
@@ -382,8 +416,8 @@ void ops_encode_timbre(const AceSynth * ctx,
         } else {
             s.S_ref_timbre = T_ref;
             s.timbre_feats.assign(ref_lat_buf.data(), ref_lat_buf.data() + (size_t) T_ref * 64);
-            fprintf(stderr, "[Encode-Timbre] ref_audio: %d frames (%.1fs), %.1f ms\n", T_ref, (float) T_ref / 25.0f,
-                    s.timer.ms());
+            fprintf(stderr, "[Encode-Timbre] ref_audio: %.1fs in, %d frames (%.1fs), %.1f ms\n",
+                    (float) ref_len / 48000.0f, T_ref, (float) T_ref / 25.0f, s.timer.ms());
         }
     } else {
         s.S_ref_timbre = 1;
