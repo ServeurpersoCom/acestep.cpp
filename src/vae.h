@@ -368,7 +368,15 @@ static struct ggml_tensor * vae_ggml_build_graph(struct ggml_context * ctx,
     return x;  // [T_audio, 2]
 }
 
-// Core compute: ensure graph cached, set input, run. Returns T_audio or -1.
+// Returned by the compute and decode functions when the device could not hold
+// the graph for this many frames: a smaller tile may still fit.
+#define VAE_GRAPH_NO_FIT (-2)
+
+// Smallest tile the decoder falls back to when a graph does not fit.
+#define VAE_MIN_TILE 64
+
+// Core compute: ensure graph cached, set input, run. Returns T_audio, -1 on
+// error, or VAE_GRAPH_NO_FIT when the device cannot hold the graph.
 // Output remains in m->graph_output for caller to read as needed.
 static int vae_ggml_compute(VAEGGML *     m,
                             const float * latent,    // [T_full, 64] time-major
@@ -406,13 +414,14 @@ static int vae_ggml_compute(VAEGGML *     m,
         ggml_build_forward_expand(m->graph, m->graph_output);
 
         if (!ggml_backend_sched_alloc_graph(m->sched, m->graph)) {
-            fprintf(stderr, "[VAE] FATAL: graph alloc failed for T=%d\n", T_latent);
+            fprintf(stderr, "[VAE] Graph alloc failed for T=%d\n", T_latent);
+            ggml_backend_sched_reset(m->sched);
             ggml_free(ctx);
             free(m->graph_buf);
             m->graph_ctx = NULL;
             m->graph_buf = NULL;
             m->graph_T   = 0;
-            return -1;
+            return VAE_GRAPH_NO_FIT;
         }
 
         m->graph_ctx = ctx;
@@ -438,7 +447,7 @@ static int vae_ggml_compute(VAEGGML *     m,
 }
 
 // Decode API: latent [T_latent, 64] -> audio [2, T_audio] flat.
-// Returns T_audio (or -1 on error).
+// Returns T_audio, -1 on error, or VAE_GRAPH_NO_FIT.
 static int vae_ggml_decode(VAEGGML * m, const float * latent, int T_latent, float * audio_out, int max_T_audio) {
     int T_audio = T_latent * 1920;
     if (T_audio > max_T_audio) {
@@ -448,7 +457,7 @@ static int vae_ggml_decode(VAEGGML * m, const float * latent, int T_latent, floa
 
     int T_out = vae_ggml_compute(m, latent, T_latent, 0);
     if (T_out < 0) {
-        return -1;
+        return T_out;
     }
 
     ggml_backend_tensor_get(m->graph_output, audio_out, 0, T_out * 2 * sizeof(float));
@@ -458,21 +467,17 @@ static int vae_ggml_decode(VAEGGML * m, const float * latent, int T_latent, floa
     return T_out;
 }
 
-// Tiled decode: overlap-discard chunking for bounded VRAM usage.
-// stride = chunk_size - 2*overlap
-// For each tile: decode latent window with overlap context, trim to core, concatenate.
-// Default chunk=256/overlap=64 matches reference code. Larger chunks (e.g. 1024)
-// reduce tile count and improve throughput; adjust chunk/overlap to tune.
-// Returns T_audio (total samples per channel) or -1 on error.
-static int vae_ggml_decode_tiled(VAEGGML *     m,
-                                 const float * latent,     // [T_latent, 64] flat time-major (DiT output layout)
+// One pass of the tiled decode at a given tile size. Returns T_audio, -1 on
+// error, or VAE_GRAPH_NO_FIT when a tile's graph did not fit on the device.
+static int vae_ggml_decode_tiles(VAEGGML *     m,
+                                 const float * latent,
                                  int           T_latent,
-                                 float *       audio_out,  // [2, T_audio] flat (caller allocs)
+                                 float *       audio_out,
                                  int           max_T_audio,
-                                 int           chunk_size = 256,
-                                 int           overlap    = 64,
-                                 bool (*cancel)(void *)   = nullptr,
-                                 void * cancel_data       = nullptr) {
+                                 int           chunk_size,
+                                 int           overlap,
+                                 bool (*cancel)(void *),
+                                 void * cancel_data) {
     // Ensure positive stride (matches Python effective_overlap reduction)
     while (chunk_size - 2 * overlap <= 0 && overlap > 0) {
         overlap /= 2;
@@ -517,6 +522,9 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
 
         // Compute tile (graph cached, extract+transpose fused)
         int tile_T = vae_ggml_compute(m, latent, win_len, win_start);
+        if (tile_T == VAE_GRAPH_NO_FIT) {
+            return VAE_GRAPH_NO_FIT;
+        }
         if (tile_T < 0) {
             fprintf(stderr, "[VAE] FATAL: tile %d decode failed\n", i);
             return -1;
@@ -562,6 +570,61 @@ static int vae_ggml_decode_tiled(VAEGGML *     m,
             (float) audio_write_pos / 48000.0f);
 
     return audio_write_pos;
+}
+
+// Tiled decode: overlap-discard chunking for bounded VRAM usage.
+// stride = chunk_size - 2*overlap
+// For each tile: decode latent window with overlap context, trim to core, concatenate.
+// Default chunk=256/overlap=64 matches reference code. Larger chunks (e.g. 1024)
+// reduce tile count and improve throughput; adjust chunk/overlap to tune.
+// Returns T_audio (total samples per channel) or -1 on error.
+static int vae_ggml_decode_tiled(VAEGGML *     m,
+                                 const float * latent,     // [T_latent, 64] flat time-major (DiT output layout)
+                                 int           T_latent,
+                                 float *       audio_out,  // [2, T_audio] flat (caller allocs)
+                                 int           max_T_audio,
+                                 int           chunk_size = 256,
+                                 int           overlap    = 64,
+                                 bool (*cancel)(void *)   = nullptr,
+                                 void * cancel_data       = nullptr) {
+    // One decode graph wants roughly 10 MB of activations per latent frame.
+    // A short track decodes untiled and a long one in chunk_size tiles, so
+    // either graph is min(T_latent, chunk_size) frames: when the device cannot
+    // hold it, tile at 256.
+    const int graph_frames = T_latent < chunk_size ? T_latent : chunk_size;
+    if (graph_frames > 256 && m->backend) {
+        size_t free_b = 0, total_b = 0;
+        if (ggml_backend_dev_t dev = ggml_backend_get_device(m->backend)) {
+            ggml_backend_dev_memory(dev, &free_b, &total_b);
+        }
+        const size_t need = (size_t) graph_frames * (10u << 20);
+        if (free_b > 0 && need > free_b) {
+            fprintf(stderr, "[VAE] A %d-frame decode graph needs about %.2f GB, the device reports %.2f GB free: tiling at 256\n",
+                    graph_frames, need / 1073741824.0, free_b / 1073741824.0);
+            chunk_size = 256;
+            if (overlap > 64) {
+                overlap = 64;
+            }
+        }
+    }
+
+    for (;;) {
+        int T_audio = vae_ggml_decode_tiles(m, latent, T_latent, audio_out, max_T_audio, chunk_size, overlap, cancel,
+                                            cancel_data);
+        if (T_audio != VAE_GRAPH_NO_FIT) {
+            return T_audio;
+        }
+        // The device could not hold a graph of this many frames: halve the
+        // tile until it fits or the smallest tile does not either.
+        const int frames = T_latent < chunk_size ? T_latent : chunk_size;
+        if (frames <= VAE_MIN_TILE) {
+            fprintf(stderr, "[VAE] FATAL: graph alloc failed for %d frames, the smallest tile\n", frames);
+            return -1;
+        }
+        chunk_size = frames / 2 < VAE_MIN_TILE ? VAE_MIN_TILE : frames / 2;
+        fprintf(stderr, "[VAE] A %d-frame decode graph did not fit on the device: retrying with tiles of %d\n",
+                frames, chunk_size);
+    }
 }
 
 // Free
