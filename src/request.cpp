@@ -482,9 +482,15 @@ bool request_write(const AceRequest * r, const char * path) {
     }
 
     yyjson_mut_doc * doc = request_build_doc(r, true);
-    size_t           len;
-    char *           json = yyjson_mut_write(doc, WRITE_FLAGS | YYJSON_WRITE_NEWLINE_AT_END, &len);
+    size_t           len = 0;
+    yyjson_write_err err;
+    char *           json = yyjson_mut_write_opts(doc, WRITE_FLAGS | YYJSON_WRITE_NEWLINE_AT_END, NULL, &len, &err);
     yyjson_mut_doc_free(doc);
+    if (!json) {
+        fprintf(stderr, "[Request] ERROR: %s not written: %s\n", path, err.msg ? err.msg : "unknown");
+        fclose(f);
+        return false;
+    }
 
     fwrite(json, 1, len, f);
     free(json);
@@ -496,9 +502,14 @@ bool request_write(const AceRequest * r, const char * path) {
 
 std::string request_to_json(const AceRequest * r, bool sparse) {
     yyjson_mut_doc * doc = request_build_doc(r, sparse);
-    size_t           len;
-    char *           json = yyjson_mut_write(doc, WRITE_FLAGS, &len);
+    size_t           len = 0;
+    yyjson_write_err err;
+    char *           json = yyjson_mut_write_opts(doc, WRITE_FLAGS, NULL, &len, &err);
     yyjson_mut_doc_free(doc);
+    if (!json) {
+        fprintf(stderr, "[Request] ERROR: request not written as JSON: %s\n", err.msg ? err.msg : "unknown");
+        return "";
+    }
 
     std::string result(json, len);
     free(json);
