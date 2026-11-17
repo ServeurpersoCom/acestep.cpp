@@ -56,6 +56,11 @@ endif()
 if(NOT DEFINED GGML_CUDA_GRAPHS)
     set(GGML_CUDA_GRAPHS_DEFAULT ON)
 endif()
+# tinyBLAS (llamafile sgemm) default on: standalone ggml ships it off, llama.cpp ships it on. It is the CPU matrix
+# kernel for F32, F16, BF16, Q8_0 and Q4_0 weights. Overridable with -DGGML_LLAMAFILE=OFF.
+if(NOT DEFINED GGML_LLAMAFILE)
+    set(GGML_LLAMAFILE_DEFAULT ON)
+endif()
 set(GGML_SOURCE_DIR "${CMAKE_SOURCE_DIR}/ggml" CACHE PATH "ggml source tree")
 add_subdirectory(${GGML_SOURCE_DIR} ggml)
 
