@@ -15,3 +15,8 @@ link_ggml_backends(test-model-store)
 add_executable(test-lm-prompt test-lm-prompt.cpp)
 target_link_libraries(test-lm-prompt PRIVATE acestep-core)
 link_ggml_backends(test-lm-prompt)
+
+# test-utf8: utf8_valid repairs the text byte-level BPE decoding can leave.
+add_executable(test-utf8 test-utf8.cpp)
+target_link_libraries(test-utf8 PRIVATE acestep-core)
+link_ggml_backends(test-utf8)

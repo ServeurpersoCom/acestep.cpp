@@ -134,6 +134,7 @@ static int sample_top_k_p(float * logits, int V, float temperature, float top_p,
 
 // BPE decode (token IDs -> text).
 // Skips audio code tokens, im_start/end. Expands think tags to text.
+// The text is valid UTF-8 even when the ids end inside a character.
 static std::string bpe_decode(const BPETokenizer & bpe, const std::vector<int> & ids) {
     static std::unordered_map<int, uint8_t> byte_dec;
     static bool                             init = false;
@@ -180,5 +181,5 @@ static std::string bpe_decode(const BPETokenizer & bpe, const std::vector<int> &
             p += adv;
         }
     }
-    return result;
+    return utf8_valid(result);
 }

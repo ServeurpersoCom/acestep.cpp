@@ -142,6 +142,7 @@ bool request_write(const AceRequest * r, const char * path);
 // Serialize struct to JSON string.
 // sparse=true: omit fields at their default value (for cards and exports).
 // sparse=false: serialize all fields (for /props documentation).
+// Returns an empty string when the request cannot be written (invalid UTF-8).
 std::string request_to_json(const AceRequest * r, bool sparse = true);
 
 // Parse JSON: single object {} or array [{}, ...] into a vector.
