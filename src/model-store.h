@@ -77,7 +77,7 @@ struct ModelKey {
     // LM-only extras (ignored for other kinds):
     int         max_seq;    // KV cache length
     int         n_kv_sets;  // number of KV sets (1 or 2*max_batch with CFG)
-    // DiT-only extras (ignored for other kinds):
+    // DiT and LM extras (ignored for other kinds):
     std::string adapter_path;   // "" when no adapter
     float       adapter_scale;  // 1.0f default, significant when adapter_path is set
 };

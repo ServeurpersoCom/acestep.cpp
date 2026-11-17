@@ -15,6 +15,7 @@
 #include "ggml-backend.h"
 #include "ggml.h"
 #include "gguf-weights.h"
+#include "qwen3-lora.h"
 
 #include <cmath>
 #include <cstdio>
@@ -56,7 +57,31 @@ struct Qwen3Layer {
     struct ggml_tensor * gate_proj;  // [H, FFN] (NULL when fused)
     struct ggml_tensor * up_proj;    // [H, FFN] (NULL when fused)
     struct ggml_tensor * down_proj;  // [FFN, H]
+
+    // Runtime adapter slots, set only on an LM loaded with an adapter (which
+    // loads unfused so every projection stays addressable).
+    const QwLoraLayer * lora = nullptr;
 };
+
+// The base weight behind an adapter slot (the DoRA norm pass reads it).
+static struct ggml_tensor * lm_slot_weight(Qwen3Layer * ly, int slot) {
+    switch (slot) {
+        case QW_LORA_Q:
+            return ly->q_proj;
+        case QW_LORA_K:
+            return ly->k_proj;
+        case QW_LORA_V:
+            return ly->v_proj;
+        case QW_LORA_O:
+            return ly->o_proj;
+        case QW_LORA_GATE:
+            return ly->gate_proj;
+        case QW_LORA_UP:
+            return ly->up_proj;
+        default:
+            return ly->down_proj;
+    }
+}
 
 // Standalone model (text encoder)
 struct Qwen3GGML {
@@ -216,11 +241,11 @@ static struct ggml_tensor * qwen3_build_mlp(struct ggml_context * ctx,
         struct ggml_tensor * gu = qwen3_linear(ctx, ly->gate_up, x);
         ff                      = ggml_swiglu(ctx, gu);
     } else {
-        struct ggml_tensor * gate = qwen3_linear(ctx, ly->gate_proj, x);
-        struct ggml_tensor * up   = qwen3_linear(ctx, ly->up_proj, x);
+        struct ggml_tensor * gate = qwen3_linear_lora(ctx, ly->gate_proj, qwen3_lora_slot(ly->lora, QW_LORA_GATE), x);
+        struct ggml_tensor * up   = qwen3_linear_lora(ctx, ly->up_proj, qwen3_lora_slot(ly->lora, QW_LORA_UP), x);
         ff                        = ggml_swiglu_split(ctx, gate, up);
     }
-    return qwen3_linear(ctx, ly->down_proj, ff);
+    return qwen3_linear_lora(ctx, ly->down_proj, qwen3_lora_slot(ly->lora, QW_LORA_DOWN), ff);
 }
 
 // Single layer: input [H, S] -> output [H, S]
@@ -270,11 +295,16 @@ static void qwen3_load_layer(WeightCtx *         wctx,
     ly->input_layernorm     = gf_load_tensor_f32(wctx, gf, prefix + ".input_layernorm.weight");
     ly->post_attn_layernorm = gf_load_tensor_f32(wctx, gf, prefix + ".post_attention_layernorm.weight");
 
-    // Attention: try Q+K+V fused, then Q+K partial, then separate
-    ly->qkv = gf_load_qkv_fused(wctx, gf, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight",
-                                prefix + ".self_attn.v_proj.weight");
+    // Attention: try Q+K+V fused, then Q+K partial, then separate.
+    // g_qwen3_load_no_fuse keeps every projection separate for adapter slots.
+    ly->qkv = g_qwen3_load_no_fuse ?
+                  nullptr :
+                  gf_load_qkv_fused(wctx, gf, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight",
+                                    prefix + ".self_attn.v_proj.weight");
     if (!ly->qkv) {
-        ly->qk = gf_load_pair_fused(wctx, gf, prefix + ".self_attn.q_proj.weight", prefix + ".self_attn.k_proj.weight");
+        ly->qk = g_qwen3_load_no_fuse ? nullptr :
+                                        gf_load_pair_fused(wctx, gf, prefix + ".self_attn.q_proj.weight",
+                                                           prefix + ".self_attn.k_proj.weight");
         if (ly->qk) {
             ly->v_proj = gf_load_tensor(wctx, gf, prefix + ".self_attn.v_proj.weight");
             if (layer_idx == 0) {
@@ -299,7 +329,9 @@ static void qwen3_load_layer(WeightCtx *         wctx,
     ly->k_norm = gf_load_tensor_f32(wctx, gf, prefix + ".self_attn.k_norm.weight");
 
     // MLP: try gate+up fused, then separate
-    ly->gate_up = gf_load_pair_fused(wctx, gf, prefix + ".mlp.gate_proj.weight", prefix + ".mlp.up_proj.weight");
+    ly->gate_up = g_qwen3_load_no_fuse ?
+                      nullptr :
+                      gf_load_pair_fused(wctx, gf, prefix + ".mlp.gate_proj.weight", prefix + ".mlp.up_proj.weight");
     if (ly->gate_up) {
         if (layer_idx == 0) {
             fprintf(stderr, "[Qwen3] MLP: gate+up fused\n");

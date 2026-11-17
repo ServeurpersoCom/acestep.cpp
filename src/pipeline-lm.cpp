@@ -573,6 +573,8 @@ void ace_lm_default_params(AceLmParams * p) {
     p->use_fa        = true;
     p->use_batch_cfg = true;
     p->clamp_fp16    = false;
+    p->adapter_path  = NULL;
+    p->adapter_scale = 1.0f;
 }
 
 AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
@@ -590,8 +592,8 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params) {
     ctx->lm_key.path          = params->model_path;
     ctx->lm_key.max_seq       = params->max_seq;
     ctx->lm_key.n_kv_sets     = 2 * params->max_batch;
-    ctx->lm_key.adapter_path  = "";
-    ctx->lm_key.adapter_scale = 1.0f;
+    ctx->lm_key.adapter_path  = params->adapter_path ? params->adapter_path : "";
+    ctx->lm_key.adapter_scale = params->adapter_scale;
 
     fprintf(stderr, "[Ace-LM] Ready: path=%s, max_seq=%d, max_batch=%d, fa=%s, fsm=%s\n", params->model_path,
             params->max_seq, params->max_batch, params->use_fa ? "yes" : "no", params->use_fsm ? "yes" : "no");

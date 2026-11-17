@@ -8,6 +8,12 @@
 #include <string>
 #include <vector>
 
+// One adapter of a DiT adapter stack: a name under --adapters and its scale.
+struct AceAdapterRef {
+    std::string name;
+    float       scale = 1.0f;
+};
+
 struct AceRequest {
     // text content
     std::string caption;  // ""
@@ -93,7 +99,40 @@ struct AceRequest {
     // Solver name resolved by solver_lookup() (see src/solvers).
     // Accepted values: "euler", "sde", "dpm3m", "stork4".
     std::string solver;          // "euler"
-    int         stork_substeps;  // 10, only used by the "stork4" solver
+    int         stork_substeps;  // 10, only used by the "stork2" and "stork4" solvers
+
+    // JKASS Fast momentum blending (see src/solvers/solver-jkass.h).
+    float jkass_beat_stability;      // 0.25
+    float jkass_frequency_damping;   // 0.4
+    float jkass_temporal_smoothing;  // 0.13
+
+    // Timestep spacing, resolved by scheduler_build() (see src/schedulers).
+    // "linear" is the original shift schedule. Also "power:<p>",
+    // "beta:<a>:<b>" and "composite:<A>+<B>:<crossover>:<split>".
+    // custom_timesteps, when set, overrides it.
+    std::string scheduler;  // "linear"
+
+    // Guidance mode for CFG (see src/guidance.h): apg, cfg_pp, dynamic_cfg,
+    // rescaled_cfg, cfg_zero_star, smc_cfg, cfg_mp. Only active when the
+    // resolved guidance_scale is above 1.
+    std::string guidance;             // "apg"
+    float       apg_momentum;         // 0.75
+    float       apg_norm_threshold;   // 2.5, 0 disables the clip
+    int         cfg_zero_init_steps;  // 1
+    float       smc_lambda;           // 0.5
+    float       smc_k;                // 0.1
+    int         cfg_mp_iterations;    // 1
+    // CFG only while t_curr is inside [cfg_interval_start, cfg_interval_end],
+    // the conditional prediction alone outside it.
+    float       cfg_interval_start;  // 0.0
+    float       cfg_interval_end;    // 1.0
+
+    // Retake: blend the initial noise with a second draw,
+    // noise = cos(v*pi/2) * noise(seed) + sin(v*pi/2) * noise(retake_seed).
+    // 0 keeps the take, 1 is the take retake_seed would give. -1 derives the
+    // retake seed from seed.
+    int64_t retake_seed;      // -1
+    float   retake_variance;  // 0.0
 
     // LM mode: "generate" (full: metadata + lyrics + codes),
     // "inspire" (short query -> metadata + lyrics, no codes),
@@ -108,11 +147,26 @@ struct AceRequest {
     // the CLI binaries. An empty value falls to the first matching entry of
     // the registry. adapter and adapter_scale are read by server and
     // ace-synth and resolved against --adapters <dir> when set.
-    std::string synth_model;    // ""
-    std::string lm_model;       // ""
-    std::string adapter;        // ""
-    float       adapter_scale;  // 1.0
-    std::string vae;            // ""
+    std::string                synth_model;    // ""
+    std::string                lm_model;       // ""
+    std::string                adapter;        // ""
+    float                      adapter_scale;  // 1.0
+    // Planner LM adapter (LoRA, LoKr, DoRA), resolved against --adapters
+    // <dir> like adapter, applied at runtime by /lm and ace-lm.
+    std::string                lm_adapter;        // ""
+    float                      lm_adapter_scale;  // 1.0
+    // DiT adapter stack, merged in order. When non-empty it replaces
+    // adapter / adapter_scale. JSON: [{"name": "...", "scale": 1.0}, ...]
+    std::vector<AceAdapterRef> adapters;
+    // Per group multipliers on every DiT adapter delta, all 1.0 by default.
+    // JSON: {"self_attn", "cross_attn", "mlp", "cond_embed", "time_embed", "proj_in"}
+    float                      adapter_group_self_attn;
+    float                      adapter_group_cross_attn;
+    float                      adapter_group_mlp;
+    float                      adapter_group_cond_embed;
+    float                      adapter_group_time_embed;
+    float                      adapter_group_proj_in;
+    std::string                vae;  // ""
 
     // audio output: peak clip via percentile normalization.
     // 0 = peak normalization (100.0000th percentile, no clipping).

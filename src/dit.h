@@ -419,14 +419,19 @@ static bool dit_ggml_load(DiTGGML *    m,
     m->wctx.pending.push_back({ m->scalar_one, &one_val, sizeof(float), 0 });
 
     // Merge adapter deltas into projection weights (before GPU upload and QKV fusion)
-    if (adapter_path) {
-        Timer adapter_timer;
-        if (!adapter_merge(&m->wctx, gf, adapter_path, adapter_scale, m->backend)) {
-            fprintf(stderr, "[Adapter] FATAL: no tensors merged (model mismatch)\n");
-            gf_close(&gf);
-            return false;
+    // adapter_path is one adapter or an encoded stack (adapter-stack.h),
+    // merged in order.
+    if (adapter_path && adapter_path[0]) {
+        Timer        adapter_timer;
+        AdapterStack stack = adapter_stack_decode(adapter_path, adapter_scale);
+        for (const AdapterStackItem & it : stack.items) {
+            if (!adapter_merge(&m->wctx, gf, it.path.c_str(), it.scale, m->backend, stack.groups)) {
+                fprintf(stderr, "[Adapter] FATAL: no tensors merged from %s (model mismatch)\n", it.path.c_str());
+                gf_close(&gf);
+                return false;
+            }
         }
-        fprintf(stderr, "[Adapter] Merge time: %.1f ms\n", adapter_timer.ms());
+        fprintf(stderr, "[Adapter] Merged %d adapter(s) in %.1f ms\n", (int) stack.items.size(), adapter_timer.ms());
     }
 
     // Allocate backend buffer and copy weights

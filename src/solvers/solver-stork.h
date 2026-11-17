@@ -1,13 +1,15 @@
 #pragma once
-// STORK4 solver for ACE Step flow matching, 1 NFE per step.
+// STORK solvers for ACE Step flow matching, 1 NFE per step.
 //
 // STORK = Stabilized Taylor Orthogonal Runge Kutta.
 // Algorithm: Tan et al, 2025, arXiv:2505.24210.
 // C++ port: scragnog (https://github.com/scragnog/HOT-Step-CPP).
 //
-// Method: 4th order ROCK4 Chebyshev sub stepping. Velocity derivatives are
-// approximated from history via finite differences, then cheap arithmetic
-// sub steps absorb stiffness without extra model evaluations.
+// STORK2: 2nd order Runge Kutta Gegenbauer (RKG2) sub stepping.
+// STORK4: 4th order ROCK4 Chebyshev sub stepping.
+// Velocity derivatives are approximated from history via finite
+// differences, then cheap arithmetic sub steps absorb stiffness without
+// extra model evaluations.
 //
 // Adaptive: if a sub stepping attempt produces NaN or Inf, the sub step
 // count is halved. Falls back to plain Euler as a last resort.
@@ -135,6 +137,132 @@ static void _stork_update_history(SolverState & state, const float * vt, int n, 
     if ((int) state.velocity_history.size() > 3) {
         state.velocity_history.erase(state.velocity_history.begin());
     }
+}
+
+// RKG2 recurrence coefficient b_j
+static double _rkg2_b_coeff(int j) {
+    if (j <= 0) {
+        return 1.0;
+    }
+    if (j == 1) {
+        return 1.0 / 3.0;
+    }
+    return 4.0 * (j - 1) * (j + 4) / (3.0 * j * (j + 1) * (j + 2) * (j + 3));
+}
+
+// Run the RKG2 sub-stepping loop. Returns true if result is finite.
+static bool _rkg2_substep(float *       xt_out,
+                          const float * xt,
+                          const float * vt,
+                          int           s,
+                          float         t_curr,
+                          float         t_prev,
+                          int           deriv_order,
+                          const float * dv,
+                          const float * d2v,
+                          int           n) {
+    float dt = t_curr - t_prev;
+
+    // Y_j_2, Y_j_1, Y_j - working arrays
+    std::vector<float> Y_j_2(xt, xt + n);
+    std::vector<float> Y_j_1(xt, xt + n);
+    std::vector<float> Y_j(xt, xt + n);
+    std::vector<float> vel_approx(n);
+
+    float s2ps = (float) (s * s + s - 2);
+
+    for (int j = 1; j <= s; j++) {
+        if (j == 1) {
+            float mu_tilde = 6.0f / (float) ((s + 4) * (s - 1));
+            for (int i = 0; i < n; i++) {
+                Y_j[i] = Y_j_1[i] - dt * mu_tilde * vt[i];
+            }
+        } else {
+            float fraction;
+            if (j == 2) {
+                fraction = 4.0f / (3.0f * s2ps);
+            } else {
+                fraction = (float) ((j - 1) * (j - 1) + (j - 1) - 2) / s2ps;
+            }
+
+            double bj   = _rkg2_b_coeff(j);
+            double bj_1 = _rkg2_b_coeff(j - 1);
+            double bj_2 = _rkg2_b_coeff(j - 2);
+
+            float mu          = (float) ((2 * j + 1) * bj / (j * bj_1));
+            float nu          = (float) (-(j + 1) * bj / (j * bj_2));
+            float mu_tilde_j  = mu * 6.0f / (float) ((s + 4) * (s - 1));
+            float gamma_tilde = -mu_tilde_j * (float) (1.0 - j * (j + 1) * bj_1 / 2.0);
+
+            float diff_val = -fraction * dt;
+            _stork_taylor_approx(vel_approx.data(), deriv_order, diff_val, vt, dv, d2v, n);
+
+            for (int i = 0; i < n; i++) {
+                Y_j[i] = mu * Y_j_1[i] + nu * Y_j_2[i] + (1.0f - mu - nu) * xt[i] - dt * mu_tilde_j * vel_approx[i] -
+                         dt * gamma_tilde * vt[i];
+            }
+        }
+
+        // Shift: Y_j_2 = Y_j_1, Y_j_1 = Y_j
+        memcpy(Y_j_2.data(), Y_j_1.data(), n * sizeof(float));
+        if (j >= 1) {
+            memcpy(Y_j_1.data(), Y_j.data(), n * sizeof(float));
+        }
+    }
+
+    memcpy(xt_out, Y_j.data(), n * sizeof(float));
+    return !_stork_has_nan_inf(xt_out, n);
+}
+
+static void solver_stork2_step(float *       xt,
+                               const float * vt,
+                               float         t_curr,
+                               float         t_prev,
+                               int           n,
+                               SolverState & state,
+                               SolverModelFn /*model_fn*/,
+                               float * /*vt_buf*/) {
+    float dt = t_curr - t_prev;
+
+    // Bootstrap: step 0 uses plain Euler
+    if (state.step_index == 0) {
+        for (int i = 0; i < n; i++) {
+            xt[i] -= vt[i] * dt;
+        }
+        _stork_update_history(state, vt, n, dt);
+        state.step_index = 1;
+        return;
+    }
+
+    // Compute velocity derivatives from history
+    std::vector<float> dv(n), d2v(n);
+    int                deriv_order = _stork_compute_derivatives(vt, n, state, dv.data(), d2v.data());
+
+    // Adaptive sub-stepping: try s, halve on NaN until s=2
+    int                s = (std::max)(state.stork_substeps, 2);
+    std::vector<float> xt_next(n);
+    bool               success = false;
+
+    while (s >= 2) {
+        if (_rkg2_substep(xt_next.data(), xt, vt, s, t_curr, t_prev, deriv_order, dv.data(), d2v.data(), n)) {
+            success = true;
+            break;
+        }
+        s /= 2;
+    }
+
+    if (success) {
+        memcpy(xt, xt_next.data(), n * sizeof(float));
+    } else {
+        // Euler fallback
+        for (int i = 0; i < n; i++) {
+            xt[i] -= vt[i] * dt;
+        }
+        fprintf(stderr, "[STORK2] step %d t=%.4f: all sub-steps NaN -> Euler fallback\n", state.step_index, t_curr);
+    }
+
+    _stork_update_history(state, vt, n, dt);
+    state.step_index++;
 }
 
 // Map a requested sub step count to the closest precomputed ROCK4 degree.

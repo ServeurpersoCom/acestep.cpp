@@ -32,6 +32,7 @@ static void usage(const char * prog) {
             "Optional:\n"
             "  --device <name>        Compute device: CUDA0, Vulkan0, MTL0, CPU...\n"
             "                         (default: best available)\n"
+            "  --adapters <dir>       Directory of adapter files (enables JSON lm_adapter field)\n"
             "\n"
             "Debug:\n"
             "  --max-seq <N>          KV cache size (default: %d)\n"
@@ -49,6 +50,7 @@ int main(int argc, char ** argv) {
     ace_lm_default_params(&params);
 
     const char * models_dir   = NULL;
+    const char * adapters_dir = NULL;
     const char * request_path = NULL;
     const char * dump_logits  = NULL;
     const char * dump_tokens  = NULL;
@@ -62,6 +64,8 @@ int main(int argc, char ** argv) {
     for (int i = 1; i < argc; i++) {
         if (!strcmp(argv[i], "--models") && i + 1 < argc) {
             models_dir = argv[++i];
+        } else if (!strcmp(argv[i], "--adapters") && i + 1 < argc) {
+            adapters_dir = argv[++i];
         } else if (!strcmp(argv[i], "--request") && i + 1 < argc) {
             request_path = argv[++i];
         } else if (!strcmp(argv[i], "--device") && i + 1 < argc) {
@@ -124,6 +128,19 @@ int main(int argc, char ** argv) {
         return 1;
     }
     params.model_path = lm_entry->path.c_str();
+    if (!req.lm_adapter.empty()) {
+        if (adapters_dir) {
+            registry_scan_adapters(&registry, adapters_dir);
+        }
+        const AdapterEntry * adapter = registry_find_adapter(registry, req.lm_adapter.c_str());
+        if (!adapter) {
+            fprintf(stderr, "[Ace-LM] FATAL: lm_adapter '%s' not found (use --adapters <dir>)\n",
+                    req.lm_adapter.c_str());
+            return 1;
+        }
+        params.adapter_path  = adapter->path.c_str();
+        params.adapter_scale = req.lm_adapter_scale;
+    }
 
     // lm_batch_size from JSON (clamped to 1..9)
     int lm_batch_size = req.lm_batch_size;

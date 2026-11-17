@@ -19,6 +19,8 @@ struct AceLmParams {
     bool         use_fa;         // flash attention
     bool         use_batch_cfg;  // batch cond+uncond in one forward
     bool         clamp_fp16;     // clamp hidden states to FP16 range
+    const char * adapter_path;   // runtime LM adapter, NULL for none
+    float        adapter_scale;  // adapter strength
 };
 
 void ace_lm_default_params(AceLmParams * p);
