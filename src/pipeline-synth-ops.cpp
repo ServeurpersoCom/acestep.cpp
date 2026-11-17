@@ -123,7 +123,8 @@ int ops_encode_src(const AceSynth * ctx,
                    int              src_len,
                    const float *    src_latents,
                    int              src_T_latent,
-                   SynthState &     s) {
+                   SynthState &     s,
+                   AceProgress      progress) {
     // Cover mode: ingest source either as pre-encoded latents (zero VAE work)
     // or by acquiring the VAE encoder and running it on src_audio. When both
     // are provided latents win: they were either produced by a previous run
@@ -153,9 +154,16 @@ int ops_encode_src(const AceSynth * ctx,
         s.cover_latents.resize(max_T_lat * 64);
 
         s.T_cover = vae_enc_encode_tiled(vae_enc, src_audio, T_audio, s.cover_latents.data(), max_T_lat,
-                                         ctx->params.vae_chunk, ctx->params.vae_overlap);
+                                         ctx->params.vae_chunk, ctx->params.vae_overlap, progress);
         if (s.T_cover < 0) {
-            fprintf(stderr, "[Encode-Src] FATAL: encode failed\n");
+            // -1 is both cancel and failure; both abort here (unlike the timbre
+            // path, which tolerates a failure by falling back to silence), so
+            // this only sharpens the diagnostic.
+            if (ace_cancelled(progress, ACE_STAGE_VAE_ENCODE)) {
+                fprintf(stderr, "[Encode-Src] Cancelled\n");
+            } else {
+                fprintf(stderr, "[Encode-Src] FATAL: encode failed\n");
+            }
             return -1;
         }
         s.cover_latents.resize(s.T_cover * 64);
@@ -342,12 +350,16 @@ int ops_resolve_T(const AceSynth * ctx, SynthState & s) {
     return 0;
 }
 
-void ops_encode_timbre(const AceSynth * ctx,
-                       const float *    ref_audio,
-                       int              ref_len,
-                       const float *    ref_latents,
-                       int              ref_T_latent,
-                       SynthState &     s) {
+// 0 on success (including the deliberate fall-back to silence when a ref_audio
+// encode *fails*), -1 if the run was cancelled during the ref encode -- so the
+// caller aborts rather than silently generating with silence timbre.
+int ops_encode_timbre(const AceSynth * ctx,
+                      const float *    ref_audio,
+                      int              ref_len,
+                      const float *    ref_latents,
+                      int              ref_T_latent,
+                      SynthState &     s,
+                      AceProgress      progress) {
     // Timbre features from ref_audio or ref_latents (independent of src).
     // Two paths converge into s.timbre_feats: pre-encoded latents skip the
     // VAE encoder entirely, raw audio takes the encoder path. Latents win
@@ -358,7 +370,7 @@ void ops_encode_timbre(const AceSynth * ctx,
         s.timbre_feats.assign(ref_latents, ref_latents + (size_t) ref_T_latent * 64);
         fprintf(stderr, "[Encode-Timbre] Latents in: %d frames (%.1fs), VAE encode skipped\n", ref_T_latent,
                 (float) ref_T_latent / 25.0f);
-        return;
+        return 0;
     }
     if (ref_audio && ref_len > 0) {
         s.timer.reset();
@@ -367,15 +379,22 @@ void ops_encode_timbre(const AceSynth * ctx,
             fprintf(stderr, "[Encode-Timbre] WARNING: store_require_vae_enc failed, using silence\n");
             s.S_ref_timbre = 1;
             s.timbre_feats.assign(ctx->meta->silence_full.data(), ctx->meta->silence_full.data() + 64);
-            return;
+            return 0;
         }
         ModelHandle ref_vae_guard(ctx->store, ref_vae);
 
         int                max_T_ref = (ref_len / 1920) + 64;
         std::vector<float> ref_lat_buf(max_T_ref * 64);
         int                T_ref = vae_enc_encode_tiled(ref_vae, ref_audio, ref_len, ref_lat_buf.data(), max_T_ref,
-                                                        ctx->params.vae_chunk, ctx->params.vae_overlap);
+                                                        ctx->params.vae_chunk, ctx->params.vae_overlap, progress);
         if (T_ref < 0) {
+            // vae_enc_encode_tiled returns -1 for both a cancel and a real encode
+            // failure. A cancel must abort; only a genuine failure falls back to
+            // silence (which the whole point of this path -- Cover import -- can
+            // tolerate). Re-poll to tell them apart (cancel is level-triggered).
+            if (ace_cancelled(progress, ACE_STAGE_VAE_ENCODE)) {
+                return -1;
+            }
             fprintf(stderr, "[Encode-Timbre] WARNING: ref_audio encode failed, using silence\n");
             s.S_ref_timbre = 1;
             s.timbre_feats.assign(ctx->meta->silence_full.data(), ctx->meta->silence_full.data() + 64);
@@ -389,6 +408,7 @@ void ops_encode_timbre(const AceSynth * ctx,
         s.S_ref_timbre = 1;
         s.timbre_feats.assign(ctx->meta->silence_full.data(), ctx->meta->silence_full.data() + 64);
     }
+    return 0;
 }
 
 // Per-batch CPU-resident forward from the text encoder.
@@ -419,8 +439,8 @@ static void build_prompt_strings(const AceRequest &  rb,
     char metas_b[512];
     snprintf(metas_b, sizeof(metas_b), "- bpm: %s\n- timesignature: %s\n- keyscale: %s\n- duration: %d seconds\n",
              bpm_b, timesig_b, keyscale_b, (int) duration);
-    text_out = std::string("# Instruction\n") + instruction + "\n\n" + "# Caption\n" + rb.caption + "\n\n" +
-               "# Metas\n" + metas_b + "<|endoftext|>\n";
+    text_out  = std::string("# Instruction\n") + instruction + "\n\n" + "# Caption\n" + rb.caption + "\n\n" +
+                "# Metas\n" + metas_b + "<|endoftext|>\n";
     lyric_out = std::string("# Languages\n") + language_b + "\n\n# Lyric\n" + rb.lyrics + "<|endoftext|>";
 }
 
@@ -825,7 +845,7 @@ void ops_init_noise(const AceSynth * ctx, const AceRequest * reqs, int batch_n, 
             s.num_steps, batch_n, s.use_source_context ? " (cover)" : "");
 }
 
-int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*cancel)(void *), void * cancel_data) {
+int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, AceProgress progress) {
     DiTGGML * dit = store_require_dit(ctx->store, ctx->dit_key);
     if (!dit) {
         fprintf(stderr, "[DiT-Generate] FATAL: store_require_dit failed\n");
@@ -840,7 +860,7 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     int dit_rc = dit_ggml_generate(
         dit, s.noise.data(), s.context.data(), s.enc_hidden.data(), s.enc_S, s.T, batch_n, s.num_steps,
         s.schedule.data(), s.output.data(), s.guidance_scale, &s.dbg,
-        s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, cancel, cancel_data,
+        s.context_silence.empty() ? nullptr : s.context_silence.data(), s.cover_steps, progress,
         s.per_enc_S.data(), s.enc_hidden_nc.empty() ? nullptr : s.enc_hidden_nc.data(),
         s.per_enc_S_nc_final.empty() ? nullptr : s.per_enc_S_nc_final.data(), s.seeds.data(), ctx->params.use_batch_cfg,
         s.rr.dcw_scaler, s.rr.dcw_high_scaler, s.rr.dcw_mode.c_str(), s.rr.solver.c_str(), s.rr.stork_substeps);
@@ -864,12 +884,7 @@ int ops_dit_generate(const AceSynth * ctx, int batch_n, SynthState & s, bool (*c
     return 0;
 }
 
-int ops_vae_decode(const AceSynth * ctx,
-                   int              batch_n,
-                   AceAudio *       out,
-                   SynthState &     s,
-                   bool (*cancel)(void *),
-                   void * cancel_data) {
+int ops_vae_decode(const AceSynth * ctx, int batch_n, AceAudio * out, SynthState & s, AceProgress progress) {
     VAEGGML * vae = store_require_vae_dec(ctx->store, ctx->vae_dec_key);
     if (!vae) {
         fprintf(stderr, "[VAE-Decode] FATAL: store_require_vae_dec failed\n");
@@ -904,9 +919,9 @@ int ops_vae_decode(const AceSynth * ctx,
 
         s.timer.reset();
         int T_audio = vae_ggml_decode_tiled(vae, dit_out, T_latent, audio.data(), T_audio_max, ctx->params.vae_chunk,
-                                            ctx->params.vae_overlap, cancel, cancel_data);
+                                            ctx->params.vae_overlap, progress);
         if (T_audio < 0) {
-            if (cancel && cancel(cancel_data)) {
+            if (ace_cancelled(progress, ACE_STAGE_VAE_DECODE)) {
                 fprintf(stderr, "[VAE-Decode Batch%d] Cancelled\n", b);
                 return -1;
             }

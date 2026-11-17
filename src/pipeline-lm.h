@@ -5,6 +5,7 @@
 // pipeline acquires the Qwen3 LM, BPE tokenizer and FSM template from the
 // store and releases the LM through RAII before returning.
 
+#include "progress.h"
 #include "request.h"
 #include "task-types.h"
 
@@ -37,7 +38,8 @@ AceLm * ace_lm_load(ModelStore * store, const AceLmParams * params);
 // out[n_req] allocated by caller, filled with enriched copies of each request.
 // mode: LM_MODE_GENERATE (full), LM_MODE_INSPIRE (no codes), LM_MODE_FORMAT (no codes).
 // dump_logits/dump_tokens: debug output paths (NULL to disable).
-// cancel/cancel_data: abort callback, polled between tokens. NULL = never cancel.
+// progress: abort + progress callback, polled between tokens (ACE_STAGE_LM).
+// Default {} = never cancel, no progress.
 // Returns 0 on success, -1 on error or cancellation.
 int ace_lm_generate(AceLm *            ctx,
                     const AceRequest * reqs,
@@ -45,9 +47,8 @@ int ace_lm_generate(AceLm *            ctx,
                     AceRequest *       out,
                     const char *       dump_logits,
                     const char *       dump_tokens,
-                    bool (*cancel)(void *) = nullptr,
-                    void * cancel_data     = nullptr,
-                    int    mode            = LM_MODE_GENERATE);
+                    AceProgress        progress = {},
+                    int                mode     = LM_MODE_GENERATE);
 
 void ace_lm_free(AceLm * ctx);
 

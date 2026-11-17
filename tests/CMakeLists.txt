@@ -1,3 +1,7 @@
+# test-progress: the AceProgress report/cancel contract (#18). Header-only.
+add_executable(test-progress test-progress.cpp)
+target_include_directories(test-progress PRIVATE ${CMAKE_SOURCE_DIR}/src)
+
 # test-philox: Philox RNG reference dumper.
 add_executable(test-philox test-philox.cpp)
 target_include_directories(test-philox PRIVATE ${CMAKE_SOURCE_DIR}/src)
