@@ -756,10 +756,9 @@ int ace_lm_generate(AceLm *            ctx,
             // generate mode uses the inspire instruction when lyrics are empty.
             if (mode == LM_MODE_INSPIRE || (mode == LM_MODE_GENERATE && need_lyrics)) {
                 std::string sys      = std::string("# Instruction\n") + LM_INSPIRE_INSTRUCTION + "\n";
-                std::string user_msg = ace.caption;
-                if (ace.lyrics == "[Instrumental]") {
-                    user_msg += "\n\ninstrumental: true";
-                }
+                // the reference sends the flag either way: "{query}\n\ninstrumental: {true|false}"
+                std::string user_msg = ace.caption + "\n\ninstrumental: " +
+                                       (ace.lyrics == "[Instrumental]" ? "true" : "false");
                 prompts[i] = build_custom_prompt(*bpe, sys.c_str(), user_msg.c_str());
             } else if (mode == LM_MODE_FORMAT) {
                 std::string sys      = std::string("# Instruction\n") + LM_FORMAT_INSTRUCTION + "\n";
