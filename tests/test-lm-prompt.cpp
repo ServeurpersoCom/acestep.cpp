@@ -180,6 +180,10 @@ int main(int argc, char ** argv) {
     dump_repr("COND", decode_ids(*bpe, id_cond));
     dump_repr("UNCOND_EMPTY", decode_ids(*bpe, id_uncond_e));
     dump_repr("UNCOND_NEG", decode_ids(*bpe, id_uncond_n));
+
+    std::string inspire_sys = std::string("# Instruction\n") + LM_INSPIRE_INSTRUCTION + "\n";
+    auto        id_inspire  = build_custom_prompt(*bpe, inspire_sys.c_str(), "a cat who loves the rain\n\ninstrumental: false");
+    dump_repr("INSPIRE", decode_ids(*bpe, id_inspire));
     store_free(s);
     fprintf(stderr, "[Test] PASS\n");
     return 0;

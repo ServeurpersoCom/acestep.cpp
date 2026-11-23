@@ -333,7 +333,8 @@ static std::vector<int> build_custom_prompt(BPETokenizer & bpe, const char * sys
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);
-    append("user\n" + std::string(user) + "\n");
+    // inspire and format user content has no trailing newline in the reference prompts
+    append("user\n" + std::string(user));
     ids.push_back(TOKEN_IM_END);
     append("\n");
     ids.push_back(TOKEN_IM_START);
